@@ -438,6 +438,8 @@ def check_loop(
     report: Report, buses: dict[ArmName, "FeetechMotorsBus"], cams: dict[str, "OpenCVCamera"], fps: int
 ) -> None:
     """Time the reads one recording step makes: follower joints, every camera, leader joints."""
+    from lerobot.utils.robot_utils import precise_sleep
+
     period = 1 / fps
     steps, motor_s, camera_s = 0, 0.0, 0.0
     start = time.perf_counter()
@@ -454,7 +456,7 @@ def check_loop(
             steps += 1
             motor_s += (t1 - t0) + (t3 - t2)
             camera_s += t2 - t1
-            time.sleep(max(0.0, period - (time.perf_counter() - t0)))
+            precise_sleep(max(0.0, period - (time.perf_counter() - t0)))  # as the record loop does
     except Exception as e:
         report.fail("loop", f"reading failed after {steps} steps: {e}",
                     fix="check the cables and run the check again; if it repeats, recording would fail the same way")
@@ -569,6 +571,8 @@ def live_test(report: Report, s: Settings, seconds: float = 10.0) -> None:
     from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
     from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
+    from lerobot.utils.robot_utils import precise_sleep
+
     from so_101.validate import tracking
 
     print(
@@ -607,7 +611,7 @@ def live_test(report: Report, s: Settings, seconds: float = 10.0) -> None:
             measured.append([observation[n] for n in names])
             remaining = seconds - (now - start)
             print(f"\r  {remaining:4.1f} s left ", end="", flush=True)
-            time.sleep(max(0.0, 1 / fps - (time.perf_counter() - now)))
+            precise_sleep(max(0.0, 1 / fps - (time.perf_counter() - now)))
         rate = len(commanded) / (time.perf_counter() - start)
         print()
     except KeyboardInterrupt:
