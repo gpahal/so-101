@@ -66,6 +66,10 @@ usb_id = "32e6:9005"
 # set auto-exposure-mode = 8 (auto) and delete exposure-time-abs.
 auto-exposure-mode = 1
 exposure-time-abs = 285
+# A longer exposure brightens the picture but slows the camera (40 ms: 14 fps). Gamma and brightness
+# don't: with them it measured 127/255 on a black mat instead of 50, still at 20 fps.
+gamma = 150
+brightness = 20
 
 # Where `so101 record` saves demos: <dir>/<task>/sessions/, plus edits and the training dataset.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.
