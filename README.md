@@ -33,6 +33,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 check [task] [--live] [--save-reference]` | Check arms, cameras and setup. Read-only unless `--live`. See [Checking the setup](#checking-the-setup) |
 | `uv run so101 info` | Show config, resolved ports, camera indices and calibration status |
 | `uv run so101 find-port follower` | Detect a board by unplugging it, and save its port and serial number to `so101.toml` |
+| `uv run so101 motors [follower\|leader] [--watch S]` | Show each motor's temperature, voltage, load, position within its calibrated range, and alarms. Read-only; `--watch 2` refreshes every 2 seconds |
 | `uv run so101 scan [follower\|leader]` | Ping motors at every baud rate and list the ids that answer. Read-only |
 | `uv run so101 setup-motors follower` | Set motor ids and baud rates, one motor at a time. Writes to motor EEPROM; only needed once per arm |
 | `uv run so101 calibrate follower` | Calibrate an arm |
@@ -205,7 +206,7 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
 1. **Set up the scene and keep it fixed.** Same camera positions, lighting and table for recording and running; the policy only learns this scene. Then `uv run so101 check --save-reference` to save each camera's view.
 2. **Rehearse:** `uv run so101 record --dry-run`. Fix anything it reports before recording demos you want to keep.
 3. **Record:** `uv run so101 record`. Drive the follower with the leader for each demo. A Rerun window shows both cameras.
-   - Each demo lasts `episode_time_s` (25 s); Right arrow or `n` finishes it early, Left arrow or `r` redoes it, Esc or `q` stops the session. Esc mid-demo keeps the demo so far, so delete it in `review` if it's incomplete.
+   - Each demo lasts `episode_time_s` (30 s); Right arrow or `n` finishes it early, Left arrow or `r` redoes it, Esc or `q` stops the session. Esc mid-demo keeps the demo so far, so delete it in `review` if it's incomplete.
    - Between demos you get `reset_time_s` (15 s) to put the cylinder back.
    - Record about 50 demos: 5 cylinder positions x 10 demos each, with the bowl in one spot. Start every demo from the same rest pose and do the task the same way each time; smooth, deliberate demos train better than fast ones.
    - Every run of `record` is a new session. Stopping is safe: running it again records until there are `episodes` kept demos. `--episodes 10` adds 10 more; `--note "lamp on"` saves a note with the session.
