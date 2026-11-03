@@ -3,6 +3,8 @@ name = "so-101"
 version = "0.1.0"
 description = "SO-101 leader and follower arms with LeRobot"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Garvit Pahal", email = "g10pahal@gmail.com" }
 ]

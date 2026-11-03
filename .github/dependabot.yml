@@ -1,0 +1,12 @@
+# Keep the SHA-pinned actions current; Dependabot rewrites each SHA and its version comment
+# together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # A release waits a week before it is proposed, so a compromised one is usually caught and
+    # pulled first.
+    cooldown:
+      default-days: 7

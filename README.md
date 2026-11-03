@@ -249,3 +249,7 @@ data/<task>/
 - **`objc[...]: Class AVFFrameReceiver is implemented in both ...`:** OpenCV and PyAV each bundle FFmpeg. The warning is harmless.
 - **A checkpoint "sets config fields this LeRobot version doesn't support":** it was saved by a newer LeRobot. `run` drops unset fields itself; set ones need a LeRobot upgrade.
 - **`Could not load this library: ...libtorchcodec_core...`** tracebacks when LeRobot starts: torchcodec can't find a system FFmpeg, so LeRobot falls back to PyAV for video. Harmless here; `brew install ffmpeg` silences it.
+
+## License
+
+[MIT](LICENSE).
