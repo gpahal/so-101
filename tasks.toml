@@ -102,7 +102,7 @@ setup = [
 [cylinder-bowl]
 prompt = "Pick up the cylinder and put it in the bowl"
 episodes = 50
-episode_time_s = 25
+episode_time_s = 30
 reset_time_s = 15
 props = [
   "Cylindrical block, standing upright",

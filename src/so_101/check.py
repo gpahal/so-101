@@ -115,6 +115,49 @@ def close_bus(bus: "FeetechMotorsBus") -> None:
     bus.port_handler.closePort()  # not bus.disconnect(): that writes to the motors to disable torque
 
 
+@dataclass(frozen=True)
+class MotorReading:
+    name: str
+    temperature_c: int
+    voltage_v: float
+    load_pct: float  # of maximum torque
+    position: int  # raw encoder steps, 0-4095
+    range_pct: float | None  # where `position` is within the calibrated range; None if uncalibrated
+    alarms: list[str]
+
+
+def read_motors(arm: Arm) -> list[MotorReading]:
+    """Read every motor of an arm without writing anything. Raises if a motor doesn't answer."""
+    from so_101.scan import ping
+
+    bus = _open_bus(arm, arm.resolve_port())
+    try:
+        replies = {name: ping(bus, motor.id) for name, motor in bus.motors.items()}
+        if missing := [f"{name} (id {bus.motors[name].id})" for name, reply in replies.items() if reply is None]:
+            raise RuntimeError(f"no answer from {', '.join(missing)}: is the arm's power on?")
+        temps = bus.sync_read("Present_Temperature", normalize=False, num_retry=2)
+        volts = bus.sync_read("Present_Voltage", normalize=False, num_retry=2)
+        loads = bus.sync_read("Present_Load", normalize=False, num_retry=2)
+        positions = bus.sync_read("Present_Position", normalize=False, num_retry=2)
+    finally:
+        close_bus(bus)
+    readings = []
+    for name in bus.motors:
+        cal = bus.calibration.get(name)
+        span = cal.range_max - cal.range_min if cal else 0
+        readings.append(MotorReading(
+            name=name,
+            temperature_c=int(temps[name]),
+            voltage_v=volts[name] / 10,
+            # Bit 10 is the direction, which LeRobot decodes as the sign; the rest is tenths of a percent
+            load_pct=abs(int(loads[name])) / 10,
+            position=int(positions[name]),
+            range_pct=100 * (positions[name] - cal.range_min) / span if span else None,
+            alarms=replies[name].errors(),
+        ))
+    return readings
+
+
 def check_arm(report: Report, arm: Arm) -> "FeetechMotorsBus | None":
     """Check one arm. Returns its open bus if the motors answered, for the loop timing test."""
     from so_101.scan import ping

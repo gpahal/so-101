@@ -121,6 +121,45 @@ def cmd_scan(s: settings.Settings, ns: argparse.Namespace, __: list[str]) -> Non
                 print("  Motors reporting an error are in a protection alarm. Power-cycle the arm to clear it.")
 
 
+def print_motors(arm: Arm) -> None:
+    from so_101.check import TEMP_FAIL_C, TEMP_WARN_C, read_motors
+
+    try:
+        port = arm.resolve_port()
+        readings = read_motors(arm)
+    except PortNotFoundError:
+        print(f"{arm.name}: board not found; plug in its USB cable\n")
+        return
+    except Exception as e:
+        print(f"{arm.name} ({port}): {e}\n")
+        return
+    print(f"{arm.name} ({port})")
+    print(f"  {'motor':14} {'temp':>6}  {'volts':>6}  {'load':>5}  {'position':>8}  {'in range':>8}  alarm")
+    for r in readings:
+        flag = " HOT" if r.temperature_c >= TEMP_FAIL_C else " warm" if r.temperature_c >= TEMP_WARN_C else ""
+        in_range = "-" if r.range_pct is None else f"{r.range_pct:.0f}%"
+        alarm = ", ".join(r.alarms) or "-"
+        print(f"  {r.name:14} {r.temperature_c:>3} °C  {r.voltage_v:>4.1f} V  {r.load_pct:>4.0f}%  {r.position:>8}  "
+              f"{in_range:>8}  {alarm}{flag}")
+    print()
+
+
+def cmd_motors(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
+    arms = [ns.arm] if ns.arm else ARMS
+    try:
+        while True:
+            if ns.watch:
+                print("\033[H\033[J", end="")  # clear the screen
+                print(time.strftime("%H:%M:%S"), f"every {ns.watch:g} s, Ctrl+C to stop\n")
+            for name in arms:
+                print_motors(s.arm(name))
+            if not ns.watch:
+                return
+            time.sleep(ns.watch)
+    except KeyboardInterrupt:
+        print()
+
+
 def cmd_setup_motors(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
     arm = s.arm(ns.arm)
     p = arm.prefix
@@ -444,6 +483,11 @@ def main() -> None:
     p = sub.add_parser("scan", help="ping the motors on each bus at every baud rate (read-only)")
     p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
     p.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("motors", help="show each motor's temperature, voltage, load, position and alarms (read-only)")
+    p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
+    p.add_argument("--watch", type=float, metavar="SECONDS", help="refresh every SECONDS until Ctrl+C")
+    p.set_defaults(fn=cmd_motors)
 
     p = sub.add_parser("setup-motors", help="set motor ids and baud rates, one motor at a time (writes EEPROM)")
     p.add_argument("arm", choices=ARMS)
