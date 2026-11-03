@@ -18,6 +18,9 @@
 #
 # Your own tasks leave out `policy` and `dataset`; see "Your own tasks" at the end.
 
+# The task every `so101` command uses when you don't name one.
+default = "cylinder-bowl"
+
 [cube-dish]
 policy = "taiki-ishii/act_so101-pick-cube-01"
 dataset = "taiki-ishii/so101-pick-cube-01"
@@ -83,11 +86,12 @@ setup = [
 # No `policy` or `dataset`: demos are saved under data/<task>/ (see [data] in so101.toml), uploaded
 # for training to <your Hub user>/so101_<task>, and the trained policy goes to
 # <your Hub user>/act_so101_<task> (all private).
-#   uv run so101 record <task> --dry-run   rehearse and check everything first
-#   uv run so101 record <task>    teleoperate demos, as a new session, until there are `episodes`
-#   uv run so101 review <task>    trim idle time and delete bad demos
-#   uv run so101 train <task>     build the training dataset and train ACT, on Hugging Face Jobs by default
-#   uv run so101 run <task>       run the trained policy
+#   uv run so101 record --dry-run   rehearse and check everything first
+#   uv run so101 record    teleoperate demos, as a new session, until there are `episodes`
+#   uv run so101 review    trim idle time and delete bad demos
+#   uv run so101 train     build the training dataset and train ACT, on Hugging Face Jobs by default
+#   uv run so101 run       run the trained policy
+# Each command works on `default` above; add a task name to use another, e.g. `so101 record <task>`.
 # Fields:
 #   episodes        Demos to keep. ~50 for one pick-and-place, spread over 5+ start positions.
 #   episode_time_s  Seconds per demo; press Right arrow or n to finish one early.
@@ -95,18 +99,19 @@ setup = [
 #   cameras         Your cameras to record, named as in so101.toml (default: front and wrist).
 # Copy this section and change the name, prompt and props to add another task.
 
-[my-cube-dish]
-prompt = "Pick up the red cube and put it on the silver dish"
+[cylinder-bowl]
+prompt = "Pick up the cylinder and put it in the bowl"
 episodes = 50
 episode_time_s = 20
 reset_time_s = 10
 props = [
-  "Red cube, about 2.5 cm",
-  "Round shallow silver dish, about 10 cm across",
-  "Matte light beige or cream mat under the workspace",
+  "Cylindrical block, standing upright",
+  "Bowl",
+  "Plain mat under the workspace",
 ]
 setup = [
-  "Front camera overhead, fixed: don't move it between recording and running",
-  "Dish stays in one spot; move the cube to a new spot every 10 demos (5 spots for 50)",
+  "Front camera above the mat, fixed: don't move it between recording and running",
+  "Bowl stays in one spot; move the cylinder to a new spot every 10 demos (5 spots for 50)",
   "Start every demo from the same folded rest pose, and do the task the same way each time",
+  "The policy learns the props' colours: if you change one, record new demos with it",
 ]

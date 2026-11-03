@@ -136,7 +136,7 @@ def cmd_check(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> Non
         sys.exit("--live asks you to move the arm, so it can't be combined with --json.")
     arms, cameras, loop_fps = ARMS, list(s.cameras.values()), max((c.fps for c in s.cameras.values()), default=30)
     task = None
-    if ns.task:
+    if ns.task or ns.task is None and _has_default():
         task = get_task(ns.task)
         cameras = [s.camera(ours) for ours in task.cameras.values()]
         loop_fps = task.fps
@@ -192,14 +192,26 @@ def cmd_cameras(s: settings.Settings, _: argparse.Namespace, extra: list[str]) -
     lerobot("lerobot-find-cameras", ["opencv", f"--output-dir={out}", *extra])
 
 
-def get_task(name: str) -> tasks.Task:
+def get_task(name: str | None) -> tasks.Task:
+    """The named task, or the default from tasks.toml when no name is given."""
+    if name is None:
+        name = tasks.default_name()
+        print(f"Task: {name} (the default in tasks.toml)", file=sys.stderr)
     catalog = tasks.load()
     if name not in catalog:
         sys.exit(f"Unknown task {name!r}. Tasks: {', '.join(catalog)}. See `uv run so101 tasks`.")
     return catalog[name]
 
 
-def get_own_task(name: str) -> tasks.Task:
+def _has_default() -> bool:
+    try:
+        tasks.default_name()
+    except ConfigError:
+        return False
+    return True
+
+
+def get_own_task(name: str | None) -> tasks.Task:
     task = get_task(name)
     if not task.own:
         sys.exit(f"{task.name} is someone else's pretrained policy. Add your own task to tasks.toml for this.")
@@ -439,7 +451,7 @@ def main() -> None:
     p.set_defaults(fn=cmd_calibrate)
 
     p = sub.add_parser("check", help="check arms, cameras and setup; read-only unless --live")
-    p.add_argument("task", nargs="?", help="also check what this task needs")
+    p.add_argument("task", nargs="?", help="also check what this task needs (default: the default task, if set)")
     p.add_argument("--live", action="store_true", help="then teleoperate for 10 s to check every joint (moves the arm)")
     p.add_argument("--save-reference", action="store_true", help="save each camera's view as its reference image")
     p.add_argument("--json", action="store_true", help="print the results as JSON")
@@ -455,10 +467,10 @@ def main() -> None:
     sub.add_parser("tasks", help="list tasks in tasks.toml, with props and camera setup").set_defaults(fn=cmd_tasks)
 
     p = sub.add_parser("record", help="record demos of one of your tasks by teleoperating, as a new session")
-    p.add_argument("task")
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
     p.add_argument("--episodes", type=int, help="how many to record (default: up to `episodes` in tasks.toml)")
     p.add_argument("--no-display", action="store_true", help="don't open the Rerun camera viewer")
-    p.add_argument("--note", help="a note saved with the session, e.g. 'lamp on, cube at spot 3'")
+    p.add_argument("--note", help="a note saved with the session, e.g. 'lamp on, cylinder at spot 3'")
     p.add_argument("--dry-run", action="store_true", help="rehearse: record 2 throwaway episodes and check them")
     p.add_argument("--replay", action="store_true", help="dry run: replay a rehearsal episode on the follower")
     p.add_argument("--keep", action="store_true", help="dry run: keep the rehearsal dataset")
@@ -466,28 +478,28 @@ def main() -> None:
     p.set_defaults(fn=cmd_record)
 
     p = sub.add_parser("review", help="step through recorded episodes to trim or delete them (writes edits.toml)")
-    p.add_argument("task")
-    p.add_argument("episode", nargs="?", help="a session (YYYYmmdd-HHMMSS) or one episode (SESSION/N)")
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
+    p.add_argument("--episode", help="only a session (YYYYmmdd-HHMMSS) or one episode (SESSION/N)")
     p.add_argument("--all", action="store_true", help="include episodes already reviewed")
     p.add_argument("--no-view", action="store_true", help="don't open episodes in the Rerun viewer")
     p.set_defaults(fn=cmd_review)
 
     p = sub.add_parser("build", help="make the training dataset from all sessions plus edits.toml")
-    p.add_argument("task")
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
     p.add_argument("--force", action="store_true", help="rebuild even if nothing changed")
     p.set_defaults(fn=cmd_build)
 
     p = sub.add_parser("backup", help="upload a task's sessions and edits to a private Hub dataset")
-    p.add_argument("task")
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
     p.set_defaults(fn=cmd_backup)
 
     p = sub.add_parser("train", help="build if needed, then train ACT, on Hugging Face Jobs by default")
-    p.add_argument("task")
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
     p.add_argument("--target", help="HF Jobs flavor, or `local` for this Mac (default: [train] in so101.toml)")
     p.set_defaults(fn=cmd_train)
 
     p = sub.add_parser("run", help="run a task's policy on the follower")
-    p.add_argument("task")
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
     p.add_argument("--duration", type=float, help="seconds; 0 runs until Ctrl+C (default: [run] in so101.toml)")
     p.add_argument("--display", action="store_true", help="stream cameras and joints to a Rerun viewer")
     p.set_defaults(fn=cmd_run)

@@ -39,13 +39,13 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 teleop [--cameras]` | Drive the follower with the leader; `--cameras` shows both camera feeds in a Rerun window |
 | `uv run so101 cameras` | List connected cameras and save a snapshot from each to `outputs/cameras/` |
 | `uv run so101 tasks` | List the tasks in `tasks.toml` with their props, camera setup and demo counts |
-| `uv run so101 record <task> --dry-run` | Rehearse a recording session and check the result, without keeping anything |
-| `uv run so101 record <task> [--episodes N] [--note TEXT]` | Record demos of your own task by teleoperating, as a new session |
-| `uv run so101 review <task>` | Step through recorded demos to trim idle time or delete bad ones |
-| `uv run so101 build <task>` | Make the training dataset from all sessions plus your edits (`train` does this itself) |
-| `uv run so101 train <task> [--target FLAVOR]` | Train ACT on your demos, on Hugging Face Jobs by default |
-| `uv run so101 backup <task>` | Upload a task's sessions and edits to a private Hub dataset |
-| `uv run so101 run <task> [--duration S] [--display]` | Run a task's ACT policy on the follower, on the Mac's GPU |
+| `uv run so101 record [task] --dry-run` | Rehearse a recording session and check the result, without keeping anything |
+| `uv run so101 record [task] [--episodes N] [--note TEXT]` | Record demos of your own task by teleoperating, as a new session |
+| `uv run so101 review [task] [--episode SESSION/N]` | Step through recorded demos to trim idle time or delete bad ones |
+| `uv run so101 build [task]` | Make the training dataset from all sessions plus your edits (`train` does this itself) |
+| `uv run so101 train [task] [--target FLAVOR]` | Train ACT on your demos, on Hugging Face Jobs by default |
+| `uv run so101 backup [task]` | Upload a task's sessions and edits to a private Hub dataset |
+| `uv run so101 run [task] [--duration S] [--display]` | Run a task's ACT policy on the follower, on the Mac's GPU |
 | `uv run so101 env` | Print the settings as shell variables |
 
 Every command prints the full LeRobot command it runs. Extra arguments go straight through to LeRobot, for example `uv run so101 teleop --teleop_time_s=60`.
@@ -128,7 +128,7 @@ Each step talks to the arms over USB, so plug in USB and the power supply for ea
 
 Once the cameras are where you want them and the follower is in its rest pose, save each camera's view with `uv run so101 check --save-reference`. Later checks compare against it to catch a camera that moved or a wrong camera. `--live` adds a 10-second teleoperation test that checks every follower joint follows the leader; it moves the arm. Camera snapshots from each check go to `outputs/check/`.
 
-`uv run so101 record <task> --dry-run` goes further. It runs the checks, then a guided rehearsal through the real recording command with your settings:
+`uv run so101 record --dry-run` goes further. It runs the checks, then a guided rehearsal through the real recording command with your settings:
 1. two short episodes, exercising the finish-early, redo and timeout keys;
 2. it checks the dataset that produced:
    - every frame and video frame present;
@@ -189,32 +189,34 @@ To add a task, add a section to `tasks.toml`. Find checkpoints on the Hub by sea
 
 ## Training your own task
 
-Your own tasks live at the end of `tasks.toml`, without `policy` or `dataset`. `my-cube-dish` is an example: copy it and change the name, prompt and props for another task.
+Your own tasks live at the end of `tasks.toml`, without `policy` or `dataset`. `cylinder-bowl` (pick up a cylindrical block and put it in a bowl) is yours: copy it and change the name, prompt and props for another task.
+
+`default` at the top of `tasks.toml` names the task commands use when you don't name one, so `uv run so101 record` means `uv run so101 record cylinder-bowl`. Name a task to use another, for example `uv run so101 run cube-dish`.
 
 One-time setup: create a write token at https://huggingface.co/settings/tokens, run `uv run hf auth login`, and add credit to your Hugging Face account (pay-as-you-go or PRO) for cloud training. Recording works without it.
 
 1. **Set up the scene and keep it fixed.** Same camera positions, lighting and table for recording and running; the policy only learns this scene. Then `uv run so101 check --save-reference` to save each camera's view.
-2. **Rehearse:** `uv run so101 record my-cube-dish --dry-run`. Fix anything it reports before recording demos you want to keep.
-3. **Record:** `uv run so101 record my-cube-dish`. Drive the follower with the leader for each demo. A Rerun window shows both cameras.
+2. **Rehearse:** `uv run so101 record --dry-run`. Fix anything it reports before recording demos you want to keep.
+3. **Record:** `uv run so101 record`. Drive the follower with the leader for each demo. A Rerun window shows both cameras.
    - Each demo lasts `episode_time_s` (20 s); Right arrow or `n` finishes it early, Left arrow or `r` redoes it, Esc or `q` stops the session. Esc mid-demo keeps the demo so far, so delete it in `review` if it's incomplete.
-   - Between demos you get `reset_time_s` (10 s) to put the cube back.
-   - Record about 50 demos: 5 cube positions x 10 demos each. Start every demo from the same rest pose and do the task the same way each time; smooth, deliberate demos train better than fast ones.
+   - Between demos you get `reset_time_s` (10 s) to put the cylinder back.
+   - Record about 50 demos: 5 cylinder positions x 10 demos each, with the bowl in one spot. Start every demo from the same rest pose and do the task the same way each time; smooth, deliberate demos train better than fast ones.
    - Every run of `record` is a new session. Stopping is safe: running it again records until there are `episodes` kept demos. `--episodes 10` adds 10 more; `--note "lamp on"` saves a note with the session.
-4. **Review:** `uv run so101 review my-cube-dish`.
+4. **Review:** `uv run so101 review`.
    - Each new demo opens in a Rerun window: both cameras plus joint plots, with a timeline in seconds.
    - It suggests cutting the idle time at the start and end. It keeps 0.2 s before the first movement and 0.7 s after the last, so the policy still learns to settle.
    - Press Enter to accept the suggestion. Or type `t START END` to keep a different part, `k` to keep it all, or `d reason` to delete it.
    - Decisions go to `data/<task>/edits.toml`; the recordings are never changed.
-5. **Train:** `uv run so101 train my-cube-dish`.
+5. **Train:** `uv run so101 train`.
    - It builds the training dataset from every session and your edits.
    - It uploads the dataset to the private Hub dataset `<you>/so101_<task>`, replacing any earlier upload.
    - It trains ACT on Hugging Face Jobs (`[train]` in `so101.toml`: an A100 for 30k steps at batch 64, roughly 30 minutes and a few dollars, capped at 3 hours).
    - Logs stream to the terminal. Ctrl+C stops watching but the job keeps running (`uv run hf jobs ps`, `uv run hf jobs logs <id>`).
    - The trained policy lands in the private repo `<you>/act_so101_<task>`.
    - `--target local` trains on this Mac instead.
-6. **Run:** `uv run so101 run my-cube-dish --display`, from the same rest pose with the cube somewhere you recorded.
+6. **Run:** `uv run so101 run --display`, from the same rest pose with the cylinder somewhere you recorded.
 
-If it fails at some cube positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.
+If it fails at some cylinder positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.
 
 ### Your demos on disk
 
@@ -236,7 +238,7 @@ data/<task>/
   - decodes each kept episode and writes it into a fresh dataset with LeRobot's own writer, at a higher video quality than recording to limit re-encoding loss;
   - checks the result before replacing the old build;
   - stops if sessions were recorded with different fps, cameras or joints, because those can't share one dataset.
-- `check <task>` and `record` warn when the calibration changed since the last session, because joint values then no longer line up with earlier demos.
+- `check` and `record` warn when the calibration changed since the last session, because joint values then no longer line up with earlier demos.
 
 ## Troubleshooting
 
