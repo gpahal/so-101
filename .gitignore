@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+outputs/
+
+# Recorded demos (see [data] in so101.toml)
+data/
+
+# Temporary files
+.scratch
