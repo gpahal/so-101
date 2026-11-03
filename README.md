@@ -124,12 +124,12 @@ Each step talks to the arms over USB, so plug in USB and the power supply for ea
   - uvc-util;
   - macOS Accessibility permission for the recording keys;
   - how fast a recording step can read both arms and cameras.
-- **With a task:** whether new demos would match the task's earlier sessions (fps, cameras, calibration).
+- **For the task** (the default one in `tasks.toml`, or the one you name): whether new demos would match its earlier sessions (fps, cameras, calibration).
 
 Once the cameras are where you want them and the follower is in its rest pose, save each camera's view with `uv run so101 check --save-reference`. Later checks compare against it to catch a camera that moved or a wrong camera. `--live` adds a 10-second teleoperation test that checks every follower joint follows the leader; it moves the arm. Camera snapshots from each check go to `outputs/check/`.
 
 `uv run so101 record --dry-run` goes further. It runs the checks, then a guided rehearsal through the real recording command with your settings:
-1. two short episodes, exercising the finish-early, redo and timeout keys;
+1. two episodes, with the task's `episode_time_s` and `reset_time_s`, exercising the finish-early, redo and timeout keys;
 2. it checks the dataset that produced:
    - every frame and video frame present;
    - evenly spaced timestamps;
@@ -164,7 +164,14 @@ macOS gives OpenCV no access to UVC controls such as exposure or anti-flicker, s
 
 Each camera's `usb_id` and `[cameras.<name>.controls]` in `so101.toml` say what to set. The checks before `teleop --cameras`, `record` and `run`, and the `cameras` command, apply them and read them back; settings stay until the camera loses power. To see a camera's controls and ranges: `uvc-util -V 0x32e6:0x9005 -S '*'`.
 
-Tube lights on 50 Hz mains flicker 100 times a second, which shows up as rolling horizontal bands. The front camera handles this with `power-line-frequency = 1` (50 Hz). The wrist camera ignores that setting, so it uses a fixed exposure instead: 28.5 ms measured 0.3% flicker against 5.3% on auto, at about 20 fps. A fixed exposure doesn't adapt to light, so if the wrist image is too dark or bright under different lighting, retune `exposure-time-abs` (units of 0.1 ms) or go back to `auto-exposure-mode = 8`.
+Tube lights on 50 Hz mains flicker 100 times a second, which shows up as rolling horizontal bands. A fixed exposure avoids them and keeps the picture the same from demo to demo:
+
+- **Front camera:** a fixed 10 ms exposure, one whole flicker cycle. On a black mat, auto exposure blew out 24% of the picture (the white walls behind it); 10 ms clips 0.2%.
+- **Wrist camera:** it ignores `power-line-frequency`, so it uses a fixed 28.5 ms exposure (0.3% flicker, against 5.3% on auto), with gamma 150 and brightness 20 to lift the picture on a dark mat. A longer exposure would brighten it too, but cuts the frame rate: 40 ms gives 14 fps.
+
+Both cameras give 20 frames per second at 640x480 whatever the exposure, so `check` warns that about a third of recorded frames repeat the one before. That's harmless for ACT. Setting the task's `fps` to 20 in `tasks.toml` makes repeats rare; the loop and the cameras aren't in step, so a few remain.
+
+A fixed exposure doesn't adapt to light. If you change the lighting or the mat, run `uv run so101 check` and look at the brightness it reports and the snapshots it saves, then retune `exposure-time-abs` (units of 0.1 ms), `gamma` or `brightness`. `so101.toml` lists every control it sets, so applying it also undoes anything left over from experimenting.
 
 ## Running a pretrained policy
 
@@ -198,8 +205,8 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
 1. **Set up the scene and keep it fixed.** Same camera positions, lighting and table for recording and running; the policy only learns this scene. Then `uv run so101 check --save-reference` to save each camera's view.
 2. **Rehearse:** `uv run so101 record --dry-run`. Fix anything it reports before recording demos you want to keep.
 3. **Record:** `uv run so101 record`. Drive the follower with the leader for each demo. A Rerun window shows both cameras.
-   - Each demo lasts `episode_time_s` (20 s); Right arrow or `n` finishes it early, Left arrow or `r` redoes it, Esc or `q` stops the session. Esc mid-demo keeps the demo so far, so delete it in `review` if it's incomplete.
-   - Between demos you get `reset_time_s` (10 s) to put the cylinder back.
+   - Each demo lasts `episode_time_s` (25 s); Right arrow or `n` finishes it early, Left arrow or `r` redoes it, Esc or `q` stops the session. Esc mid-demo keeps the demo so far, so delete it in `review` if it's incomplete.
+   - Between demos you get `reset_time_s` (15 s) to put the cylinder back.
    - Record about 50 demos: 5 cylinder positions x 10 demos each, with the bowl in one spot. Start every demo from the same rest pose and do the task the same way each time; smooth, deliberate demos train better than fast ones.
    - Every run of `record` is a new session. Stopping is safe: running it again records until there are `episodes` kept demos. `--episodes 10` adds 10 more; `--note "lamp on"` saves a note with the session.
 4. **Review:** `uv run so101 review`.
@@ -245,10 +252,12 @@ data/<task>/
 - **Missing motor IDs on connect:** run `uv run so101 scan`. Nothing at any baud rate means a hardware fault: servo power off, Waveshare jumpers not on B, or a loose 3-pin cable. Ids at a baud rate other than 1000000 mean the motors need `setup-motors`. Some ids missing means a break in the daisy chain after the last one that answered.
 - **Board not found:** plug it in, then run `uv run so101 info`. If the port has changed, run `find-port`.
 - **`USB camera ... is not connected`:** the camera with that `usb_id` isn't plugged in (or is on a dead hub). The message lists the cameras that are connected.
-- **A camera "delivers 22 new frames/s against the 30 configured":** the camera can't keep up, so some recorded frames repeat the one before. Dim light makes auto-exposure cameras slower; add light, or set a shorter fixed exposure.
+- **A camera "delivers 20 new frames/s against the 30 configured":** the camera can't keep up, so some recorded frames repeat the one before. With a fixed exposure this kit's cameras reach 20 fps at any setting, which is harmless for ACT; setting the task's `fps` to 20 makes repeats rare. On auto exposure, dim light slows a camera further: add light or fix the exposure.
 - **Dry run: "the recording loop ran at 25 of 30 steps/s":** the Mac can't record that fast with these settings, so demos would play back faster than you moved. Record with `--no-display`, close other apps, or try `--dataset.rgb_encoder.vcodec=auto` (hardware video encoding).
 - **`WARNING: shoulder_pan barely moved during calibration`:** that joint's calibrated range is tiny, so the arm can hardly move it. Recalibrate the arm and move every joint through its full range.
-- **`objc[...]: Class AVFFrameReceiver is implemented in both ...`:** OpenCV and PyAV each bundle FFmpeg. The warning is harmless.
+- **The follower's gripper blinks red** (`check` reports "gripper (overload)"): the gripper kept pushing against something until it tripped its overload protection, and it ignores commands until the arm's power is switched off and on. It happens when the leader's gripper closes further than the follower's can, usually while the follower holds the object. Close the leader's gripper only until the follower grips, and open it before resting the arms. If it trips with nothing in the jaws, recalibrate the follower.
+- **`Relative goal position magnitude had to be clamped to be safe`**, over and over: the follower can't reach where the leader is, so `max_relative_target` keeps limiting the step. For the gripper, it's the squeezing above.
+- **`objc[...]: Class AVFFrameReceiver is implemented in both ...`:** OpenCV and PyAV each bundle FFmpeg. The warning is harmless, and `so101` filters it out of its own output and the LeRobot commands it runs.
 - **A checkpoint "sets config fields this LeRobot version doesn't support":** it was saved by a newer LeRobot. `run` drops unset fields itself; set ones need a LeRobot upgrade.
 - **`Could not load this library: ...libtorchcodec_core...`** tracebacks when LeRobot starts: torchcodec can't find a system FFmpeg, so LeRobot falls back to PyAV for video. Harmless here; `brew install ffmpeg` silences it.
 

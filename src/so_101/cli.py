@@ -6,7 +6,6 @@ Any arguments after the known ones are passed through to the LeRobot command, so
 
 import argparse
 import json
-import os
 import shlex
 import sys
 import time
@@ -16,16 +15,19 @@ from serial.tools import list_ports
 
 from so_101 import data, settings, tasks
 from so_101.check import narrow_joints_warning, preflight
+from so_101.console import filter_stderr, run_lerobot
 from so_101.devices import apply_camera_controls, find_camera, video_devices
 from so_101.report import Report
 from so_101.settings import ARMS, Arm, ConfigError, PortNotFoundError, cameras_arg
 
 
 def lerobot(command: str, args: list[str]) -> None:
-    """Replace this process with a LeRobot CLI from the same virtualenv."""
-    exe = Path(sys.executable).parent / command
-    print("$", shlex.join([command, *args]), flush=True)
-    os.execv(exe, [str(exe), *args])
+    """Run a LeRobot CLI from the same virtualenv, and exit with its status.
+
+    It runs as a child process rather than replacing this one, so its stderr goes through
+    `console.filter_stderr`.
+    """
+    sys.exit(run_lerobot(command, args))
 
 
 def arm_status(arm: Arm) -> str:
@@ -247,7 +249,7 @@ def cmd_tasks(s: settings.Settings, __: argparse.Namespace, ___: list[str]) -> N
 
 
 def cmd_record(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
-    from so_101.recording import record_args, run_lerobot, session_manifest, task_cameras
+    from so_101.recording import record_args, session_manifest, task_cameras
 
     task = get_own_task(ns.task)
     if ns.dry_run:
@@ -428,6 +430,7 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
 
 
 def main() -> None:
+    filter_stderr()
     parser = argparse.ArgumentParser(prog="so101", description="Run LeRobot commands for the SO-101 arms using so101.toml.")
     sub = parser.add_subparsers(dest="command", required=True)
 

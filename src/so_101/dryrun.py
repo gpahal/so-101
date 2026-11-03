@@ -14,30 +14,30 @@ import time
 from pathlib import Path
 
 from so_101 import check
-from so_101.recording import record_args, run_lerobot, task_cameras
+from so_101.console import run_lerobot
+from so_101.recording import record_args, task_cameras
 from so_101.report import Report
 from so_101.settings import Settings
 from so_101.tasks import Task
 from so_101.validate import validate_dataset
 
-EPISODE_S = 10
-RESET_S = 5
 TRAIN_STEPS = 50
 
-SCRIPT = f"""
-Rehearsal: two {EPISODE_S}-second episodes with {RESET_S}-second resets in between.
-  1. Episode 1: do the task, then press Right arrow (or n) before the {EPISODE_S} s are up.
+# The rehearsal uses the task's own episode_time_s and reset_time_s, so it times what recording will.
+SCRIPT = """
+Rehearsal: two {episode_s:g}-second episodes with {reset_s:g}-second resets in between, as in tasks.toml.
+  1. Episode 1: do the task, then press Right arrow (or n) before the {episode_s:g} s are up.
   2. Reset: put the object back where it started.
   3. Episode 2: start moving, then press Left arrow (or r) after a few seconds to redo it.
-  4. Reset, then episode 2 again: do the task and let the {EPISODE_S} s run out. Move every joint,
+  4. Reset, then episode 2 again: do the task and let the {episode_s:g} s run out. Move every joint,
      and open and close the gripper, at some point during the episode.
 The keys work in this terminal, or anywhere if your terminal has Accessibility permission.
 """
 
 
-def rehearsal_checks(report: Report, lengths: list[int], fps: int) -> None:
+def rehearsal_checks(report: Report, lengths: list[int], fps: int, episode_s: float) -> None:
     group = "rehearsal"
-    full = EPISODE_S * fps
+    full = episode_s * fps
     if len(lengths) > 2:
         report.fail(group, f"{len(lengths)} episodes saved, expected 2: the redo (Left arrow) didn't discard the first try",
                     fix="rerun the dry run, pressing Left arrow during episode 2")
@@ -47,11 +47,11 @@ def rehearsal_checks(report: Report, lengths: list[int], fps: int) -> None:
     if lengths and lengths[0] < 0.9 * full:
         report.ok(group, f"Right arrow ended episode 1 early ({lengths[0] / fps:.1f} s)")
     elif lengths:
-        report.warn(group, f"episode 1 ran the full {EPISODE_S} s: Right arrow didn't end it early",
+        report.warn(group, f"episode 1 ran the full {episode_s:g} s: Right arrow didn't end it early",
                     fix="keep the terminal focused, or grant your terminal Accessibility permission")
     if len(lengths) >= 2:
-        rate = lengths[1] / EPISODE_S
-        detail = (f"episode 2 has {lengths[1]} frames in {EPISODE_S} s: "
+        rate = lengths[1] / episode_s
+        detail = (f"episode 2 has {lengths[1]} frames in {episode_s:g} s: "
                   f"the recording loop ran at {rate:.1f} of {fps} steps/s")
         if lengths[1] < 0.5 * full:
             report.warn(group, f"episode 2 ended early ({lengths[1] / fps:.1f} s), so the loop rate can't be measured",
@@ -121,7 +121,7 @@ def dry_run(
         finish()
         return
 
-    print(SCRIPT)
+    print(SCRIPT.format(episode_s=task.episode_time_s, reset_s=task.reset_time_s))
     try:
         input("Press Enter to start the rehearsal, Ctrl+C to cancel. ")
     except KeyboardInterrupt:
@@ -130,8 +130,8 @@ def dry_run(
         return
     cameras = task_cameras(s, task, [lookup.camera for lookup in lookups])
     args = record_args(
-        s, task, cameras, root=root, repo_id=repo_id, episodes=2, episode_time_s=EPISODE_S,
-        reset_time_s=RESET_S, display=display,
+        s, task, cameras, root=root, repo_id=repo_id, episodes=2, episode_time_s=task.episode_time_s,
+        reset_time_s=task.reset_time_s, display=display,
     )
     data_report = Report()
     code = run_lerobot("lerobot-record", [*args, *extra])
@@ -143,7 +143,7 @@ def dry_run(
     else:
         data_report.fail("rehearsal", "no dataset was written")
     if summary is not None:
-        rehearsal_checks(data_report, summary.lengths, summary.fps)
+        rehearsal_checks(data_report, summary.lengths, summary.fps, task.episode_time_s)
     if train and summary is not None and not data_report.failures:
         smoke_train(data_report, s, root, repo_id, out / "train")
     if replay and summary is not None and len(summary.lengths) >= 2 and not data_report.failures:
