@@ -130,7 +130,7 @@ def build(s: Settings, task: Task) -> Report:
             except (ValueError, StopIteration, AssertionError) as e:
                 raise ConfigError(
                     f"Session {p.session.name} episode {p.episode} is damaged ({e!r}). Delete it with "
-                    f"`uv run so101 review {task.name} {p.session.name}/{p.episode}` and build again."
+                    f"`uv run so101 review {task.name} --episode {p.session.name}/{p.episode}` and build again."
                 ) from e
             out.save_episode()
             done += p.stop - p.start

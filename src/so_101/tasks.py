@@ -103,8 +103,20 @@ class Task:
         }
 
 
-def load() -> dict[str, Task]:
+def default_name() -> str:
+    """The task commands use when none is named: `default` at the top of tasks.toml."""
     data = tomllib.loads(tasks_path().read_text())
+    name = data.get("default", "")
+    if not isinstance(name, str) or not name:
+        raise ConfigError(f"Name a task, or set `default = \"<task>\"` at the top of {tasks_path()}.")
+    if not isinstance(data.get(name), dict):
+        raise ConfigError(f"`default` in {tasks_path()} is {name!r}, which isn't a task there.")
+    return name
+
+
+def load() -> dict[str, Task]:
+    """Every task in tasks.toml: its tables. Top-level keys, such as `default`, aren't tasks."""
+    data = {name: t for name, t in tomllib.loads(tasks_path().read_text()).items() if isinstance(t, dict)}
     return {
         name: Task(
             name=name,

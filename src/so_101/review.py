@@ -83,8 +83,10 @@ def review(s: Settings, task: Task, only: str | None, everything: bool, viewer: 
     if only is None and not everything:
         episodes = [(session, ep) for session, ep in episodes if (session.name, ep) not in edits]
     if not episodes:
-        reviewed = "" if everything or only else " not yet reviewed (use --all to see every one)"
-        print(f"No episodes{reviewed} for {task.name}.")
+        if everything or only:
+            print(f"No episodes for {task.name}.")
+        else:
+            print(f"No unreviewed episodes for {task.name}; --all shows every one.")
         return
     print(f"Reviewing {len(episodes)} episodes of {task.name}. Decisions are saved to {data.edits_path(s, task)}.")
     print("In the viewer, the timeline shows each frame's time in seconds.\n" + HELP)

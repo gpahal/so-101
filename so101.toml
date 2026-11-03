@@ -49,6 +49,14 @@ usb_id = "32e6:9221"
 [cameras.front.controls]
 # Anti-flicker for 50 Hz mains (India). 0 = off, 1 = 50 Hz, 2 = 60 Hz.
 power-line-frequency = 1
+# Fixed 10 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. On the
+# black mat, auto exposure blew out 24% of the picture (white walls); 10 ms clips 0.2% and gives the
+# strongest colour. The camera runs at 20 fps whatever the exposure.
+auto-exposure-mode = 1
+exposure-time-abs = 100
+# The camera's defaults, listed so applying this config also undoes any other values left set.
+gamma = 115
+brightness = 0
 
 # Camera on the gripper.
 [cameras.wrist]
@@ -66,6 +74,10 @@ usb_id = "32e6:9005"
 # set auto-exposure-mode = 8 (auto) and delete exposure-time-abs.
 auto-exposure-mode = 1
 exposure-time-abs = 285
+# A longer exposure brightens the picture but slows the camera (40 ms: 14 fps). Gamma and brightness
+# don't: with them it measured 127/255 on a black mat instead of 50, still at 20 fps.
+gamma = 150
+brightness = 20
 
 # Where `so101 record` saves demos: <dir>/<task>/sessions/, plus edits and the training dataset.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.

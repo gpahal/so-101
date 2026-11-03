@@ -27,7 +27,7 @@ TRAIN_STEPS = 50
 SCRIPT = f"""
 Rehearsal: two {EPISODE_S}-second episodes with {RESET_S}-second resets in between.
   1. Episode 1: do the task, then press Right arrow (or n) before the {EPISODE_S} s are up.
-  2. Reset: put the cube back.
+  2. Reset: put the object back where it started.
   3. Episode 2: start moving, then press Left arrow (or r) after a few seconds to redo it.
   4. Reset, then episode 2 again: do the task and let the {EPISODE_S} s run out. Move every joint,
      and open and close the gripper, at some point during the episode.
