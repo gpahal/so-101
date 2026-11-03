@@ -162,8 +162,11 @@ def check_arm(report: Report, arm: Arm) -> "FeetechMotorsBus | None":
         alarms = {name: reply.errors() for name, reply in replies.items() if reply.error}
         if alarms:
             listed = ", ".join(f"{name} ({', '.join(errs)})" for name, errs in alarms.items())
-            report.fail(group, f"motors in a protection alarm: {listed}",
-                        fix="power-cycle the arm; if it returns, look for a jammed joint or a weak power supply")
+            fix = "switch the arm's power off and on to clear it; if it returns, look for a jammed joint or a weak supply"
+            if "overload" in alarms.get("gripper", []):
+                fix = ("switch the arm's power off and on to clear it. A gripper overload means it kept squeezing: "
+                       "close the leader's gripper only until the follower holds the object")
+            report.fail(group, f"motors in a protection alarm: {listed}", fix=fix)
 
         volts = {m: v / 10 for m, v in bus.sync_read("Present_Voltage", normalize=False, num_retry=2).items()}
         temps = bus.sync_read("Present_Temperature", normalize=False, num_retry=2)
@@ -311,8 +314,12 @@ def check_cameras(
     save_reference: bool,
     snapshot_dir: Path | None,
     opened: dict[str, "OpenCVCamera"],
+    record_fps: int | None = None,
 ) -> list[CameraLookup]:
-    """Find, open and sample each camera. Open cameras are added to `opened`, which the caller closes."""
+    """Find, open and sample each camera. Open cameras are added to `opened`, which the caller closes.
+
+    `record_fps` is the rate frames will be recorded at, when below the cameras' configured rate.
+    """
     import cv2
     from lerobot.cameras.configs import Cv2Rotation
     from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
@@ -387,13 +394,20 @@ def check_cameras(
                 report.warn(group, f"{'dark' if brightness < 50 else 'bright'} picture (brightness {brightness:.0f}/255)",
                             fix="adjust the light, or the camera's exposure in so101.toml")
 
-        if rate < 0.9 * cam.fps:
-            repeated = max(0.0, 1 - rate / cam.fps)
+        wanted = min(cam.fps, record_fps or cam.fps)
+        if rate < 0.9 * wanted:
+            repeated = max(0.0, 1 - rate / wanted)
+            # Auto exposure lengthens in dim light and slows a camera; with a fixed exposure this is
+            # the camera's own limit (this kit's cameras give 20 fps at 640x480 at any exposure).
+            auto = cam.controls.get("auto-exposure-mode", 8) != 1
             report.warn(
                 group,
-                f"delivers {rate:.1f} new frames/s against the {cam.fps} configured: about {repeated:.0%} of "
+                f"delivers {rate:.1f} new frames/s against the {wanted} recorded: about {repeated:.0%} of "
                 "recorded frames will repeat the one before",
-                fix="more light (auto exposure slows cameras down in dim light), or a shorter fixed exposure",
+                fix=("add light or set a fixed exposure, as auto exposure slows down in dim light; "
+                     if auto else "")
+                + "if it's the camera's limit, repeated frames are harmless for ACT; setting the task's fps "
+                "in tasks.toml to the camera's rate makes them rare",
             )
         if flicker is not None and flicker > 2.0:
             report.warn(group, f"rolling bands or flicker ({flicker:.1f}% row brightness change between frames)",
@@ -533,7 +547,7 @@ def run_checks(
             if (bus := check_arm(report, s.arm(name))) is not None:
                 buses[name] = bus
         if cameras:
-            lookups = check_cameras(report, s, cameras, save_reference, snapshot_dir, opened)
+            lookups = check_cameras(report, s, cameras, save_reference, snapshot_dir, opened, loop_fps)
         if task is not None:
             check_task(report, s, task)
         if loop_fps and set(buses) == set(ARMS) and len(opened) == len(cameras) and not report.failures:

@@ -2,9 +2,7 @@
 
 import json
 import platform
-import shlex
 import subprocess
-import sys
 import time
 from importlib.metadata import version
 from pathlib import Path
@@ -13,21 +11,6 @@ from so_101 import data
 from so_101.report import Report
 from so_101.settings import ARMS, Camera, Settings, cameras_arg
 from so_101.tasks import Task
-
-
-def run_lerobot(command: str, args: list[str]) -> int:
-    """Run a LeRobot CLI from the same virtualenv and wait for it, returning its exit code.
-
-    Ctrl+C reaches the child too (same process group), so keep waiting while it shuts down cleanly.
-    """
-    exe = Path(sys.executable).parent / command
-    print("$", shlex.join([command, *args]), flush=True)
-    proc = subprocess.Popen([str(exe), *args])
-    while True:
-        try:
-            return proc.wait()
-        except KeyboardInterrupt:
-            continue
 
 
 def record_args(

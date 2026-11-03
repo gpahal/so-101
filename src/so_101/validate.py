@@ -66,6 +66,24 @@ def tracking(
         lags.append(lag)
         errors.append(err)
         unit = "" if name == "gripper" else "°"
+        if name == "gripper" and ratio < 0.8:
+            # Falling short only on the closing side means the jaws stopped on something, usually the
+            # object. Squeezing the leader further makes the follower's gripper stall against it.
+            cmd_lo = min(float(cmd[:, j].min()) for cmd, _ in episodes)
+            cmd_hi = max(float(cmd[:, j].max()) for cmd, _ in episodes)
+            meas_lo = min(float(meas[:, j].min()) for _, meas in episodes)
+            meas_hi = max(float(meas[:, j].max()) for _, meas in episodes)
+            if meas_lo - cmd_lo > 2 * max(0.0, cmd_hi - meas_hi):
+                report.warn(
+                    group,
+                    f"gripper: the follower's jaws stopped at {meas_lo:.0f} while the leader closed to "
+                    f"{cmd_lo:.0f}, usually because they were holding the object",
+                    fix="close the leader's gripper only until the follower holds the object: squeezing "
+                    "further stalls the follower's gripper and trips its overload alarm (blinking red). If it "
+                    "stops short with nothing in its jaws, recalibrate the follower",
+                )
+                problems.append(name)
+                continue
         if ratio < 0.5:
             (report.fail if strict else report.warn)(
                 group,
