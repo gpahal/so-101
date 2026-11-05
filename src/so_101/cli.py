@@ -373,9 +373,9 @@ def cmd_backup(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     print(f"Uploading {folder} (sessions, edits) to the private dataset {repo}. Interrupted uploads resume.")
     api = HfApi()
     api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
-    api.upload_large_folder(
-        repo_id=repo, repo_type="dataset", folder_path=folder, private=True,
-        ignore_patterns=["train/**", "train.tmp/**", "build.json"],
+    api.upload_folder(
+        repo_id=repo, repo_type="dataset", folder_path=folder,
+        ignore_patterns=["train/**", "train.tmp/**", "build.json", "**/.DS_Store", ".DS_Store"],
     )
     print(f"Backed up. To restore: uv run hf download {repo} --repo-type dataset --local-dir {folder}")
 

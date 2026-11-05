@@ -1,4 +1,4 @@
-"""Terminal plumbing: run LeRobot commands, and hide a harmless macOS warning they all print.
+"""Terminal plumbing: run LeRobot commands, and hide harmless startup warnings they all print.
 
 OpenCV and PyAV each bundle FFmpeg's libavdevice. When both load into one process, macOS's
 Objective-C runtime prints "objc[...]: Class AVF... is implemented in both ..." for each duplicate
@@ -6,6 +6,10 @@ class, straight to file descriptor 2 and before Python can do anything about it.
 those classes, so it's noise. `filter_stderr` puts a pipe on descriptor 2 that drops those lines
 and passes everything else through as it arrives; LeRobot commands run as child processes inherit
 the pipe, so their copies are dropped too.
+
+TorchCodec supports FFmpeg 4 to 8. With another FFmpeg, such as Homebrew's 9, every LeRobot import
+prints a traceback of over 100 lines before falling back to PyAV, which decodes these videos fine.
+The filter replaces that block with the one line that says what happened.
 """
 
 import atexit
@@ -18,6 +22,8 @@ import threading
 from pathlib import Path
 
 DUPLICATE_CLASS = re.compile(rb"objc\[\d+\]: Class AVF\w+ is implemented in both [^\n]*\n")
+TORCHCODEC_START = b"WARNING:lerobot.utils.import_utils:Could not load libtorchcodec."
+TORCHCODEC_END = b"[end of libtorchcodec loading traceback].\n"
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -25,8 +31,42 @@ def _write_all(fd: int, data: bytes) -> None:
         data = data[os.write(fd, data):]
 
 
+class _NoiseFilter:
+    """Removes known noise from a stream of stderr chunks, holding back only a possible start of it."""
+
+    def __init__(self) -> None:
+        self.pending = b""
+        self.in_block = False
+
+    def feed(self, chunk: bytes) -> bytes:
+        data = self.pending + chunk
+        self.pending = b""
+        out = b""
+        while data:
+            if self.in_block:
+                end = data.find(TORCHCODEC_END)
+                if end < 0:
+                    self.pending = data[-(len(TORCHCODEC_END) - 1):]  # the end marker may be split
+                    return DUPLICATE_CLASS.sub(b"", out)
+                data = data[end + len(TORCHCODEC_END):]
+                self.in_block = False
+                continue
+            start = data.find(TORCHCODEC_START)
+            if start >= 0:
+                out += data[:start]
+                data = data[start + len(TORCHCODEC_START):]
+                self.in_block = True
+                continue
+            hold = next((n for n in range(min(len(TORCHCODEC_START) - 1, len(data)), 0, -1)
+                         if TORCHCODEC_START.startswith(data[-n:])), 0)
+            out += data[:len(data) - hold]
+            self.pending = data[len(data) - hold:]
+            break
+        return DUPLICATE_CLASS.sub(b"", out)
+
+
 def filter_stderr() -> None:
-    """Drop the duplicate-class warnings from this process's and its children's stderr (macOS only)."""
+    """Drop known harmless warnings from this process's and its children's stderr (macOS only)."""
     if sys.platform != "darwin":
         return
     sys.stderr.flush()
@@ -36,11 +76,14 @@ def filter_stderr() -> None:
     os.close(write_end)
 
     def pump() -> None:
-        # Each warning is one write of a few hundred bytes, under the pipe's atomic-write size, so
-        # it always arrives whole in one read.
+        # Each duplicate-class warning is one write of a few hundred bytes, under the pipe's
+        # atomic-write size, so it always arrives whole in one read.
+        noise = _NoiseFilter()
         with os.fdopen(read_end, "rb", buffering=0) as pipe:
             while chunk := pipe.read(65536):
-                _write_all(real, DUPLICATE_CLASS.sub(b"", chunk))
+                _write_all(real, noise.feed(chunk))
+        if not noise.in_block:
+            _write_all(real, noise.pending)
 
     thread = threading.Thread(target=pump, name="stderr-filter", daemon=True)
     thread.start()
