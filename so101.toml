@@ -73,17 +73,17 @@ usb_id = "32e6:9005"
 
 [cameras.wrist.controls]
 # This camera ignores power-line-frequency, so tube lights on 50 Hz mains put rolling bands in
-# its picture. A fixed exposure of a whole number of the 10 ms flicker cycles avoids them (auto
-# measured 5.3% flicker). Fixed exposure doesn't adapt to light: if images get too dark or bright,
-# retune it or set auto-exposure-mode = 8 (auto) and delete exposure-time-abs. A longer exposure
-# slows the camera (40 ms: 14 fps).
-# Tuned for the wooden table: the black mat's settings (28.5 ms, gamma 150, brightness 20) blew out
-# 47% of the picture on it. 20 ms with gamma 100 and brightness -20 keeps the wood, cup and bowl clear.
+# its picture. A fixed exposure of a whole number of flicker cycles avoids them (auto measured 5.3%
+# flicker), but this camera's exposure units run about 12% off: a sweep found the band-free values
+# at 114, about 228 and 285, while 200 (nominally 20 ms) measured 2.7%. Retune from those values.
+# Fixed exposure doesn't adapt to light: if images get too dark or bright, adjust gamma first.
+# Tuned for the wooden table: the shortest band-free exposure leaves highlights headroom, so the
+# gripper and reflections don't glare, and gamma 130 brightens the mid-tones instead.
 auto-exposure-mode = 1
-exposure-time-abs = 200
-gamma = 100
-brightness = -20
-saturation = 45
+exposure-time-abs = 114
+gamma = 130
+brightness = -10
+saturation = 25
 # The camera's default, listed so applying this config also undoes any other value left set.
 contrast = 27
 
