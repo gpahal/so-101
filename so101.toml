@@ -39,7 +39,7 @@ max_relative_target = 10
 
 # Fixed camera looking at the workspace.
 [cameras.front]
-index = 1
+index = 0
 width = 640
 height = 480
 fps = 30
@@ -49,18 +49,22 @@ usb_id = "32e6:9221"
 [cameras.front.controls]
 # Anti-flicker for 50 Hz mains (India). 0 = off, 1 = 50 Hz, 2 = 60 Hz.
 power-line-frequency = 1
-# Fixed 10 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. On the
-# black mat, auto exposure blew out 24% of the picture (white walls); 10 ms clips 0.2% and gives the
-# strongest colour. The camera runs at 20 fps whatever the exposure.
+# Fixed 20 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. Auto
+# exposure blows out the walls and bowl; shorter exposures (2.5, 5 ms) band and go dark. Picked from a
+# sweep of exposure, gamma, contrast and saturation: 20 ms with gamma 80 is bright with nothing clipped.
+# Fixed exposure doesn't adapt to light: if the room gets much brighter, try 10 ms with gamma 100.
 auto-exposure-mode = 1
-exposure-time-abs = 100
+exposure-time-abs = 200
+gamma = 80
 # The camera's defaults, listed so applying this config also undoes any other values left set.
-gamma = 115
+# white-balance-temp is left out: this camera accepts it but the picture doesn't change.
 brightness = 0
+contrast = 32
+saturation = 57
 
 # Camera on the gripper.
 [cameras.wrist]
-index = 0
+index = 1
 width = 640
 height = 480
 fps = 30
@@ -69,15 +73,19 @@ usb_id = "32e6:9005"
 
 [cameras.wrist.controls]
 # This camera ignores power-line-frequency, so tube lights on 50 Hz mains put rolling bands in
-# its picture. A fixed exposure of 28.5 ms measured 0.3% flicker against 5.3% on auto, at about
-# 20 fps. Fixed exposure doesn't adapt to light: if images get too dark or bright, retune it or
-# set auto-exposure-mode = 8 (auto) and delete exposure-time-abs.
+# its picture. A fixed exposure of a whole number of flicker cycles avoids them (auto measured 5.3%
+# flicker), but this camera's exposure units run about 12% off: a sweep found the band-free values
+# at 114, about 228 and 285, while 200 (nominally 20 ms) measured 2.7%. Retune from those values.
+# Fixed exposure doesn't adapt to light: if images get too dark or bright, adjust gamma first.
+# Tuned for the wooden table: the shortest band-free exposure leaves highlights headroom, so the
+# gripper and reflections don't glare, and gamma 130 brightens the mid-tones instead.
 auto-exposure-mode = 1
-exposure-time-abs = 285
-# A longer exposure brightens the picture but slows the camera (40 ms: 14 fps). Gamma and brightness
-# don't: with them it measured 127/255 on a black mat instead of 50, still at 20 fps.
-gamma = 150
-brightness = 20
+exposure-time-abs = 114
+gamma = 130
+brightness = -10
+saturation = 25
+# The camera's default, listed so applying this config also undoes any other value left set.
+contrast = 27
 
 # Where `so101 record` saves demos: <dir>/<task>/sessions/, plus edits and the training dataset.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.
