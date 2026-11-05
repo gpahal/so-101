@@ -6,6 +6,7 @@
 #
 # Environment variables override this file: SO101_FOLLOWER_PORT, SO101_LEADER_PORT,
 # SO101_FOLLOWER_ID, SO101_LEADER_ID. `uv run so101 env` prints them all.
+# SO101_CONFIG points every command at a different settings file.
 
 # Calibration files, relative to this file. Each arm's lands in <calibration_dir>/<arm>/<id>.json.
 calibration_dir = "calibration"
@@ -22,8 +23,8 @@ serial_number = "5C82109414"
 
 [teleop]
 fps = 60
-# Max degrees any follower joint may move per control step. Smooths sudden jumps.
-# Set to 0 to turn the limit off.
+# Max a follower joint may move per control step, while teleoperating and recording: degrees, or
+# percent of its range for the gripper. Smooths sudden jumps. Set to 0 to turn the limit off.
 max_relative_target = 10
 
 # Cameras. Commands find each camera by its USB vendor:product id (`usb_id`), so it doesn't matter
@@ -34,12 +35,13 @@ max_relative_target = 10
 #
 # [cameras.<name>.controls] is optional. Before any command opens the cameras, `so101` sets each
 # listed UVC control with uvc-util (install it with scripts/install-uvc-util.sh) and checks it
-# stuck. `uvc-util -V <usb_id> -S '*'` lists a camera's controls and their ranges.
-# exposure-time-abs is in units of 0.1 ms.
+# stuck. They stay set until the camera loses power. `uvc-util -V 0x32e6:0x9005 -S '*'` lists a
+# camera's controls and their ranges (that's the wrist camera's usb_id, with 0x before each part).
+# exposure-time-abs is nominally in units of 0.1 ms; the wrist camera's run off (see below).
 
 # Fixed camera looking at the workspace.
 [cameras.front]
-index = 1
+index = 0
 width = 640
 height = 480
 fps = 30
@@ -49,18 +51,22 @@ usb_id = "32e6:9221"
 [cameras.front.controls]
 # Anti-flicker for 50 Hz mains (India). 0 = off, 1 = 50 Hz, 2 = 60 Hz.
 power-line-frequency = 1
-# Fixed 10 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. On the
-# black mat, auto exposure blew out 24% of the picture (white walls); 10 ms clips 0.2% and gives the
-# strongest colour. The camera runs at 20 fps whatever the exposure.
+# Fixed 20 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. Auto
+# exposure blows out the walls and bowl; shorter exposures (2.5, 5 ms) band and go dark. Picked from a
+# sweep of exposure, gamma, contrast and saturation: 20 ms with gamma 80 is bright with nothing clipped.
+# Fixed exposure doesn't adapt to light: if the room gets much brighter, try 10 ms with gamma 100.
 auto-exposure-mode = 1
-exposure-time-abs = 100
+exposure-time-abs = 200
+gamma = 80
 # The camera's defaults, listed so applying this config also undoes any other values left set.
-gamma = 115
+# white-balance-temp is left out: this camera accepts it but the picture doesn't change.
 brightness = 0
+contrast = 32
+saturation = 57
 
 # Camera on the gripper.
 [cameras.wrist]
-index = 0
+index = 1
 width = 640
 height = 480
 fps = 30
@@ -69,15 +75,23 @@ usb_id = "32e6:9005"
 
 [cameras.wrist.controls]
 # This camera ignores power-line-frequency, so tube lights on 50 Hz mains put rolling bands in
-# its picture. A fixed exposure of 28.5 ms measured 0.3% flicker against 5.3% on auto, at about
-# 20 fps. Fixed exposure doesn't adapt to light: if images get too dark or bright, retune it or
-# set auto-exposure-mode = 8 (auto) and delete exposure-time-abs.
+# its picture. A fixed exposure of a whole number of flicker cycles avoids them (auto measured 5.3%
+# flicker), but this camera's exposure units run about 12% off: a sweep found the band-free values
+# at 114, about 228 and 285, while 200 (nominally 20 ms) measured 2.7%. Retune from those values.
+# A longer exposure slows the camera (40 ms: 14 fps).
+# Fixed exposure doesn't adapt to light: if images get too dark or bright, adjust gamma first.
+# Tuned for the wooden table: the shortest band-free exposure leaves highlight headroom, so red
+# maxed out in at most 11% of pixels just before a grasp, against 31-63% at 200. Gamma 130 with
+# brightness -10 sets the mid-tones. Reflections off the table still clip in a small stripe.
+# White balance isn't set here, and the picture can shift: it turned pink around the release in
+# 5 of 60 demos.
 auto-exposure-mode = 1
-exposure-time-abs = 285
-# A longer exposure brightens the picture but slows the camera (40 ms: 14 fps). Gamma and brightness
-# don't: with them it measured 127/255 on a black mat instead of 50, still at 20 fps.
-gamma = 150
-brightness = 20
+exposure-time-abs = 114
+gamma = 130
+brightness = -10
+# The camera's defaults, listed so applying this config also undoes any other values left set.
+saturation = 25
+contrast = 27
 
 # Where `so101 record` saves demos: <dir>/<task>/sessions/, plus edits and the training dataset.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.
@@ -85,14 +99,15 @@ brightness = 20
 [data]
 dir = "data"
 
-# `uv run so101 run <task>`: run a pretrained policy from tasks.toml on the follower.
+# `uv run so101 run <task>`: run a task's policy from tasks.toml on the follower.
 [run]
 # Seconds before the run stops and the arm returns to its starting pose. 0 runs until Ctrl+C.
 duration_s = 60
-# Torch device for the policy: "mps" (Apple GPU), "cpu" or "cuda".
+# Torch device for the policy, here and when training locally: "mps" (Apple GPU), "cpu" or "cuda".
 device = "mps"
-# Max degrees a joint may move per control step while a policy drives the arm. Lower than
-# teleop's, because a policy trained on someone else's arm can command sudden jumps. 0 turns it off.
+# Max a joint may move per control step while a policy drives the arm, in teleop's units. Lower than
+# teleop's, because a policy can command sudden jumps, especially one trained on someone else's arm.
+# 0 turns it off.
 max_relative_target = 5
 
 # `uv run so101 train <task>`: train ACT on a task you recorded with `so101 record`.
