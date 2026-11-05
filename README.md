@@ -44,7 +44,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 record [task] [--episodes N] [--note TEXT]` | Record demos of your own task by teleoperating, as a new session |
 | `uv run so101 review [task] [--episode SESSION/N]` | Step through recorded demos to trim idle time or delete bad ones |
 | `uv run so101 build [task]` | Make the training dataset from all sessions plus your edits (`train` does this itself) |
-| `uv run so101 train [task] [--target FLAVOR]` | Train ACT on your demos, on Hugging Face Jobs by default |
+| `uv run so101 train [task] [--policy act\|pi05] [--target FLAVOR]` | Train a policy on your demos, ACT by default, on Hugging Face Jobs by default |
 | `uv run so101 backup [task]` | Upload a task's sessions and edits to a private Hub dataset |
 | `uv run so101 run [task] [--duration S] [--display]` | Run a task's ACT policy on the follower, on the Mac's GPU |
 | `uv run so101 env` | Print the settings as shell variables |
@@ -218,10 +218,12 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
 5. **Train:** `uv run so101 train`.
    - It builds the training dataset from every session and your edits.
    - It uploads the dataset to the private Hub dataset `<you>/so101_<task>`, replacing any earlier upload.
-   - It trains ACT on Hugging Face Jobs (`[train]` in `so101.toml`: an A100 for 30k steps at batch 64, roughly 30 minutes and a few dollars, capped at 3 hours).
+   - It trains ACT on Hugging Face Jobs (`[train.act]` in `so101.toml`: an RTX PRO 6000 for 100k steps at batch 8, about 1.5 hours and $4, stopped at 4 hours).
+   - `--policy pi05` trains π0.5 instead (`[train.pi05]`: an RTX PRO 6000 for 6k steps at batch 32, about 5 hours and $14, stopped at 14 hours). First request access to [its tokenizer](https://huggingface.co/google/paligemma-3b-pt-224).
+   - Checkpoints go to the model repo as they're saved. To continue a stopped run: `uv run lerobot-train --config_path=<you>/<policy>_so101_<task> --resume=true --job.target=<flavor>`.
    - Logs stream to the terminal. Ctrl+C stops watching but the job keeps running (`uv run hf jobs ps`, `uv run hf jobs logs <id>`).
-   - The trained policy lands in the private repo `<you>/act_so101_<task>`.
-   - `--target local` trains on this Mac instead.
+   - The trained policy lands in the private repo `<you>/<policy>_so101_<task>`.
+   - `--target local` trains ACT on this Mac instead, which takes days at these settings.
 6. **Run:** `uv run so101 run --display`, from the same rest pose with the cylinder somewhere you recorded.
 
 If it fails at some cylinder positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.

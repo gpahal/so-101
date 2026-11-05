@@ -400,25 +400,67 @@ def push_dataset(root: Path, repo_id: str) -> None:
     api.create_tag(repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
 
 
+# Flags each policy needs beyond its `[train.<policy>]` recipe in so101.toml.
+POLICY_FLAGS = {
+    "act": [],
+    "pi05": [
+        "--policy.pretrained_path=lerobot/pi05_base",
+        # Train only the action model: on SO-101 this scored 130/200, against 4/110 with LoRA adapters.
+        "--policy.train_expert_only=true",
+        "--policy.freeze_vision_encoder=true",
+        "--policy.gradient_checkpointing=true",
+        # 32-bit took 30 s a step on an A100, against 4.6 s for this.
+        "--policy.dtype=bfloat16",
+        # The model has three camera slots and this kit has two cameras.
+        "--policy.empty_cameras=1",
+    ],
+}
+# pi0.5's tokenizer. Its licence is accepted per Hugging Face account, and approval isn't instant.
+PI05_TOKENIZER = "google/paligemma-3b-pt-224"
+
+
+def check_pi05_access() -> None:
+    """Stop before uploading or paying if the job couldn't load pi0.5's gated tokenizer."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import GatedRepoError
+
+    try:
+        HfApi().auth_check(PI05_TOKENIZER)
+    except GatedRepoError:
+        sys.exit(f"pi0.5 needs its tokenizer: request access at https://huggingface.co/{PI05_TOKENIZER}, "
+                 "and train again once it's approved.")
+
+
 def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
     task = get_own_task(ns.task)
     if not data.sessions(s, task):
         sys.exit(f"No recorded demos for {task.name}. Run `uv run so101 record {task.name}` first.")
-    policy = task.policy  # needs a Hugging Face login; fail before building
+    if ns.policy not in s.train:
+        sys.exit(f"No [train.{ns.policy}] section in {s.path}.")
+    recipe = s.train[ns.policy]
+    target = ns.target or recipe.job_target
+    if ns.policy == "pi05":
+        if target == "local":
+            sys.exit("pi0.5 can't train locally: it needs an NVIDIA GPU with the `lerobot[pi]` extra.")
+        check_pi05_access()
+    policy = task.trained_policy(ns.policy)  # needs a Hugging Face login; fail before building
     if not data.build_is_current(s, task):
         run_build(s, task)
     kept = data.kept_episodes(s, task)
     if kept < task.episodes:
         print(f"WARNING: {kept} of {task.episodes} demos; training anyway.", file=sys.stderr)
-    target = ns.target or s.train.job_target
     root = data.train_root(s, task)
     args = [
-        "--policy.type=act",
+        f"--policy.type={ns.policy}",
         f"--policy.repo_id={policy}",
         "--policy.private=true",
-        f"--job_name=act_so101_{task.name}",
-        f"--steps={s.train.steps}",
-        f"--batch_size={s.train.batch_size}",
+        *POLICY_FLAGS[ns.policy],
+        *([f"--policy.scheduler_decay_steps={recipe.steps}"] if ns.policy == "pi05" else []),
+        f"--job_name={ns.policy}_so101_{task.name}",
+        f"--steps={recipe.steps}",
+        f"--batch_size={recipe.batch_size}",
+        f"--num_workers={recipe.num_workers}",
+        f"--save_freq={recipe.save_freq}",
         "--wandb.enable=false",
         f"--job.target={target}",
     ]
@@ -427,8 +469,12 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     else:
         print(f"Uploading the training dataset to the private Hub dataset {task.dataset}...")
         push_dataset(root, task.dataset)
-        args += [f"--dataset.repo_id={task.dataset}", f"--job.timeout={s.train.job_timeout}"]
-        print(f"Training on Hugging Face Jobs ({target}).")
+        args += [f"--dataset.repo_id={task.dataset}", f"--job.timeout={recipe.job_timeout}",
+                 "--save_checkpoint_to_hub=true",
+                 # This Mac's decoder is sent along otherwise. That's PyAV when TorchCodec can't load here,
+                 # and PyAV ran out of memory on the job's 192-core host.
+                 "--dataset.video_backend=torchcodec"]
+        print(f"Training {ns.policy} on Hugging Face Jobs ({target}, stops after {recipe.job_timeout}).")
         print("Ctrl+C stops watching but leaves the job running; `uv run hf jobs ps` lists jobs.\n")
     lerobot("lerobot-train", [*args, *extra])
 
@@ -540,9 +586,10 @@ def main() -> None:
     p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
     p.set_defaults(fn=cmd_backup)
 
-    p = sub.add_parser("train", help="build if needed, then train ACT, on Hugging Face Jobs by default")
+    p = sub.add_parser("train", help="build if needed, then train a policy, on Hugging Face Jobs by default")
     p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
-    p.add_argument("--target", help="HF Jobs flavor, or `local` for this Mac (default: [train] in so101.toml)")
+    p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to train (default: act)")
+    p.add_argument("--target", help="HF Jobs flavor, or `local` for this Mac (default: [train.<policy>] in so101.toml)")
     p.set_defaults(fn=cmd_train)
 
     p = sub.add_parser("run", help="run a task's policy on the follower")

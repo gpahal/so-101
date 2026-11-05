@@ -89,7 +89,7 @@ setup = [
 #   uv run so101 record --dry-run   rehearse and check everything first
 #   uv run so101 record    teleoperate demos, as a new session, until there are `episodes`
 #   uv run so101 review    trim idle time and delete bad demos
-#   uv run so101 train     build the training dataset and train ACT, on Hugging Face Jobs by default
+#   uv run so101 train     build the training dataset and train ACT or (--policy pi05) pi0.5, on Hugging Face Jobs by default
 #   uv run so101 run       run the trained policy
 # Each command works on `default` above; add a task name to use another, e.g. `so101 record <task>`.
 # Fields:
