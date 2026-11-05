@@ -41,6 +41,7 @@ def record_args(
         "--dataset.push_to_hub=false",
         "--dataset.streaming_encoding=true",
         "--dataset.encoder_threads=2",
+        "--dataset.rgb_encoder.preset=10",  # SVT-AV1 has no preset above 10; the default of 12 warns per episode
         f"--display_data={str(display).lower()}",
     ]
     if s.teleop.max_relative_target:

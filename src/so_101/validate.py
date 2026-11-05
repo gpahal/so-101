@@ -185,12 +185,17 @@ def validate_dataset(
         brightness, problems = [], []
         for ep in range(meta.total_episodes):
             try:
+                decoded = 0
                 for i, frame in episode_frames(meta, ep, key):
+                    decoded += 1
                     if frame.shape[:2] != (height, width):
                         problems.append(f"episode {ep} is {frame.shape[1]}x{frame.shape[0]}, expected {width}x{height}")
                         break
                     if i % 10 == 0:
                         brightness.append(float(frame.mean()))
+                else:
+                    if decoded != lengths[ep]:
+                        problems.append(f"episode {ep} has {decoded} video frames for {lengths[ep]} rows of joint data")
             except Exception as e:
                 problems.append(str(e))
         if problems:

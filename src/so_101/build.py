@@ -21,6 +21,8 @@ from so_101.tasks import Task
 from so_101.validate import validate_dataset
 
 BUILD_CRF = 23
+# SVT-AV1 has no preset above 10 here: LeRobot's default of 12 runs as 10, with a warning per episode.
+BUILD_PRESET = 10
 MIN_EPISODE_S = 0.5
 
 
@@ -103,9 +105,11 @@ def build(s: Settings, task: Task) -> Report:
         root=tmp,
         robot_type=source.robot_type,
         use_videos=True,
-        rgb_encoder=RGBEncoderConfig(crf=BUILD_CRF),
-        streaming_encoding=True,
-        encoder_threads=2,
+        rgb_encoder=RGBEncoderConfig(crf=BUILD_CRF, preset=BUILD_PRESET),
+        # Streaming drops frames when its encoder falls behind, which suits a live recording but not
+        # this: nothing is waiting on a build, so write every frame and encode each episode after.
+        streaming_encoding=False,
+        image_writer_threads=8,
     )
 
     video_keys = source.video_keys
