@@ -49,14 +49,18 @@ usb_id = "32e6:9221"
 [cameras.front.controls]
 # Anti-flicker for 50 Hz mains (India). 0 = off, 1 = 50 Hz, 2 = 60 Hz.
 power-line-frequency = 1
-# Fixed 10 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. On the
-# black mat, auto exposure blew out 24% of the picture (white walls); 10 ms clips 0.2% and gives the
-# strongest colour. The camera runs at 20 fps whatever the exposure.
+# Fixed 20 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. Auto
+# exposure blows out the walls and bowl; shorter exposures (2.5, 5 ms) band and go dark. Picked from a
+# sweep of exposure, gamma, contrast and saturation: 20 ms with gamma 80 is bright with nothing clipped.
+# Fixed exposure doesn't adapt to light: if the room gets much brighter, try 10 ms with gamma 100.
 auto-exposure-mode = 1
-exposure-time-abs = 100
+exposure-time-abs = 200
+gamma = 80
 # The camera's defaults, listed so applying this config also undoes any other values left set.
-gamma = 115
+# white-balance-temp is left out: this camera accepts it but the picture doesn't change.
 brightness = 0
+contrast = 32
+saturation = 57
 
 # Camera on the gripper.
 [cameras.wrist]
