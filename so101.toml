@@ -39,7 +39,7 @@ max_relative_target = 10
 
 # Fixed camera looking at the workspace.
 [cameras.front]
-index = 1
+index = 0
 width = 640
 height = 480
 fps = 30
@@ -64,7 +64,7 @@ saturation = 57
 
 # Camera on the gripper.
 [cameras.wrist]
-index = 0
+index = 1
 width = 640
 height = 480
 fps = 30
@@ -73,19 +73,19 @@ usb_id = "32e6:9005"
 
 [cameras.wrist.controls]
 # This camera ignores power-line-frequency, so tube lights on 50 Hz mains put rolling bands in
-# its picture. A fixed exposure of 28.5 ms measured 0.3% flicker against 5.3% on auto, at about
-# 20 fps. Fixed exposure doesn't adapt to light: if images get too dark or bright, retune it or
-# set auto-exposure-mode = 8 (auto) and delete exposure-time-abs.
+# its picture. A fixed exposure of a whole number of the 10 ms flicker cycles avoids them (auto
+# measured 5.3% flicker). Fixed exposure doesn't adapt to light: if images get too dark or bright,
+# retune it or set auto-exposure-mode = 8 (auto) and delete exposure-time-abs. A longer exposure
+# slows the camera (40 ms: 14 fps).
+# Tuned for the wooden table: the black mat's settings (28.5 ms, gamma 150, brightness 20) blew out
+# 47% of the picture on it. 20 ms with gamma 100 and brightness -20 keeps the wood, cup and bowl clear.
 auto-exposure-mode = 1
-exposure-time-abs = 285
-# A longer exposure brightens the picture but slows the camera (40 ms: 14 fps). Gamma and brightness
-# don't: with them it measured 127/255 on a black mat instead of 50, still at 20 fps.
-gamma = 150
-brightness = 20
-# The camera's defaults, listed so applying this config also undoes any other values left set.
-# A sweep of 20 and 30 ms exposures with other gamma, brightness and saturation found nothing better.
+exposure-time-abs = 200
+gamma = 100
+brightness = -20
+saturation = 45
+# The camera's default, listed so applying this config also undoes any other value left set.
 contrast = 27
-saturation = 25
 
 # Where `so101 record` saves demos: <dir>/<task>/sessions/, plus edits and the training dataset.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.
