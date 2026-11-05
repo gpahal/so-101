@@ -110,14 +110,32 @@ device = "mps"
 # 0 turns it off.
 max_relative_target = 5
 
-# `uv run so101 train <task>`: train ACT on a task you recorded with `so101 record`.
-[train]
-# Hugging Face Jobs hardware the run is sent to; `uv run hf jobs hardware` lists flavors and prices.
-# "local" trains on this Mac instead (many hours for ACT). Remote runs need `uv run hf auth login`
-# and credit on your Hugging Face account.
-job_target = "a100-large"
-# Stops the job and its billing if it runs longer than this.
-job_timeout = "3h"
-# ACT's docs put 100k steps at batch 64 at about 1.5 h on an A100, so this is roughly 30 minutes.
-steps = 30000
-batch_size = 64
+# `uv run so101 train <task> [--policy act|pi05]`: train a policy on a task you recorded.
+# job_target is the Hugging Face Jobs hardware, and `uv run hf jobs hardware` lists flavors and
+# prices. Remote runs need `uv run hf auth login` and credit on your Hugging Face account. `--target
+# local` trains on this Mac instead, for ACT only, and takes days at these settings.
+# job_timeout stops the job and its billing. Keep it at least 2.5x the expected time. It covers
+# start-up and uploads as well as training, and a job that hits it loses work since its last checkpoint.
+# Measured in November 2026 on 50 demos (17,970 frames), and the time per step doesn't depend on
+# the number of demos.
+
+[train.act]
+# 20 steps/s here, so about 1.5 hours and $4. An A100 reaches 14 steps/s (2 hours, $5) and an A10G 6
+# (4.5 hours, $5-7). The batch size and steps are the recipe that reached 37/40 at 100 demos.
+job_target = "rtx-pro-6000"
+job_timeout = "4h"
+steps = 100000
+batch_size = 8
+num_workers = 12
+save_freq = 20000
+
+[train.pi05]
+# 2.9 s a step here, so about 5 hours and $14 with start-up. An A100 takes 4.6 s a step, so about
+# 8 hours and $19, and an A10G can't fit this batch size. The batch size and steps are the recipe
+# that scored 27/40 at 50 demos. Needs access to google/paligemma-3b-pt-224 on Hugging Face.
+job_target = "rtx-pro-6000"
+job_timeout = "14h"
+steps = 6000
+batch_size = 32
+num_workers = 12
+save_freq = 3000

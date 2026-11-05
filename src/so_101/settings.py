@@ -127,10 +127,14 @@ class Run:
 
 @dataclass(frozen=True)
 class Train:
+    """One policy's training recipe: a `[train.<policy>]` section of so101.toml."""
+
     job_target: str
     job_timeout: str
     steps: int
     batch_size: int
+    num_workers: int
+    save_freq: int
 
 
 @dataclass(frozen=True)
@@ -140,7 +144,7 @@ class Settings:
     teleop: Teleop
     cameras: dict[str, Camera]
     run: Run
-    train: Train
+    train: dict[str, Train]
     data_dir: Path
     path: Path
 
@@ -201,12 +205,17 @@ def load() -> Settings:
             device=run.get("device", "mps"),
             max_relative_target=run.get("max_relative_target", 5),
         ),
-        train=Train(
-            job_target=train.get("job_target", "a100-large"),
-            job_timeout=train.get("job_timeout", "3h"),
-            steps=train.get("steps", 30000),
-            batch_size=train.get("batch_size", 64),
-        ),
+        train={
+            policy: Train(
+                job_target=section["job_target"],
+                job_timeout=section["job_timeout"],
+                steps=section["steps"],
+                batch_size=section["batch_size"],
+                num_workers=section["num_workers"],
+                save_freq=section["save_freq"],
+            )
+            for policy, section in train.items()
+        },
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,
     )

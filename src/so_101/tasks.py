@@ -49,7 +49,11 @@ class Task:
 
     @property
     def policy(self) -> str:
-        return self.policy_repo or f"{hf_user()}/act_so101_{self.name}"
+        return self.policy_repo or self.trained_policy("act")
+
+    def trained_policy(self, policy_type: str) -> str:
+        """Hub repo that training this task with `policy_type` pushes to."""
+        return f"{hf_user()}/{policy_type}_so101_{self.name}"
 
     @property
     def dataset(self) -> str:
