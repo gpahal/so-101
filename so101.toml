@@ -82,6 +82,10 @@ exposure-time-abs = 285
 # don't: with them it measured 127/255 on a black mat instead of 50, still at 20 fps.
 gamma = 150
 brightness = 20
+# The camera's defaults, listed so applying this config also undoes any other values left set.
+# A sweep of 20 and 30 ms exposures with other gamma, brightness and saturation found nothing better.
+contrast = 27
+saturation = 25
 
 # Where `so101 record` saves demos: <dir>/<task>/sessions/, plus edits and the training dataset.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.
