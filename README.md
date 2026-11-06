@@ -218,8 +218,9 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
 5. **Train:** `uv run so101 train`.
    - It builds the training dataset from every session and your edits.
    - It uploads the dataset to the private Hub dataset `<you>/so101_<task>`, replacing any earlier upload.
-   - It trains ACT on Hugging Face Jobs (`[train.act]` in `so101.toml`: an RTX PRO 6000 for 100k steps at batch 8, about 1.5 hours and $4, stopped at 4 hours).
-   - `--policy pi05` trains π0.5 instead (`[train.pi05]`: an RTX PRO 6000 for 6k steps at batch 32, about 5 hours and $14, stopped at 14 hours). First request access to [its tokenizer](https://huggingface.co/google/paligemma-3b-pt-224).
+   - It trains ACT on Hugging Face Jobs (`[train.act]` in `so101.toml`: an RTX PRO 6000 for 2,000 steps per demo at batch 8). 50 demos take 100k steps, about 1.5 hours and $4, stopped at 4 hours.
+   - `--policy pi05` trains π0.5 instead (`[train.pi05]`: an RTX PRO 6000 for 120 steps per demo at batch 32). 50 demos take 6k steps, about 5 hours and $14, stopped at 13 hours. First request access to [its tokenizer](https://huggingface.co/google/paligemma-3b-pt-224).
+   - Steps follow the demos kept after your edits, and the timeout follows the steps at 2.5x the expected time, so 100 demos take twice as long and cost twice as much. The command prints all of this before it starts. Other `--target` flavors need a measured speed in `so101.toml`.
    - Checkpoints go to the model repo as they're saved. To continue a stopped run: `uv run lerobot-train --config_path=<you>/<policy>_so101_<task> --resume=true --job.target=<flavor>`.
    - Logs stream to the terminal. Ctrl+C stops watching but the job keeps running (`uv run hf jobs ps`, `uv run hf jobs logs <id>`).
    - The trained policy lands in the private repo `<you>/<policy>_so101_<task>`.

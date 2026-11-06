@@ -439,6 +439,11 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         sys.exit(f"No [train.{ns.policy}] section in {s.path}.")
     recipe = s.train[ns.policy]
     target = ns.target or recipe.job_target
+    if target != "local" and target not in recipe.seconds_per_step:
+        sys.exit(
+            f"No measured {ns.policy} speed on {target}, so no safe timeout. Measured: "
+            f"{', '.join(recipe.seconds_per_step)}. Add it to [train.{ns.policy}.seconds_per_step] in {s.path}."
+        )
     if ns.policy == "pi05":
         if target == "local":
             sys.exit("pi0.5 can't train locally: it needs an NVIDIA GPU with the `lerobot[pi]` extra.")
@@ -449,18 +454,19 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     kept = data.kept_episodes(s, task)
     if kept < task.episodes:
         print(f"WARNING: {kept} of {task.episodes} demos; training anyway.", file=sys.stderr)
+    steps = recipe.steps(kept)
     root = data.train_root(s, task)
     args = [
         f"--policy.type={ns.policy}",
         f"--policy.repo_id={policy}",
         "--policy.private=true",
         *POLICY_FLAGS[ns.policy],
-        *([f"--policy.scheduler_decay_steps={recipe.steps}"] if ns.policy == "pi05" else []),
+        *([f"--policy.scheduler_decay_steps={steps}"] if ns.policy == "pi05" else []),
         f"--job_name={ns.policy}_so101_{task.name}",
-        f"--steps={recipe.steps}",
+        f"--steps={steps}",
         f"--batch_size={recipe.batch_size}",
         f"--num_workers={recipe.num_workers}",
-        f"--save_freq={recipe.save_freq}",
+        f"--save_freq={recipe.save_freq(steps)}",
         "--wandb.enable=false",
         f"--job.target={target}",
     ]
@@ -469,12 +475,16 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     else:
         print(f"Uploading the training dataset to the private Hub dataset {task.dataset}...")
         push_dataset(root, task.dataset)
-        args += [f"--dataset.repo_id={task.dataset}", f"--job.timeout={recipe.job_timeout}",
+        timeout = recipe.job_timeout(steps, target)
+        args += [f"--dataset.repo_id={task.dataset}", f"--job.timeout={timeout}",
                  "--save_checkpoint_to_hub=true",
                  # This Mac's decoder is sent along otherwise. That's PyAV when TorchCodec can't load here,
                  # and PyAV ran out of memory on the job's 192-core host.
                  "--dataset.video_backend=torchcodec"]
-        print(f"Training {ns.policy} on Hugging Face Jobs ({target}, stops after {recipe.job_timeout}).")
+        print(
+            f"Training {ns.policy} on {kept} demos for {steps:,} steps on Hugging Face Jobs ({target}, "
+            f"about {recipe.expected_hours(steps, target):.1f} hours, stops after {timeout})."
+        )
         print("Ctrl+C stops watching but leaves the job running; `uv run hf jobs ps` lists jobs.\n")
     lerobot("lerobot-train", [*args, *extra])
 

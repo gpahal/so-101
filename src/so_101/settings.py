@@ -1,6 +1,7 @@
 """Load `so101.toml` and resolve each arm's current serial port."""
 
 import json
+import math
 import os
 import re
 import tomllib
@@ -16,6 +17,10 @@ ARMS: tuple[ArmName, ...] = ("follower", "leader")
 # LeRobot's device type and CLI flag prefix for each arm.
 LEROBOT_TYPE = {"follower": "so101_follower", "leader": "so101_leader"}
 LEROBOT_PREFIX = {"follower": "robot", "leader": "teleop"}
+
+# A training job's timeout, from its expected time plus start-up. Generous, because hitting it loses work.
+JOB_TIMEOUT_MARGIN = 2.5
+JOB_STARTUP_S = 600
 
 
 def config_path() -> Path:
@@ -130,11 +135,23 @@ class Train:
     """One policy's training recipe: a `[train.<policy>]` section of so101.toml."""
 
     job_target: str
-    job_timeout: str
-    steps: int
+    seconds_per_step: dict[str, float]  # measured speed on each Hugging Face Jobs flavor
+    steps_per_demo: int
     batch_size: int
     num_workers: int
-    save_freq: int
+    checkpoints: int
+
+    def steps(self, demos: int) -> int:
+        return self.steps_per_demo * demos
+
+    def save_freq(self, steps: int) -> int:
+        return max(steps // self.checkpoints, 1)
+
+    def expected_hours(self, steps: int, target: str) -> float:
+        return (JOB_STARTUP_S + steps * self.seconds_per_step[target]) / 3600
+
+    def job_timeout(self, steps: int, target: str) -> str:
+        return f"{math.ceil(self.expected_hours(steps, target) * JOB_TIMEOUT_MARGIN)}h"
 
 
 @dataclass(frozen=True)
@@ -208,11 +225,11 @@ def load() -> Settings:
         train={
             policy: Train(
                 job_target=section["job_target"],
-                job_timeout=section["job_timeout"],
-                steps=section["steps"],
+                seconds_per_step=section["seconds_per_step"],
+                steps_per_demo=section["steps_per_demo"],
                 batch_size=section["batch_size"],
                 num_workers=section["num_workers"],
-                save_freq=section["save_freq"],
+                checkpoints=section["checkpoints"],
             )
             for policy, section in train.items()
         },

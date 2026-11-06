@@ -114,28 +114,40 @@ max_relative_target = 5
 # job_target is the Hugging Face Jobs hardware, and `uv run hf jobs hardware` lists flavors and
 # prices. Remote runs need `uv run hf auth login` and credit on your Hugging Face account. `--target
 # local` trains on this Mac instead, for ACT only, and takes days at these settings.
-# job_timeout stops the job and its billing. Keep it at least 2.5x the expected time. It covers
-# start-up and uploads as well as training, and a job that hits it loses work since its last checkpoint.
-# Measured in November 2026 on 50 demos (17,970 frames), and the time per step doesn't depend on
-# the number of demos.
+# The job's timeout stops it and its billing, and a job that hits it loses work since its last
+# checkpoint. It's 2.5x the expected time, worked out from the steps and seconds_per_step, plus 10
+# minutes of start-up, rounded up to whole hours. Add a flavor's measured speed to use it.
+# steps_per_demo sets the steps from the demos kept after edits, so each demo is seen as often when
+# you add more. checkpoints sets how many get saved, whatever the length of the run.
+# Speeds measured in November 2026 on 50 demos (17,970 frames). They don't depend on the number of demos.
 
 [train.act]
-# 20 steps/s here, so about 1.5 hours and $4. An A100 reaches 14 steps/s (2 hours, $5) and an A10G 6
-# (4.5 hours, $5-7). The batch size and steps are the recipe that reached 37/40 at 100 demos.
+# 100k steps and about 1.5 hours and $4 at 50 demos; 200k and about 3 hours and $8 at 100. An A100
+# takes 1.4x as long (about 2 hours and $5 at 50 demos) and an A10G 3.3x (4.5 hours and $5-7). ACT's
+# error on unseen demos levels off early, so this length is cheap insurance rather than a known need.
+# Its learning rate is constant, so you can test the checkpoints along the way as well as the final one.
 job_target = "rtx-pro-6000"
-job_timeout = "4h"
-steps = 100000
+steps_per_demo = 2000
 batch_size = 8
 num_workers = 12
-save_freq = 20000
+checkpoints = 5
+
+[train.act.seconds_per_step]
+rtx-pro-6000 = 0.05
+a100-large = 0.071
+a10g-large = 0.167
 
 [train.pi05]
-# 2.9 s a step here, so about 5 hours and $14 with start-up. An A100 takes 4.6 s a step, so about
-# 8 hours and $19, and an A10G can't fit this batch size. The batch size and steps are the recipe
-# that scored 27/40 at 50 demos. Needs access to google/paligemma-3b-pt-224 on Hugging Face.
+# 6k steps and about 5 hours and $14 at 50 demos; 12k and about 10 hours and $27 at 100. An A100
+# takes 1.6x as long (about 8 hours and $19 at 50 demos), and an A10G can't fit this batch size.
+# 6k steps scored 27/40 at 50 demos in the recipe's source; longer runs haven't been tested on a robot.
+# Needs access to google/paligemma-3b-pt-224 on Hugging Face.
 job_target = "rtx-pro-6000"
-job_timeout = "14h"
-steps = 6000
+steps_per_demo = 120
 batch_size = 32
 num_workers = 12
-save_freq = 3000
+checkpoints = 2
+
+[train.pi05.seconds_per_step]
+rtx-pro-6000 = 2.9
+a100-large = 4.6
