@@ -90,18 +90,22 @@ def check_system(report: Report, s: Settings, cameras: list[Camera], keyboard: b
 # --- Arms -----------------------------------------------------------------------------------------
 
 
-def _open_bus(arm: Arm, port: str) -> "SerialMotorsBus":
+def _open_bus(arm: Arm, port: str, use_degrees: bool = False) -> "SerialMotorsBus":
     """The arm's motor bus as LeRobot defines it, with the calibration file loaded, opened read-only."""
     from lerobot.motors import SerialMotorsBus
 
     if arm.name == "follower":
         from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
-        device = SO101Follower(SO101FollowerConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir))
+        device = SO101Follower(
+            SO101FollowerConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir, use_degrees=use_degrees)
+        )
     else:
         from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
-        device = SO101Leader(SO101LeaderConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir))
+        device = SO101Leader(
+            SO101LeaderConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir, use_degrees=use_degrees)
+        )
     # A separate bus, not device.bus: when `device` is garbage-collected its __del__ disconnects its
     # bus if open, which writes torque-off to every motor and closes the port.
     bus = SerialMotorsBus(port=port, motors=device.bus.motors, calibration=device.calibration)
@@ -122,6 +126,15 @@ class MotorReading:
     position: int  # raw encoder steps, 0-4095
     range_pct: float | None  # where `position` is within the calibrated range; None if uncalibrated
     alarms: list[str]
+
+
+def read_pose(arm: Arm, use_degrees: bool) -> dict[str, float]:
+    """Each joint's position in the units a policy sees, without writing anything."""
+    bus = _open_bus(arm, arm.resolve_port(), use_degrees=use_degrees)
+    try:
+        return bus.sync_read("Present_Position", num_retry=2)
+    finally:
+        close_bus(bus)
 
 
 def read_motors(arm: Arm) -> list[MotorReading]:

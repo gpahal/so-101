@@ -33,6 +33,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 check [task] [--live] [--save-reference]` | Check arms, cameras and setup. Read-only unless `--live`. See [Checking the setup](#checking-the-setup) |
 | `uv run so101 info` | Show config, resolved ports, camera indices and calibration status |
 | `uv run so101 find-port follower` | Detect a board by unplugging it, and save its port and serial number to `so101.toml` |
+| `uv run so101 pose [task]` | Compare the follower's current pose with the demos' start pose (read-only) |
 | `uv run so101 motors [follower\|leader] [--watch S]` | Show each motor's temperature, voltage, load, position within its calibrated range, and alarms. Read-only; `--watch 2` refreshes every 2 seconds |
 | `uv run so101 scan [follower\|leader]` | Ping motors at every baud rate and list the ids that answer. Read-only |
 | `uv run so101 setup-motors follower` | Set motor ids and baud rates, one motor at a time. Writes to motor EEPROM; only needed once per arm |
