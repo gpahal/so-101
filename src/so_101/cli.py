@@ -215,6 +215,12 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         print(f"Replaying real commands: {result['lifted']}/{count} lifted the object, {result['in_bowl']}/{count} reached the bowl.")
         print("Joint error per joint: " + ", ".join(f"{e:.1f}" for e in result["error"]))
         print(f"Real and sim side by side: {video}")
+    elif ns.action == "tune":
+        from so_101.sim import appearance
+
+        print("Tuning the sim's images so this model acts on them as it does on real ones...", flush=True)
+        appearance.fit_for_policy(scene, task.download_policy(ns.revision), s.run.device, ns.steps)
+        print(f"Done. Measure it with: uv run so101 sim check {task.name} --revision {ns.revision or 'main'}")
     elif ns.action == "check":
         policy = task.download_policy(ns.revision)
         print(f"Comparing the model's predictions on real and sim images ({s.run.device})...", flush=True)
@@ -717,7 +723,7 @@ def main() -> None:
     p.set_defaults(fn=cmd_scan)
 
     p = sub.add_parser("sim", help="build a simulated twin of a task from its demos, and try policies in it")
-    p.add_argument("action", choices=["build", "replay", "check", "eval"])
+    p.add_argument("action", choices=["build", "replay", "tune", "check", "eval"])
     p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="for eval: which model (default: act)")
     p.add_argument("--revision", help="for check and eval: which version of the model")
@@ -726,6 +732,7 @@ def main() -> None:
     p.add_argument("--limit", type=float, help="the per-step movement limit (default: the run limit)")
     p.add_argument("--refit-cameras", action="store_true", help="for build: fit the cameras again, after moving one")
     p.add_argument("--refit-motors", action="store_true", help="for build: fit the motors to the real follower again")
+    p.add_argument("--steps", type=int, default=6000, help="for tune: training steps, at about 0.5 s each on this Mac (default: 6000)")
     p.set_defaults(fn=cmd_sim)
 
     p = sub.add_parser("pose", help="compare the follower's current pose with the demos' start pose (read-only)")

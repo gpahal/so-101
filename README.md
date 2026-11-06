@@ -240,19 +240,20 @@ If it fails at some cylinder positions, record 10 to 20 more demos there (`--epi
 
 ### Try a policy in simulation
 
-`so101 sim` builds a MuJoCo twin of a task from its demos, with nothing to measure by hand. Joint angles give the table, where the object was grasped and where it was released. The front camera's real background comes from averaging out the moving arm, and both cameras' poses come from lining the simulated arm up with real frames.
+`so101 sim` builds a MuJoCo twin of a task from its demos, with nothing to measure by hand. Joint angles give the table, where the object was grasped and where it was released. Each joint's motor is fitted to how the real follower moved. The front camera's real background comes from averaging out the moving arm, both cameras' poses come from lining the simulated arm up with real frames, and a small network learns the remaining difference between rendered and real images.
 
 ```bash
 uv sync --extra sim
-uv run so101 sim build                        # after recording demos, or changing [sim] in so101.toml
-uv run so101 sim replay                       # can the sim redo the real demos?
-uv run so101 sim check --revision 50-demos    # does the model act the same on sim images as real ones?
-uv run so101 sim eval --revision 50-demos --episodes 10 --action-steps 30
+uv run so101 sim build                       # after new demos or changing [sim] in so101.toml; about 30 minutes
+uv run so101 sim replay                      # can the sim redo the real demos?
+uv run so101 sim tune --revision 50-demos    # match the sim's images to this model; about 50 minutes
+uv run so101 sim check --revision 50-demos   # how differently does the model act on sim images?
+uv run so101 sim eval --revision 50-demos --episodes 20 --action-steps 100
 ```
 
-Everything it works out goes in `data/<task>/sim/`. After moving a camera, record new demos and add `--refit-cameras`. Measure the object and bowl and set them in `[sim]` to make it more accurate.
+Everything it works out goes in `data/<task>/sim/`. After moving a camera, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`. Measure the object and bowl and set them in `[sim]` to make it more accurate.
 
-Trust the results only as far as the checks support. `check` compares the model's predictions on sim and real images, and under about 2x worse is the point where closed-loop results start to mean something. Above that, use it to test the pipeline and settings, not to judge a model. Grip contact and motor behaviour are approximations, and real attempts are still the final test.
+`check` scores demos held back from fitting. Trust closed-loop results only as far as its gap supports: it's the extra error the model makes on sim images. `tune` is specific to one model, so rerun it after retraining, and it hasn't been done for pi0.5. Grip contact and motor behaviour are approximations, and real attempts are still the final test.
 
 ### Run on a cloud GPU
 

@@ -31,7 +31,7 @@ DEFAULTS = {
 
 def build(
     demos_root: Path, out: Path, prompt: str, overrides: dict, teleop_limit: float, device: str,
-    refit_cameras: bool = False, refit_motors: bool = False, appearance_steps: int = 8000,
+    refit_cameras: bool = False, refit_motors: bool = False, appearance_steps: int = 4000,
 ) -> dict:
     """Write `scene.json`, the background and the table texture to `out`, and return the scene."""
     out.mkdir(parents=True, exist_ok=True)
