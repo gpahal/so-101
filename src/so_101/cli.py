@@ -6,19 +6,24 @@ Any arguments after the known ones are passed through to the LeRobot command, so
 
 import argparse
 import json
+import os
 import shlex
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from serial.tools import list_ports
 
-from so_101 import data, remote, settings, tasks
+from so_101 import data, remote, rollout, settings, tasks
 from so_101.check import narrow_joints_warning, preflight
 from so_101.console import filter_stderr, run_lerobot
 from so_101.devices import apply_camera_controls, find_camera, video_devices
 from so_101.report import Report
 from so_101.settings import ARMS, Arm, ConfigError, PortNotFoundError, cameras_arg
+
+
+UNTIL_STOPPED_S = 24 * 3600  # an attempt of `--duration 0`: LeRobot needs a length, and Esc or Ctrl+C ends it
 
 
 def lerobot(command: str, args: list[str]) -> None:
@@ -509,27 +514,64 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         specs.append(by_name[ours].lerobot_spec(key=theirs, width=width, height=height))
 
     duration = s.run.duration_s if ns.duration is None else ns.duration
+    episodes = s.run.episodes if ns.episodes is None else ns.episodes
+    reset_time = task.reset_time_s if ns.reset_time is None else ns.reset_time
+    name = f"{ns.policy}_{task.name}_{time.strftime('%Y%m%d-%H%M%S')}"
+    run_dir = s.outputs_dir / "rollouts" / name
+    dataset = run_dir / "dataset"
+    log = run_dir / "run.log"
     args = [
-        "--strategy.type=base",
+        "--strategy.type=episodic",
         *(remote.client_args() if ns.remote else [f"--policy.path={task.download_policy(ns.revision)}"]),
         *s.follower.lerobot_args(),
         cameras_arg(specs),
         f"--robot.use_degrees={str(task.use_degrees).lower()}",
-        f"--task={task.prompt}",
         f"--fps={task.fps}",
-        f"--duration={duration}",
         *([] if ns.remote else [f"--device={s.run.device}"]),
+        f"--dataset.repo_id=local/rollout_{name}",
+        f"--dataset.root={dataset}",
+        f"--dataset.single_task={task.prompt}",
+        f"--dataset.fps={task.fps}",
+        f"--dataset.num_episodes={episodes}",
+        f"--dataset.episode_time_s={duration or UNTIL_STOPPED_S}",
+        f"--dataset.reset_time_s={reset_time}",
+        "--dataset.push_to_hub=false",
+        "--dataset.streaming_encoding=true",
+        "--dataset.encoder_threads=2",
+        "--dataset.rgb_encoder.preset=10",
     ]
     if s.run.max_relative_target:
         args.append(f"--robot.max_relative_target={s.run.max_relative_target}")
     if ns.display:
         args.append("--display_data=true")
-    if server is None:
-        lerobot("lerobot-rollout", [*args, *extra])
-    with remote.tunnel(server.id):
-        code = run_lerobot("lerobot-rollout", [*args, *extra])
-    print(f"The policy server keeps billing until: uv run so101 server stop (job {server.id})", file=sys.stderr)
+    run_dir.mkdir(parents=True)
+    print(f"\nRecording this run to {run_dir}\n  Video and joint data: {dataset}\n  Log: {log}", flush=True)
+    if start_pose := data.demo_start_pose(s, task):
+        os.environ[rollout.START_POSE_ENV] = json.dumps(start_pose)
+        print("  Each attempt starts at the demos' start pose: " + ", ".join(f"{v:g}" for v in start_pose.values()), flush=True)
+    else:
+        print("  Each attempt starts at the pose the arm is in now.", flush=True)
+    print("  Keys: right arrow ends an attempt or reset, left arrow redoes it, Esc stops.\n", flush=True)
+    code = 130
+    try:
+        with remote.tunnel(server.id) if server else nullcontext():
+            code = run_lerobot("so101-rollout", [*args, *extra], log_path=log)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print_rollout_summary(run_dir, dataset, log)
+        if server:
+            print(f"The policy server keeps billing until: uv run so101 server stop (job {server.id})")
     sys.exit(code)
+
+
+def print_rollout_summary(run_dir: Path, dataset: Path, log: Path) -> None:
+    info = dataset / "meta" / "info.json"
+    attempts = json.loads(info.read_text()).get("total_episodes", 0) if info.is_file() else 0
+    print(f"\nThis run is in {run_dir}\n  Attempts saved: {attempts}", flush=True)
+    for video in sorted((dataset / "videos").glob("*/*/*.mp4")):
+        print(f"  Video: {video}", flush=True)
+    print(f"  Video and joint data: {dataset}\n  Log: {log}", flush=True)
 
 
 def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
@@ -633,9 +675,11 @@ def main() -> None:
     p.add_argument("--target", help="HF Jobs flavor, or `local` for this Mac (default: [train.<policy>] in so101.toml)")
     p.set_defaults(fn=cmd_train)
 
-    p = sub.add_parser("run", help="run a task's policy on the follower")
+    p = sub.add_parser("run", help="run a task's policy on the follower, recording to outputs/rollouts/")
     p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
-    p.add_argument("--duration", type=float, help="seconds; 0 runs until Ctrl+C (default: [run] in so101.toml)")
+    p.add_argument("--duration", type=float, help="seconds per attempt; 0 runs until Esc or Ctrl+C (default: [run] in so101.toml)")
+    p.add_argument("--episodes", type=int, help="how many attempts to make (default: [run] in so101.toml)")
+    p.add_argument("--reset-time", type=float, help="seconds to reset the scene between attempts (default: the task's reset_time_s)")
     p.add_argument("--display", action="store_true", help="stream cameras and joints to a Rerun viewer")
     p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to run (default: act)")

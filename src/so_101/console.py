@@ -96,14 +96,43 @@ def filter_stderr() -> None:
     atexit.register(restore)
 
 
-def run_lerobot(command: str, args: list[str]) -> int:
+def run_lerobot(command: str, args: list[str], log_path: Path | None = None) -> int:
     """Run a LeRobot CLI from the same virtualenv and wait for it, returning its exit code.
 
     Ctrl+C reaches the child too (same process group), so keep waiting while it shuts down cleanly.
+    With `log_path`, its output also goes to that file, without the noise `filter_stderr` drops.
     """
     exe = Path(sys.executable).parent / command
-    print("$", shlex.join([command, *args]), flush=True)
-    proc = subprocess.Popen([str(exe), *args])
+    line = f"$ {shlex.join([command, *args])}\n"
+    print(line, end="", flush=True)
+    if log_path is None:
+        proc = subprocess.Popen([str(exe), *args])
+        return _wait(proc)
+    with log_path.open("ab", buffering=0) as log:
+        log.write(line.encode())
+        read_end, write_end = os.pipe()
+        proc = subprocess.Popen(
+            [str(exe), *args], stdout=write_end, stderr=write_end, env={**os.environ, "PYTHONUNBUFFERED": "1"}
+        )
+        os.close(write_end)
+
+        def pump() -> None:
+            noise = _NoiseFilter()
+            with os.fdopen(read_end, "rb", buffering=0) as pipe:
+                while chunk := pipe.read(65536):
+                    clean = noise.feed(chunk)
+                    log.write(clean)
+                    _write_all(1, clean)
+
+        thread = threading.Thread(target=pump, name="run-log", daemon=True)
+        thread.start()
+        code = _wait(proc)
+        # A viewer the child started can hold the pipe open after the child exits, so don't wait for it.
+        thread.join(timeout=2)
+    return code
+
+
+def _wait(proc: subprocess.Popen) -> int:
     while True:
         try:
             code = proc.wait()

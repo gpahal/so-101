@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 so101 = "so_101.cli:main"
+so101-rollout = "so_101.rollout:main"
 
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]

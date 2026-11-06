@@ -189,6 +189,21 @@ def kept_episodes(s: Settings, task: "Task") -> int:
     )
 
 
+def demo_start_pose(s: Settings, task: "Task") -> dict[str, float] | None:
+    """Each joint's median position at the start of the built demos, if there's a local training set."""
+    import numpy as np
+    import pandas as pd
+
+    root = train_root(s, task)
+    files = sorted(root.glob("data/*/*.parquet"))
+    if not files:
+        return None
+    names = json.loads((root / "meta" / "info.json").read_text())["features"]["observation.state"]["names"]
+    frames = pd.concat(pd.read_parquet(f, columns=["episode_index", "frame_index", "observation.state"]) for f in files)
+    starts = np.stack(frames[frames["frame_index"] == 0]["observation.state"])
+    return dict(zip(names, np.median(starts, axis=0).round(1).tolist(), strict=True))
+
+
 # --- Builds ---------------------------------------------------------------------------------------
 
 
