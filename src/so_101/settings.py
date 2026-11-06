@@ -173,6 +173,7 @@ class Settings:
     run: Run
     train: dict[str, Train]
     remote: dict[str, Remote]
+    sim: dict
     data_dir: Path
     path: Path
 
@@ -250,6 +251,7 @@ def load() -> Settings:
             policy: Remote(job_target=section["job_target"], job_timeout=section["job_timeout"])
             for policy, section in data.get("remote", {}).items()
         },
+        sim=data.get("sim", {}),
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,
     )

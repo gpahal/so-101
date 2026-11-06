@@ -33,6 +33,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 check [task] [--live] [--save-reference]` | Check arms, cameras and setup. Read-only unless `--live`. See [Checking the setup](#checking-the-setup) |
 | `uv run so101 info` | Show config, resolved ports, camera indices and calibration status |
 | `uv run so101 find-port follower` | Detect a board by unplugging it, and save its port and serial number to `so101.toml` |
+| `uv run so101 sim build\|replay\|check\|eval [task]` | Build a simulated twin of a task from its demos, check it, and try a policy in it (needs `uv sync --extra sim`) |
 | `uv run so101 pose [task]` | Compare the follower's current pose with the demos' start pose (read-only) |
 | `uv run so101 motors [follower\|leader] [--watch S]` | Show each motor's temperature, voltage, load, position within its calibrated range, and alarms. Read-only; `--watch 2` refreshes every 2 seconds |
 | `uv run so101 scan [follower\|leader]` | Ping motors at every baud rate and list the ids that answer. Read-only |
@@ -236,6 +237,22 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - Retraining replaces the model in the same repo. To keep the current one, tag it first: `uv run hf repos tag create <you>/act_so101_<task> 50-demos`. Then `--revision 50-demos` runs that version, and leaving it out runs the newest.
 
 If it fails at some cylinder positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.
+
+### Try a policy in simulation
+
+`so101 sim` builds a MuJoCo twin of a task from its demos, with nothing to measure by hand. Joint angles give the table, where the object was grasped and where it was released. The front camera's real background comes from averaging out the moving arm, and both cameras' poses come from lining the simulated arm up with real frames.
+
+```bash
+uv sync --extra sim
+uv run so101 sim build                        # after recording demos, or changing [sim] in so101.toml
+uv run so101 sim replay                       # can the sim redo the real demos?
+uv run so101 sim check --revision 50-demos    # does the model act the same on sim images as real ones?
+uv run so101 sim eval --revision 50-demos --episodes 10 --action-steps 30
+```
+
+Everything it works out goes in `data/<task>/sim/`. After moving a camera, record new demos and add `--refit-cameras`. Measure the object and bowl and set them in `[sim]` to make it more accurate.
+
+Trust the results only as far as the checks support. `check` compares the model's predictions on sim and real images, and under about 2x worse is the point where closed-loop results start to mean something. Above that, use it to test the pipeline and settings, not to judge a model. Grip contact and motor behaviour are approximations, and real attempts are still the final test.
 
 ### Run on a cloud GPU
 

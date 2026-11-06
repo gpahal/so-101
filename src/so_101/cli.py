@@ -22,6 +22,8 @@ from so_101.devices import apply_camera_controls, find_camera, video_devices
 from so_101.report import Report
 from so_101.settings import ARMS, Arm, ConfigError, PortNotFoundError, cameras_arg
 
+SCENE_DIR_ENV = "SO101_SIM_SCENE"
+
 
 UNTIL_STOPPED_S = 24 * 3600  # an attempt of `--duration 0`: LeRobot needs a length, and Esc or Ctrl+C ends it
 
@@ -188,6 +190,63 @@ def cmd_pose(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None
         print(f"{joint:14s} now {pose[joint]:7.1f}  demos {demo:7.1f}  diff {difference:6.1f}  {'ok' if close else 'OFF'}")
     print(f"\nEvery joint is within {rollout.TOLERANCE:g} of the demos' start pose." if not off else
           f"\n{off} joint(s) more than {rollout.TOLERANCE:g} from the demos' start pose. `so101 run` moves them there first.")
+
+
+def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
+    try:
+        from so_101.sim import build as sim_build
+    except ImportError:
+        sys.exit("The simulator needs MuJoCo. Install it with: uv sync --extra sim")
+    task = get_own_task(ns.task)
+    demos, scene = data.train_root(s, task), data.task_dir(s, task) / "sim"
+    if not demos.joinpath("meta", "info.json").is_file():
+        sys.exit(f"No training set at {demos}. Run `uv run so101 build {task.name}` first.")
+    if ns.action != "build" and not (scene / "scene.json").is_file():
+        sys.exit(f"No scene yet. Run `uv run so101 sim build {task.name}` first.")
+    limit = s.run.max_relative_target if ns.limit is None else ns.limit
+    if ns.action == "build":
+        sim_build.build(demos, scene, task.prompt, s.sim, refit_cameras=ns.refit_cameras)
+        print(f"\nScene written to {scene}. Check it with: uv run so101 sim replay {task.name}")
+    elif ns.action == "replay":
+        video = s.outputs_dir / "sim" / f"replay_{task.name}.mp4"
+        episodes = list(range(0, ns.episodes)) if ns.episodes else None
+        result = sim_build.replay(demos, scene, episodes, limit, video)
+        count = len(result["results"])
+        print(f"Replaying real commands: {result['lifted']}/{count} lifted the object, {result['in_bowl']}/{count} reached the bowl.")
+        print("Joint error per joint: " + ", ".join(f"{e:.1f}" for e in result["error"]))
+        print(f"Real and sim side by side: {video}")
+    elif ns.action == "check":
+        policy = task.download_policy(ns.revision)
+        print(f"Comparing the model's predictions on real and sim images ({s.run.device})...", flush=True)
+        result = sim_build.check(demos, scene, policy, s.run.device)
+        for label, key in (("real images", "real"), ("sim images", "sim"), ("sim front, real wrist", "sim_front"), ("real front, sim wrist", "sim_wrist")):
+            print(f"{label:24s} error from the demo: {result[key].mean():.2f}  shoulder pan {result[key][0]:.2f}")
+        ratio = result["sim"].mean() / result["real"].mean()
+        print(f"Sim images make its predictions {ratio:.1f}x worse than real ones.")
+        print("Under 2x, closed-loop results in the sim mean something. Above that, treat them as a smoke test only.")
+    elif ns.action == "eval":
+        output = s.outputs_dir / "sim" / f"eval_{ns.policy}_{task.name}_{time.strftime('%Y%m%d-%H%M%S')}"
+        policy = task.download_policy(ns.revision) if ns.policy == "act" else task.policy_for(ns.policy)
+        config = task.policy_config(ns.revision, ns.policy)
+        action_steps = resolve_action_steps(s, ns, config)
+        os.environ[SCENE_DIR_ENV] = str(scene.resolve())
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        args = [
+            f"--policy.path={policy}",
+            f"--policy.device={s.run.device}",
+            f"--policy.n_action_steps={action_steps}",
+            "--env.type=envhub",
+            f"--env.hub_path={Path(__file__).parent / 'sim'}",
+            "--env.trust_remote_code=true",
+            "--env.task=so101_cylinder_bowl",
+            f"--env.make_env_kwargs={json.dumps({'max_relative_target': limit, 'episode_length': int(s.run.duration_s * 30)})}",
+            f"--eval.n_episodes={ns.episodes or 10}",
+            "--eval.batch_size=1",
+            f"--output_dir={output}",
+        ]
+        code = run_lerobot("lerobot-eval", [*args, *extra])
+        print(f"\nResults and videos: {output}")
+        sys.exit(code)
 
 
 def cmd_setup_motors(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
@@ -657,6 +716,17 @@ def main() -> None:
     p = sub.add_parser("scan", help="ping the motors on each bus at every baud rate (read-only)")
     p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
     p.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("sim", help="build a simulated twin of a task from its demos, and try policies in it")
+    p.add_argument("action", choices=["build", "replay", "check", "eval"])
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
+    p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="for eval: which model (default: act)")
+    p.add_argument("--revision", help="for check and eval: which version of the model")
+    p.add_argument("--episodes", type=int, help="for replay and eval: how many")
+    p.add_argument("--action-steps", type=int, help="for eval: actions to carry out before predicting again")
+    p.add_argument("--limit", type=float, help="the per-step movement limit (default: the run limit)")
+    p.add_argument("--refit-cameras", action="store_true", help="for build: fit the cameras again, after moving one")
+    p.set_defaults(fn=cmd_sim)
 
     p = sub.add_parser("pose", help="compare the follower's current pose with the demos' start pose (read-only)")
     p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")

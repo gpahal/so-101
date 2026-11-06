@@ -168,3 +168,13 @@ job_timeout = "1h"
 [remote.pi05]
 job_target = "l4x1"
 job_timeout = "1h"
+
+# `uv sync --extra sim`, then `uv run so101 sim build`: a simulated twin of a task, worked out from its
+# demos. Rebuild after recording new demos, or after changing anything here. Measure these for accuracy.
+# All are optional. See DEFAULTS in src/so_101/sim/build.py for the rest.
+[sim]
+# object_diameter = 0.036  # metres
+# object_height = 0.03
+# bowl_rim_radius = 0.075
+# bowl_base_radius = 0.032
+# bowl_height = 0.07
