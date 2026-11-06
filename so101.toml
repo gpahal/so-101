@@ -135,7 +135,6 @@ checkpoints = 5
 [train.act.seconds_per_step]
 rtx-pro-6000 = 0.05
 a100-large = 0.071
-a10g-large = 0.167
 
 [train.pi05]
 # 6k steps and about 5 hours and $14 at 50 demos; 12k and about 10 hours and $27 at 100. An A100
