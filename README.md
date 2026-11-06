@@ -230,7 +230,7 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
 6. **Run:** `uv run so101 run --display`, from the same rest pose with the cylinder somewhere you recorded.
    - Every run records to its own folder, `outputs/rollouts/<policy>_<task>_<time>/`: the video and joint data in `dataset/`, and the terminal output in `run.log`. It prints where at the start and at the end, including after Ctrl+C.
    - It makes one attempt of 30 seconds by default (`[run]` in `so101.toml`). `--episodes 5` makes more, with `--reset-time` seconds between them to reset the scene: right arrow ends an attempt or reset early, left arrow redoes an attempt, and Esc stops.
-   - Between attempts the follower returns towards its start pose and holds there, so you can't move it by hand. `max_relative_target` can stop that return short, so use one attempt per run when each must start exactly at home.
+   - Every attempt starts from the pose your demos start from (the arm's pose at launch, for a task with no local demos). The arm goes there after each attempt and holds it, so reset the scene around it. An attempt won't start until the arm has arrived: if it can't get there, right arrow turns the motors off so you can move it by hand, and right arrow again carries on. Support the arm first, because it goes limp.
    - Retraining replaces the model in the same repo. To keep the current one, tag it first: `uv run hf repos tag create <you>/act_so101_<task> 50-demos`. Then `--revision 50-demos` runs that version, and leaving it out runs the newest.
 
 If it fails at some cylinder positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.

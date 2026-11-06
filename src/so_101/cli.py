@@ -6,6 +6,7 @@ Any arguments after the known ones are passed through to the LeRobot command, so
 
 import argparse
 import json
+import os
 import shlex
 import sys
 import time
@@ -14,7 +15,7 @@ from pathlib import Path
 
 from serial.tools import list_ports
 
-from so_101 import data, remote, settings, tasks
+from so_101 import data, remote, rollout, settings, tasks
 from so_101.check import narrow_joints_warning, preflight
 from so_101.console import filter_stderr, run_lerobot
 from so_101.devices import apply_camera_controls, find_camera, video_devices
@@ -545,17 +546,16 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         args.append("--display_data=true")
     run_dir.mkdir(parents=True)
     print(f"\nRecording this run to {run_dir}\n  Video and joint data: {dataset}\n  Log: {log}", flush=True)
-    if episodes > 1 and s.run.max_relative_target:
-        print(
-            "  Between attempts the arm can stop short of its start pose, because max_relative_target limits\n"
-            "  LeRobot's 1-second return. Check its pose, or use --episodes 1, when an attempt must start at home.",
-            flush=True,
-        )
+    if start_pose := data.demo_start_pose(s, task):
+        os.environ[rollout.START_POSE_ENV] = json.dumps(start_pose)
+        print("  Each attempt starts at the demos' start pose: " + ", ".join(f"{v:g}" for v in start_pose.values()), flush=True)
+    else:
+        print("  Each attempt starts at the pose the arm is in now.", flush=True)
     print("  Keys: right arrow ends an attempt or reset, left arrow redoes it, Esc stops.\n", flush=True)
     code = 130
     try:
         with remote.tunnel(server.id) if server else nullcontext():
-            code = run_lerobot("lerobot-rollout", [*args, *extra], log_path=log)
+            code = run_lerobot("so101-rollout", [*args, *extra], log_path=log)
     except KeyboardInterrupt:
         pass
     finally:
