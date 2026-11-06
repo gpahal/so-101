@@ -60,11 +60,12 @@ class Task:
         """Hub dataset: the one a pretrained policy was trained on, or where your built demos are uploaded."""
         return self.dataset_repo or f"{hf_user()}/so101_{self.name}"
 
-    @property
-    def local_policy_dir(self) -> Path:
-        return config_path().parent / "outputs" / "policies" / self.policy
+    def local_policy_dir(self, revision: str | None = None) -> Path:
+        """Where a checkpoint is downloaded. Each revision gets its own folder, so they can't mix."""
+        folder = config_path().parent / "outputs" / "policies" / self.policy
+        return folder.with_name(f"{folder.name}@{revision.replace('/', '_')}") if revision else folder
 
-    def download_policy(self) -> Path:
+    def download_policy(self, revision: str | None = None) -> Path:
         """Download the checkpoint and make its config loadable by the installed LeRobot.
 
         Checkpoints saved by newer LeRobot versions can carry config fields this version doesn't
@@ -76,7 +77,13 @@ class Task:
         import lerobot.policies  # noqa: F401  (registers the policy config classes)
         from lerobot.configs.policies import PreTrainedConfig
 
-        path = Path(snapshot_download(self.policy, local_dir=self.local_policy_dir))
+        # Training checkpoints are several times the size of the final model, and running doesn't use them.
+        path = Path(
+            snapshot_download(
+                self.policy, revision=revision, local_dir=self.local_policy_dir(revision),
+                ignore_patterns=["checkpoints/**"],
+            )
+        )
         config_file = path / "config.json"
         config = json.loads(config_file.read_text())
         known = {f.name for f in dataclasses.fields(PreTrainedConfig.get_choice_class(config["type"]))} | {"type"}
@@ -94,11 +101,21 @@ class Task:
     def viewer_url(self) -> str:
         return f"https://huggingface.co/spaces/lerobot/visualize_dataset?path=/{self.dataset}/episode_0"
 
-    def image_sizes(self) -> dict[str, tuple[int, int]]:
+    def image_sizes(self, revision: str | None = None) -> dict[str, tuple[int, int]]:
         """(width, height) of each camera the checkpoint was trained on, from its config.json."""
         from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import EntryNotFoundError, RevisionNotFoundError
 
-        config = json.loads(Path(hf_hub_download(self.policy, "config.json")).read_text())
+        try:
+            config_file = hf_hub_download(self.policy, "config.json", revision=revision)
+        except RevisionNotFoundError as e:
+            raise ConfigError(f"{self.policy} has no revision {revision!r}.") from e
+        except EntryNotFoundError as e:
+            raise ConfigError(
+                f"Revision {revision!r} of {self.policy} has no final model: "
+                "training checkpoint tags like 020000 keep theirs under checkpoints/."
+            ) from e
+        config = json.loads(Path(config_file).read_text())
         prefix = "observation.images."
         return {
             key.removeprefix(prefix): (feature["shape"][2], feature["shape"][1])

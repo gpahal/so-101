@@ -483,7 +483,7 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     task = get_task(ns.task)
 
     # Name each camera after the checkpoint's camera and capture at the size it was trained on.
-    sizes = task.image_sizes()
+    sizes = task.image_sizes(ns.revision)
     if set(sizes) != set(task.cameras):
         sys.exit(f"{task.policy} expects cameras {sorted(sizes)}, but tasks.toml maps {sorted(task.cameras)}.")
     found, _ = preflight(
@@ -498,7 +498,7 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     duration = s.run.duration_s if ns.duration is None else ns.duration
     args = [
         "--strategy.type=base",
-        f"--policy.path={task.download_policy()}",
+        f"--policy.path={task.download_policy(ns.revision)}",
         *s.follower.lerobot_args(),
         cameras_arg(specs),
         f"--robot.use_degrees={str(task.use_degrees).lower()}",
@@ -596,6 +596,7 @@ def main() -> None:
     p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
     p.add_argument("--duration", type=float, help="seconds; 0 runs until Ctrl+C (default: [run] in so101.toml)")
     p.add_argument("--display", action="store_true", help="stream cameras and joints to a Rerun viewer")
+    p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
     p.set_defaults(fn=cmd_run)
 
     ns, extra = parser.parse_known_args()

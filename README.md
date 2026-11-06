@@ -46,7 +46,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 build [task]` | Make the training dataset from all sessions plus your edits (`train` does this itself) |
 | `uv run so101 train [task] [--policy act\|pi05] [--target FLAVOR]` | Train a policy on your demos, ACT by default, on Hugging Face Jobs by default |
 | `uv run so101 backup [task]` | Upload a task's sessions and edits to a private Hub dataset |
-| `uv run so101 run [task] [--duration S] [--display]` | Run a task's ACT policy on the follower, on the Mac's GPU |
+| `uv run so101 run [task] [--duration S] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU |
 | `uv run so101 env` | Print the settings as shell variables |
 
 Every command prints the full LeRobot command it runs. Extra arguments go straight through to LeRobot, for example `uv run so101 teleop --teleop_time_s=60`.
@@ -225,6 +225,7 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - The trained policy lands in the private repo `<you>/<policy>_so101_<task>`.
    - `--target local` trains ACT on this Mac instead, which takes days at these settings.
 6. **Run:** `uv run so101 run --display`, from the same rest pose with the cylinder somewhere you recorded.
+   - Retraining replaces the model in the same repo. To keep the current one, tag it first: `uv run hf repos tag create <you>/act_so101_<task> 50-demos`. Then `--revision 50-demos` runs that version, and leaving it out runs the newest.
 
 If it fails at some cylinder positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.
 
