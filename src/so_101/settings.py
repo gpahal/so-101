@@ -129,6 +129,7 @@ class Run:
     episodes: int
     device: str
     max_relative_target: float
+    action_steps: int
 
 
 @dataclass(frozen=True)
@@ -231,7 +232,8 @@ def load() -> Settings:
             duration_s=run.get("duration_s", 30),
             episodes=run.get("episodes", 1),
             device=run.get("device", "mps"),
-            max_relative_target=run.get("max_relative_target", 5),
+            max_relative_target=run.get("max_relative_target", teleop.get("max_relative_target", 0)),
+            action_steps=run.get("action_steps", 30),
         ),
         train={
             policy: Train(

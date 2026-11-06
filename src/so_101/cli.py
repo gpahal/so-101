@@ -522,7 +522,8 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     task = get_task(ns.task) if ns.policy == "act" else get_own_task(ns.task)
     if ns.policy == "pi05" and not ns.remote:
         sys.exit(f"pi0.5 runs on a cloud GPU. Add --remote, after: uv run so101 server start {task.name} --policy pi05")
-    server = remote.require_server(task.name, ns.policy, ns.revision or "main") if ns.remote else None
+    action_steps = resolve_action_steps(s, ns, task.policy_config(ns.revision, ns.policy))
+    server = remote.require_server(task.name, ns.policy, ns.revision or "main", action_steps) if ns.remote else None
 
     # Name each camera after the checkpoint's camera and capture at the size it was trained on.
     sizes = task.image_sizes(ns.revision, ns.policy)
@@ -547,7 +548,12 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     log = run_dir / "run.log"
     args = [
         "--strategy.type=episodic",
-        *(remote.client_args() if ns.remote else [f"--policy.path={task.download_policy(ns.revision)}"]),
+        # A remote server sets the action steps itself, and its client rejects --policy flags.
+        *(
+            remote.client_args()
+            if ns.remote
+            else [f"--policy.path={task.download_policy(ns.revision)}", f"--policy.n_action_steps={action_steps}"]
+        ),
         *s.follower.lerobot_args(),
         cameras_arg(specs),
         f"--robot.use_degrees={str(task.use_degrees).lower()}",
@@ -576,6 +582,7 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         print("  Each attempt starts at the demos' start pose: " + ", ".join(f"{v:g}" for v in start_pose.values()), flush=True)
     else:
         print("  Each attempt starts at the pose the arm is in now.", flush=True)
+    print(f"  Predicts every {action_steps} steps ({action_steps / task.fps:.1f} s), limit {s.run.max_relative_target:g} per step.", flush=True)
     print("  Keys: right arrow ends an attempt or reset, left arrow redoes it, Esc stops.\n", flush=True)
     code = 130
     try:
@@ -588,6 +595,17 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         if server:
             print(f"The policy server keeps billing until: uv run so101 server stop (job {server.id})")
     sys.exit(code)
+
+
+def resolve_action_steps(s: settings.Settings, ns: argparse.Namespace, config: dict) -> int:
+    """How many actions to carry out per prediction: at least 1, and no more than the model predicts."""
+    steps = s.run.action_steps if ns.action_steps is None else ns.action_steps
+    chunk = config.get("chunk_size", steps)
+    if steps < 1:
+        sys.exit(f"--action-steps must be at least 1, not {steps}.")
+    if steps > chunk:
+        print(f"This model predicts {chunk} steps at a time, so using {chunk} action steps instead of {steps}.", flush=True)
+    return min(steps, chunk)
 
 
 def print_rollout_summary(run_dir: Path, dataset: Path, log: Path) -> None:
@@ -611,12 +629,14 @@ def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     if ns.policy not in s.remote:
         sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
     recipe = s.remote[ns.policy]
+    config = task.policy_config(ns.revision, ns.policy)
     remote.start_server(
         repo=task.policy_for(ns.policy),
         task=task.name,
         policy_type=ns.policy,
         revision=ns.revision or "main",
-        config=task.policy_config(ns.revision, ns.policy),
+        config=config,
+        action_steps=resolve_action_steps(s, ns, config),
         target=ns.target or recipe.job_target,
         timeout=ns.timeout or recipe.job_timeout,
     )
@@ -709,6 +729,7 @@ def main() -> None:
     p.add_argument("--duration", type=float, help="seconds per attempt; 0 runs until Esc or Ctrl+C (default: [run] in so101.toml)")
     p.add_argument("--episodes", type=int, help="how many attempts to make (default: [run] in so101.toml)")
     p.add_argument("--reset-time", type=float, help="seconds to reset the scene between attempts (default: the task's reset_time_s)")
+    p.add_argument("--action-steps", type=int, help="actions to carry out before predicting again (default: [run] in so101.toml)")
     p.add_argument("--display", action="store_true", help="stream cameras and joints to a Rerun viewer")
     p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to run (default: act)")
@@ -720,6 +741,7 @@ def main() -> None:
     p.add_argument("task", nargs="?", help="for start, default: `default` in tasks.toml")
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to serve (default: act)")
     p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
+    p.add_argument("--action-steps", type=int, help="actions to carry out before predicting again (default: [run] in so101.toml)")
     p.add_argument("--target", help="HF Jobs flavor (default: [remote.<policy>] in so101.toml)")
     p.add_argument("--timeout", help="stop the job after this long, like 30m or 2h (default: [remote.<policy>] in so101.toml)")
     p.set_defaults(fn=cmd_server)

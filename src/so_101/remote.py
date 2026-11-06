@@ -53,7 +53,7 @@ main()
 '''
 
 
-def server_config(repo: str, revision: str, config: dict) -> dict:
+def server_config(repo: str, revision: str, config: dict, action_steps: int) -> dict:
     """The policy server's config, describing the model's inputs and outputs from its config.json."""
     vector = {"dtype": "float32", "names": JOINTS, "semantics": SEMANTICS, "shape": [len(JOINTS)]}
     cameras = [
@@ -70,7 +70,7 @@ def server_config(repo: str, revision: str, config: dict) -> dict:
     return {
         "deployment": DEPLOYMENT,
         "model": {"repo_or_path": repo, "revision": revision, "device": "cuda"},
-        "execution": {"supported_modes": ["chunk"], "action_fps": 30.0},
+        "execution": {"supported_modes": ["chunk"], "action_fps": 30.0, "n_action_steps": action_steps},
         "language": {"enabled": False},
         "zenoh": {"mode": "peer", "listen_endpoints": [f"tcp/127.0.0.1:{PORT}"]},
         "semantics": SEMANTICS,
@@ -125,19 +125,22 @@ def active_server():
 def describe(job) -> str:
     labels = job.labels or {}
     return (
-        f"{labels.get('policy')} for {labels.get('task')} at {labels.get('revision')} "
+        f"{labels.get('policy')} for {labels.get('task')} at {labels.get('revision')}, "
+        f"{labels.get('action_steps')} action steps, "
         f"on {job.flavor} (job {job.id}, {job.status.stage})"
     )
 
 
-def start_server(*, repo: str, task: str, policy_type: str, revision: str, config: dict, target: str, timeout: str) -> None:
+def start_server(
+    *, repo: str, task: str, policy_type: str, revision: str, config: dict, action_steps: int, target: str, timeout: str
+) -> None:
     """Start the job and wait until the model is loaded and serving."""
     from huggingface_hub import HfApi, get_token
 
     check_ssh_key()
     if server := active_server():
         sys.exit(f"A policy server is already running: {describe(server)}.\nStop it first: uv run so101 server stop")
-    setup, serve = setup_script(policy_type, server_config(repo, revision, config))
+    setup, serve = setup_script(policy_type, server_config(repo, revision, config, action_steps))
     api = HfApi()
     job = api.run_job(
         image=SERVER_IMAGE,
@@ -146,7 +149,13 @@ def start_server(*, repo: str, task: str, policy_type: str, revision: str, confi
         secrets={"HF_TOKEN": get_token()},
         flavor=target,
         timeout=timeout,
-        labels={"so101": SERVER_LABEL, "task": task, "policy": policy_type, "revision": revision},
+        labels={
+            "so101": SERVER_LABEL,
+            "task": task,
+            "policy": policy_type,
+            "revision": revision,
+            "action_steps": str(action_steps),
+        },
         ssh=True,
     )
     print(f"Started job {job.id} on {target}. It bills until `uv run so101 server stop`, or {timeout} at most.")
@@ -157,7 +166,7 @@ def start_server(*, repo: str, task: str, policy_type: str, revision: str, confi
         sys.exit("\nStopped watching. The job is still running and billing: uv run so101 server stop")
     print(
         "\nThe policy server is ready. Next:\n"
-        f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision}\n"
+        f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision} --action-steps {action_steps}\n"
         "  uv run so101 server stop"
     )
 
@@ -191,14 +200,14 @@ def stop_server() -> None:
     print(f"Stopped {describe(server)}.")
 
 
-def require_server(task: str, policy_type: str, revision: str):
+def require_server(task: str, policy_type: str, revision: str, action_steps: int):
     """The running server, if it serves what this run asks for. Starting one bills, so never do it implicitly."""
-    start = f"uv run so101 server start {task} --policy {policy_type} --revision {revision}"
+    start = f"uv run so101 server start {task} --policy {policy_type} --revision {revision} --action-steps {action_steps}"
     server = active_server()
     if server is None:
         sys.exit(f"No policy server is running. Start one first:\n  {start}")
     labels = server.labels or {}
-    wanted = {"task": task, "policy": policy_type, "revision": revision}
+    wanted = {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps)}
     if {key: labels.get(key) for key in wanted} != wanted or server.status.stage != "RUNNING":
         sys.exit(f"The policy server isn't serving this model: {describe(server)}.\nStop it, then: {start}")
     return server
