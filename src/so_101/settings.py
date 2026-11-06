@@ -155,6 +155,14 @@ class Train:
 
 
 @dataclass(frozen=True)
+class Remote:
+    """A `[remote.<policy>]` section of so101.toml: the job that serves a policy to this Mac."""
+
+    job_target: str
+    job_timeout: str
+
+
+@dataclass(frozen=True)
 class Settings:
     follower: Arm
     leader: Arm
@@ -162,6 +170,7 @@ class Settings:
     cameras: dict[str, Camera]
     run: Run
     train: dict[str, Train]
+    remote: dict[str, Remote]
     data_dir: Path
     path: Path
 
@@ -232,6 +241,10 @@ def load() -> Settings:
                 checkpoints=section["checkpoints"],
             )
             for policy, section in train.items()
+        },
+        remote={
+            policy: Remote(job_target=section["job_target"], job_timeout=section["job_timeout"])
+            for policy, section in data.get("remote", {}).items()
         },
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,

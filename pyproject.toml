@@ -10,7 +10,7 @@ authors = [
 ]
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "lerobot[core-scripts,feetech,training]>=0.6.1",
+    "lerobot[core-scripts,feetech,remote,training]>=0.7.0",
     "pyobjc-framework-avfoundation>=13.0 ; sys_platform == 'darwin'",
 ]
 

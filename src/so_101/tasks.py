@@ -49,7 +49,10 @@ class Task:
 
     @property
     def policy(self) -> str:
-        return self.policy_repo or self.trained_policy("act")
+        return self.policy_for("act")
+
+    def policy_for(self, policy_type: str) -> str:
+        return self.policy_repo or self.trained_policy(policy_type)
 
     def trained_policy(self, policy_type: str) -> str:
         """Hub repo that training this task with `policy_type` pushes to."""
@@ -101,26 +104,30 @@ class Task:
     def viewer_url(self) -> str:
         return f"https://huggingface.co/spaces/lerobot/visualize_dataset?path=/{self.dataset}/episode_0"
 
-    def image_sizes(self, revision: str | None = None) -> dict[str, tuple[int, int]]:
-        """(width, height) of each camera the checkpoint was trained on, from its config.json."""
+    def policy_config(self, revision: str | None = None, policy_type: str = "act") -> dict:
+        """The checkpoint's config.json."""
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import EntryNotFoundError, RevisionNotFoundError
 
+        repo = self.policy_for(policy_type)
         try:
-            config_file = hf_hub_download(self.policy, "config.json", revision=revision)
+            config_file = hf_hub_download(repo, "config.json", revision=revision)
         except RevisionNotFoundError as e:
-            raise ConfigError(f"{self.policy} has no revision {revision!r}.") from e
+            raise ConfigError(f"{repo} has no revision {revision!r}.") from e
         except EntryNotFoundError as e:
             raise ConfigError(
-                f"Revision {revision!r} of {self.policy} has no final model: "
+                f"Revision {revision!r} of {repo} has no final model: "
                 "training checkpoint tags like 020000 keep theirs under checkpoints/."
             ) from e
-        config = json.loads(Path(config_file).read_text())
+        return json.loads(Path(config_file).read_text())
+
+    def image_sizes(self, revision: str | None = None, policy_type: str = "act") -> dict[str, tuple[int, int]]:
+        """(width, height) of each camera the checkpoint was trained on, without its empty slots."""
         prefix = "observation.images."
         return {
             key.removeprefix(prefix): (feature["shape"][2], feature["shape"][1])
-            for key, feature in config["input_features"].items()
-            if key.startswith(prefix)
+            for key, feature in self.policy_config(revision, policy_type)["input_features"].items()
+            if key.startswith(prefix) and not key.startswith(prefix + "empty_camera_")
         }
 
 

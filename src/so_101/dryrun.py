@@ -72,7 +72,7 @@ def smoke_train(report: Report, s: Settings, root: Path, repo_id: str, out: Path
     args = [
         str(exe), f"--dataset.repo_id={repo_id}", f"--dataset.root={root}", "--policy.type=act",
         f"--policy.device={s.run.device}", "--policy.push_to_hub=false", f"--steps={TRAIN_STEPS}", "--batch_size=2",
-        "--num_workers=0", "--log_freq=10", "--save_checkpoint=false", f"--output_dir={out}", "--wandb.enable=false",
+        "--num_workers=0", "--log_freq=10", "--save_checkpoint=false", f"--output_dir={out}",
         "--job_name=dry_run",
     ]
     print(f"\nTraining ACT for {TRAIN_STEPS} steps on the rehearsal data ({s.run.device})...", flush=True)
