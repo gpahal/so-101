@@ -165,6 +165,31 @@ def cmd_motors(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
         print()
 
 
+def cmd_pose(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
+    from so_101.check import read_pose
+
+    task = get_task(ns.task)
+    try:
+        pose = read_pose(s.follower, task.use_degrees)
+    except ConnectionError as e:
+        sys.exit(f"Couldn't read the follower's joints, is the arm's power on? {e}")
+    start = data.demo_start_pose(s, task)
+    if start is None:
+        for joint, position in pose.items():
+            print(f"{joint:14s} now {position:7.1f}")
+        print(f"\n{task.name} has no local demos to compare with, so a run starts from wherever the arm is.")
+        return
+    off = 0
+    for key, demo in start.items():
+        joint = key.removesuffix(".pos")
+        difference = pose[joint] - demo
+        close = abs(difference) <= rollout.TOLERANCE
+        off += not close
+        print(f"{joint:14s} now {pose[joint]:7.1f}  demos {demo:7.1f}  diff {difference:6.1f}  {'ok' if close else 'OFF'}")
+    print(f"\nEvery joint is within {rollout.TOLERANCE:g} of the demos' start pose." if not off else
+          f"\n{off} joint(s) more than {rollout.TOLERANCE:g} from the demos' start pose. `so101 run` moves them there first.")
+
+
 def cmd_setup_motors(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
     arm = s.arm(ns.arm)
     p = arm.prefix
@@ -612,6 +637,10 @@ def main() -> None:
     p = sub.add_parser("scan", help="ping the motors on each bus at every baud rate (read-only)")
     p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
     p.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("pose", help="compare the follower's current pose with the demos' start pose (read-only)")
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
+    p.set_defaults(fn=cmd_pose)
 
     p = sub.add_parser("motors", help="show each motor's temperature, voltage, load, position and alarms (read-only)")
     p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
