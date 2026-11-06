@@ -13,7 +13,7 @@ from pathlib import Path
 
 from serial.tools import list_ports
 
-from so_101 import data, settings, tasks
+from so_101 import data, remote, settings, tasks
 from so_101.check import narrow_joints_warning, preflight
 from so_101.console import filter_stderr, run_lerobot
 from so_101.devices import apply_camera_controls, find_camera, video_devices
@@ -467,7 +467,6 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         f"--batch_size={recipe.batch_size}",
         f"--num_workers={recipe.num_workers}",
         f"--save_freq={recipe.save_freq(steps)}",
-        "--wandb.enable=false",
         f"--job.target={target}",
     ]
     if target == "local":
@@ -490,12 +489,16 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
 
 
 def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
-    task = get_task(ns.task)
+    task = get_task(ns.task) if ns.policy == "act" else get_own_task(ns.task)
+    if ns.policy == "pi05" and not ns.remote:
+        sys.exit(f"pi0.5 runs on a cloud GPU. Add --remote, after: uv run so101 server start {task.name} --policy pi05")
+    server = remote.require_server(task.name, ns.policy, ns.revision or "main") if ns.remote else None
 
     # Name each camera after the checkpoint's camera and capture at the size it was trained on.
-    sizes = task.image_sizes(ns.revision)
+    sizes = task.image_sizes(ns.revision, ns.policy)
     if set(sizes) != set(task.cameras):
-        sys.exit(f"{task.policy} expects cameras {sorted(sizes)}, but tasks.toml maps {sorted(task.cameras)}.")
+        repo = task.policy_for(ns.policy)
+        sys.exit(f"{repo} expects cameras {sorted(sizes)}, but tasks.toml maps {sorted(task.cameras)}.")
     found, _ = preflight(
         s, "running the policy", arms=("follower",), cameras=[s.camera(ours) for ours in task.cameras.values()]
     )
@@ -508,20 +511,48 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     duration = s.run.duration_s if ns.duration is None else ns.duration
     args = [
         "--strategy.type=base",
-        f"--policy.path={task.download_policy(ns.revision)}",
+        *(remote.client_args() if ns.remote else [f"--policy.path={task.download_policy(ns.revision)}"]),
         *s.follower.lerobot_args(),
         cameras_arg(specs),
         f"--robot.use_degrees={str(task.use_degrees).lower()}",
         f"--task={task.prompt}",
         f"--fps={task.fps}",
         f"--duration={duration}",
-        f"--device={s.run.device}",
+        *([] if ns.remote else [f"--device={s.run.device}"]),
     ]
     if s.run.max_relative_target:
         args.append(f"--robot.max_relative_target={s.run.max_relative_target}")
     if ns.display:
         args.append("--display_data=true")
-    lerobot("lerobot-rollout", [*args, *extra])
+    if server is None:
+        lerobot("lerobot-rollout", [*args, *extra])
+    with remote.tunnel(server.id):
+        code = run_lerobot("lerobot-rollout", [*args, *extra])
+    print(f"The policy server keeps billing until: uv run so101 server stop (job {server.id})", file=sys.stderr)
+    sys.exit(code)
+
+
+def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
+    if ns.action == "stop":
+        remote.stop_server()
+        return
+    if ns.action == "status":
+        server = remote.active_server()
+        print(f"Running: {remote.describe(server)}." if server else "No policy server is running.")
+        return
+    task = get_task(ns.task) if ns.policy == "act" else get_own_task(ns.task)
+    if ns.policy not in s.remote:
+        sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
+    recipe = s.remote[ns.policy]
+    remote.start_server(
+        repo=task.policy_for(ns.policy),
+        task=task.name,
+        policy_type=ns.policy,
+        revision=ns.revision or "main",
+        config=task.policy_config(ns.revision, ns.policy),
+        target=ns.target or recipe.job_target,
+        timeout=ns.timeout or recipe.job_timeout,
+    )
 
 
 def main() -> None:
@@ -607,7 +638,18 @@ def main() -> None:
     p.add_argument("--duration", type=float, help="seconds; 0 runs until Ctrl+C (default: [run] in so101.toml)")
     p.add_argument("--display", action="store_true", help="stream cameras and joints to a Rerun viewer")
     p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
+    p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to run (default: act)")
+    p.add_argument("--remote", action="store_true", help="run the model on the cloud GPU `so101 server start` started")
     p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("server", help="start, stop or check the cloud GPU job that `run --remote` uses")
+    p.add_argument("action", choices=["start", "stop", "status"])
+    p.add_argument("task", nargs="?", help="for start, default: `default` in tasks.toml")
+    p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to serve (default: act)")
+    p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
+    p.add_argument("--target", help="HF Jobs flavor (default: [remote.<policy>] in so101.toml)")
+    p.add_argument("--timeout", help="stop the job after this long, like 30m or 2h (default: [remote.<policy>] in so101.toml)")
+    p.set_defaults(fn=cmd_server)
 
     ns, extra = parser.parse_known_args()
     try:

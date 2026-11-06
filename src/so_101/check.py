@@ -22,7 +22,7 @@ from so_101.settings import ARMS, Arm, ArmName, Camera, ConfigError, PortNotFoun
 
 if TYPE_CHECKING:
     from lerobot.cameras.opencv import OpenCVCamera
-    from lerobot.motors.feetech import FeetechMotorsBus
+    from lerobot.motors import SerialMotorsBus
 
     from so_101.tasks import Task
 
@@ -90,9 +90,9 @@ def check_system(report: Report, s: Settings, cameras: list[Camera], keyboard: b
 # --- Arms -----------------------------------------------------------------------------------------
 
 
-def _open_bus(arm: Arm, port: str) -> "FeetechMotorsBus":
+def _open_bus(arm: Arm, port: str) -> "SerialMotorsBus":
     """The arm's motor bus as LeRobot defines it, with the calibration file loaded, opened read-only."""
-    from lerobot.motors.feetech import FeetechMotorsBus
+    from lerobot.motors import SerialMotorsBus
 
     if arm.name == "follower":
         from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
@@ -104,15 +104,13 @@ def _open_bus(arm: Arm, port: str) -> "FeetechMotorsBus":
         device = SO101Leader(SO101LeaderConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir))
     # A separate bus, not device.bus: when `device` is garbage-collected its __del__ disconnects its
     # bus if open, which writes torque-off to every motor and closes the port.
-    bus = FeetechMotorsBus(port=port, motors=device.bus.motors, calibration=device.calibration)
+    bus = SerialMotorsBus(port=port, motors=device.bus.motors, calibration=device.calibration)
     bus._connect(handshake=False)  # open the port without LeRobot's checks, which raise on the first problem
-    bus.set_baudrate(bus.default_baudrate)
-    bus.set_timeout()
     return bus
 
 
-def close_bus(bus: "FeetechMotorsBus") -> None:
-    bus.port_handler.closePort()  # not bus.disconnect(): that writes to the motors to disable torque
+def close_bus(bus: "SerialMotorsBus") -> None:
+    bus._close()  # not bus.disconnect(): that writes to the motors to disable torque
 
 
 @dataclass(frozen=True)
@@ -132,7 +130,7 @@ def read_motors(arm: Arm) -> list[MotorReading]:
 
     bus = _open_bus(arm, arm.resolve_port())
     try:
-        replies = {name: ping(bus, motor.id) for name, motor in bus.motors.items()}
+        replies = {name: ping(bus._connected_bus, motor.id) for name, motor in bus.motors.items()}
         if missing := [f"{name} (id {bus.motors[name].id})" for name, reply in replies.items() if reply is None]:
             raise RuntimeError(f"no answer from {', '.join(missing)}: is the arm's power on?")
         temps = bus.sync_read("Present_Temperature", normalize=False, num_retry=2)
@@ -158,7 +156,7 @@ def read_motors(arm: Arm) -> list[MotorReading]:
     return readings
 
 
-def check_arm(report: Report, arm: Arm) -> "FeetechMotorsBus | None":
+def check_arm(report: Report, arm: Arm) -> "SerialMotorsBus | None":
     """Check one arm. Returns its open bus if the motors answered, for the loop timing test."""
     from so_101.scan import ping
 
@@ -188,7 +186,7 @@ def check_arm(report: Report, arm: Arm) -> "FeetechMotorsBus | None":
         return None
 
     try:
-        replies = {name: ping(bus, motor.id) for name, motor in bus.motors.items()}
+        replies = {name: ping(bus._connected_bus, motor.id) for name, motor in bus.motors.items()}
         missing = [f"{name} (id {bus.motors[name].id})" for name, reply in replies.items() if reply is None]
         if missing:
             report.fail(
@@ -237,7 +235,7 @@ def check_arm(report: Report, arm: Arm) -> "FeetechMotorsBus | None":
     return bus
 
 
-def check_calibration(report: Report, arm: Arm, bus: "FeetechMotorsBus") -> None:
+def check_calibration(report: Report, arm: Arm, bus: "SerialMotorsBus") -> None:
     """Compare the calibration file with what's stored in the motors. File-only checks are in `check_arm`."""
     group = arm.name
     fix = f"uv run so101 calibrate {arm.name}"
@@ -492,7 +490,7 @@ def check_cameras(
 
 
 def check_loop(
-    report: Report, buses: dict[ArmName, "FeetechMotorsBus"], cams: dict[str, "OpenCVCamera"], fps: int
+    report: Report, buses: dict[ArmName, "SerialMotorsBus"], cams: dict[str, "OpenCVCamera"], fps: int
 ) -> None:
     """Time the reads one recording step makes: follower joints, every camera, leader joints."""
     from lerobot.utils.robot_utils import precise_sleep

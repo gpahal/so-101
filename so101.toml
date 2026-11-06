@@ -150,3 +150,16 @@ checkpoints = 2
 [train.pi05.seconds_per_step]
 rtx-pro-6000 = 2.9
 a100-large = 4.6
+
+# `uv run so101 server start <task> --policy <policy>`, then `uv run so101 run <task> --policy <policy>
+# --remote`: run a model on a Hugging Face Jobs GPU while the arm and cameras stay on this Mac.
+# The job bills until `uv run so101 server stop`. job_timeout is the most it can run: hitting it ends
+# a run in progress, which stops the arm. Needs your SSH key at huggingface.co/settings/keys.
+
+[remote.act]
+job_target = "t4-small"
+job_timeout = "1h"
+
+[remote.pi05]
+job_target = "l4x1"
+job_timeout = "1h"

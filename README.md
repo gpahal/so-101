@@ -47,6 +47,8 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 train [task] [--policy act\|pi05] [--target FLAVOR]` | Train a policy on your demos, ACT by default, on Hugging Face Jobs by default |
 | `uv run so101 backup [task]` | Upload a task's sessions and edits to a private Hub dataset |
 | `uv run so101 run [task] [--duration S] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU |
+| `uv run so101 run [task] --policy act\|pi05 --remote [--revision TAG]` | Run a policy on the cloud GPU below, with the arm and cameras on the Mac |
+| `uv run so101 server start\|stop\|status [task] [--policy act\|pi05] [--revision TAG]` | Start, stop or check the cloud GPU job that `run --remote` uses |
 | `uv run so101 env` | Print the settings as shell variables |
 
 Every command prints the full LeRobot command it runs. Extra arguments go straight through to LeRobot, for example `uv run so101 teleop --teleop_time_s=60`.
@@ -229,6 +231,32 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - Retraining replaces the model in the same repo. To keep the current one, tag it first: `uv run hf repos tag create <you>/act_so101_<task> 50-demos`. Then `--revision 50-demos` runs that version, and leaving it out runs the newest.
 
 If it fails at some cylinder positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.
+
+### Run on a cloud GPU
+
+π0.5 is too heavy to run on the Mac, so `--remote` runs it on a Hugging Face Jobs GPU, paid from your Hugging Face credit, while the arm and cameras stay on the Mac. LeRobot hasn't validated robots on a hosted GPU yet, so keep a hand on the arm's power on the first runs.
+
+1. Once, register your SSH key on Hugging Face, because the connection to the job goes through an SSH tunnel:
+   ```bash
+   pbcopy < ~/.ssh/id_ed25519.pub   # paste it at https://huggingface.co/settings/keys
+   ssh -T git@hf.co                 # should greet you by name
+   ```
+2. Start the server, which takes a few minutes while it loads the model. It bills from now on (`[remote.pi05]` in `so101.toml`: an L4 at $0.80 an hour, stopped after 1 hour):
+   ```bash
+   uv run so101 server start --policy pi05 --revision 50-demos
+   ```
+3. Run it as many times as you like. The arm starts moving as soon as the client connects:
+   ```bash
+   uv run so101 run --policy pi05 --remote --revision 50-demos
+   ```
+4. Stop the billing when you're done:
+   ```bash
+   uv run so101 server stop
+   ```
+
+The log prints `turnaround mean/max` every 5 seconds. π0.5 predicts 1.67 seconds of motion at a time, so motion is only continuous while turnaround stays under about 0.83 seconds. It measured about 0.65 seconds from India with frames sent at JPEG quality 30, of which 0.36 seconds is the GPU. Higher quality needs a faster upload: quality 90 ran out of actions and faulted within 10 seconds on the same connection. To try another, add `--inference.jpeg_quality=50` to the run command.
+
+If the connection drops or actions run out, the arm finishes its buffered motion, holds for a second, returns home and goes limp, so keep something soft under it.
 
 ### Your demos on disk
 
