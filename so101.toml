@@ -101,8 +101,10 @@ dir = "data"
 
 # `uv run so101 run <task>`: run a task's policy from tasks.toml on the follower.
 [run]
-# Seconds before the run stops and the arm returns to its starting pose. 0 runs until Ctrl+C.
-duration_s = 60
+# How many attempts each `so101 run` makes. Every run records to outputs/rollouts/.
+episodes = 1
+# Seconds per attempt. 0 runs until Esc or Ctrl+C.
+duration_s = 30
 # Torch device for the policy, here and when training locally: "mps" (Apple GPU), "cpu" or "cuda".
 device = "mps"
 # Max a joint may move per control step while a policy drives the arm, in teleop's units. Lower than

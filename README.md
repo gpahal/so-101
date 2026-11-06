@@ -46,7 +46,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 build [task]` | Make the training dataset from all sessions plus your edits (`train` does this itself) |
 | `uv run so101 train [task] [--policy act\|pi05] [--target FLAVOR]` | Train a policy on your demos, ACT by default, on Hugging Face Jobs by default |
 | `uv run so101 backup [task]` | Upload a task's sessions and edits to a private Hub dataset |
-| `uv run so101 run [task] [--duration S] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU |
+| `uv run so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU, and record it to `outputs/rollouts/` |
 | `uv run so101 run [task] --policy act\|pi05 --remote [--revision TAG]` | Run a policy on the cloud GPU below, with the arm and cameras on the Mac |
 | `uv run so101 server start\|stop\|status [task] [--policy act\|pi05] [--revision TAG]` | Start, stop or check the cloud GPU job that `run --remote` uses |
 | `uv run so101 env` | Print the settings as shell variables |
@@ -228,6 +228,9 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - The trained policy lands in the private repo `<you>/<policy>_so101_<task>`.
    - `--target local` trains ACT on this Mac instead, which takes days at these settings.
 6. **Run:** `uv run so101 run --display`, from the same rest pose with the cylinder somewhere you recorded.
+   - Every run records to its own folder, `outputs/rollouts/<policy>_<task>_<time>/`: the video and joint data in `dataset/`, and the terminal output in `run.log`. It prints where at the start and at the end, including after Ctrl+C.
+   - It makes one attempt of 30 seconds by default (`[run]` in `so101.toml`). `--episodes 5` makes more, with `--reset-time` seconds between them to reset the scene: right arrow ends an attempt or reset early, left arrow redoes an attempt, and Esc stops.
+   - Between attempts the follower returns towards its start pose and holds there, so you can't move it by hand. `max_relative_target` can stop that return short, so use one attempt per run when each must start exactly at home.
    - Retraining replaces the model in the same repo. To keep the current one, tag it first: `uv run hf repos tag create <you>/act_so101_<task> 50-demos`. Then `--revision 50-demos` runs that version, and leaving it out runs the newest.
 
 If it fails at some cylinder positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.

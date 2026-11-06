@@ -126,6 +126,7 @@ def cameras_arg(specs: list[str]) -> str:
 @dataclass(frozen=True)
 class Run:
     duration_s: float
+    episodes: int
     device: str
     max_relative_target: float
 
@@ -227,7 +228,8 @@ def load() -> Settings:
         teleop=Teleop(fps=teleop.get("fps", 60), max_relative_target=teleop.get("max_relative_target", 0)),
         cameras={name: camera(name, section) for name, section in data.get("cameras", {}).items()},
         run=Run(
-            duration_s=run.get("duration_s", 60),
+            duration_s=run.get("duration_s", 30),
+            episodes=run.get("episodes", 1),
             device=run.get("device", "mps"),
             max_relative_target=run.get("max_relative_target", 5),
         ),
