@@ -16,25 +16,23 @@ GRIPPER_CLOSED = np.radians(-10.0)
 FRONT_CAMERA_GUESS = {"position": (0.24, -0.14, 0.30), "target": (0.2, 0.10, 0.0), "rolls": (np.pi, np.pi * 0.75, np.pi * 1.25)}
 # What the demos can't show. Override any of these in [sim] in so101.toml.
 DEFAULTS = {
-    # From the front camera, and replays of the demos' recorded joints work at about this size.
-    # Measure the real object and set these to be exact.
+    # What let replays of the real demos work best. Measure the real object and set these to be exact.
     "object_diameter": 0.032,
-    "object_height": 0.028,
+    "object_height": 0.032,
+    "grasp_offset": 0.012,  # how far past the jaw tips' midpoint, away from the base, the object's centre is
     "object_mass": 0.02,
     "object_friction": 1.0,
     "fingertip_clearance": 0.012,  # how far the fingertips stop above the table at a grasp
     "bowl_rim_radius": 0.075,
     "bowl_base_radius": 0.032,
     "bowl_height": 0.07,
-    # Softer than the arm model's defaults, because they best matched how the real follower lagged its
-    # leader in replays: 13 of 25 demos into the bowl, against 8 at the model's defaults.
-    "arm_kp": 15.0,
-    "arm_kv": 2.0,
-    "arm_force": 2.94,
 }
 
 
-def build(demos_root: Path, out: Path, prompt: str, overrides: dict, refit_cameras: bool = False) -> dict:
+def build(
+    demos_root: Path, out: Path, prompt: str, overrides: dict, teleop_limit: float, device: str,
+    refit_cameras: bool = False, refit_motors: bool = False, appearance_steps: int = 8000,
+) -> dict:
     """Write `scene.json`, the background and the table texture to `out`, and return the scene."""
     out.mkdir(parents=True, exist_ok=True)
     options = {**DEFAULTS, **overrides}
@@ -52,7 +50,7 @@ def build(demos_root: Path, out: Path, prompt: str, overrides: dict, refit_camer
     for episode in range(count):
         state = demos.episode(episode)[0]
         hold, let_go = demos.grasp_and_release(episode)
-        grasp[episode] = kinematics.between_jaws(state[hold])
+        grasp[episode] = kinematics.held_object(state[hold], options["grasp_offset"])
         if let_go is not None:
             release.append(kinematics.between_jaws(state[let_go]))
     heights = np.array([grasp[e][2] for e in range(count)])
@@ -102,7 +100,8 @@ def build(demos_root: Path, out: Path, prompt: str, overrides: dict, refit_camer
         "arm": {
             "rgb": [0.95, 0.88, 0.76], "motor_rgb": [0.08, 0.08, 0.08],
             "front_rgb": [0.95, 0.88, 0.76], "wrist_rgb": [0.75, 0.74, 0.73],
-            "kp": options["arm_kp"], "kv": options["arm_kv"], "force": options["arm_force"],
+            "motors": previous.get("arm", {}).get("motors") or fit.starting_motors(),
+            "delay_ticks": previous.get("arm", {}).get("delay_ticks", 0),
             "gripper_deg_per_percent": fit.GRIPPER_DEG_PER_PERCENT,
         },
         "table": {
@@ -115,7 +114,7 @@ def build(demos_root: Path, out: Path, prompt: str, overrides: dict, refit_camer
             "height": options["bowl_height"], "rgb": [0.25, 0.62, 0.42],
         },
         "object": {
-            "spots": spots.round(4).tolist(), "diameter": options["object_diameter"], "height": options["object_height"], "mass": options["object_mass"],
+            "spots": spots.round(4).tolist(), "grasp_offset": options["grasp_offset"], "diameter": options["object_diameter"], "height": options["object_height"], "mass": options["object_mass"],
             "friction": options["object_friction"], "wrist_rgb": [0.12, 0.27, 0.62], "front_rgb": [0.15, 0.32, 0.42],
         },
         "cameras": {
@@ -123,6 +122,9 @@ def build(demos_root: Path, out: Path, prompt: str, overrides: dict, refit_camer
             "wrist": {"lens": lens},
         },
         "light": {"pos": [-0.25, 0.05, 1.2], "dir": [0.22, -0.04, -1.0], "ambient": 0.5, "direct": 0.5},
+        # Fitted to real wrist frames. Shadows only darken the wrist camera's view: the front camera's
+        # background is a real photo and comes out worse with more added.
+        "shadow": {"dir": [0.3, 0.4, -1.0], "view_m": 1.0, "soft_px": 10, "wrist_strength": 0.45},
         "episodes": episodes,
     }
 
@@ -153,10 +155,22 @@ def build(demos_root: Path, out: Path, prompt: str, overrides: dict, refit_camer
         scene["cameras"]["wrist"]["lens"] = lens
         print(f"Wrist camera: {pose[6]:.0f} degree view, distortion {pose[7]:.2f}, outline mismatch {loss:.2f} (0 is perfect).", flush=True)
         previous_path.write_text(json.dumps(scene, indent=1))
+    motors = previous.get("arm", {}).get("motors")
+    if motors is None or refit_motors:
+        print("Fitting each joint's motor to how the real follower moved...", flush=True)
+        scene["arm"]["motors"], scene["arm"]["delay_ticks"] = fit.starting_motors(), 0
+        fitted, error = fit.fit_motors(scene, out, demos, list(range(1, count, max(1, count // 6))), teleop_limit)
+        scene = fitted
+        held_out = fit.tracking_error(scene, out, demos, list(range(2, count, max(1, count // 6))), teleop_limit)
+        print("Joint error on demos it wasn't fitted to: " + ", ".join(f"{e:.1f}" for e in held_out), flush=True)
     scene = _match_sizes(scene, out, demos, kinematics, episodes)
     scene = _match_colours(scene, out, demos, kinematics, episodes)
     previous_path.write_text(json.dumps(scene, indent=1))
-    return scene
+    from so_101.sim import appearance
+
+    print("Teaching the sim how each real camera looks, which takes several minutes...", flush=True)
+    appearance.fit_appearance(demos, kinematics, out, device, appearance_steps)
+    return json.loads(previous_path.read_text())
 
 
 def _place(env: sim_env.CylinderBowlEnv, kinematics: fit.Kinematics, state: np.ndarray, point: np.ndarray) -> None:
@@ -179,7 +193,7 @@ def _match_sizes(scene, out, demos, kinematics, episodes) -> dict:
             hold = demos.grasp_and_release(episode)[0]
             for moment in (0.0, 0.55):
                 index = int(hold * moment)
-                _place(env, kinematics, state[index], kinematics.between_jaws(state[hold]))
+                _place(env, kinematics, state[index], kinematics.held_object(state[hold], scene["object"]["grasp_offset"]))
                 for camera in ("wrist",):
                     real, drawn = fit.blue_blob(demos.image(episode, index / 30, camera)), fit.blue_blob(env.render_camera(camera))
                     uncut = lambda box: box[0] > 2 and box[1] > 2 and box[0] + box[2] < 638 and box[1] + box[3] < 478
@@ -212,7 +226,7 @@ def _match_colours(scene, out, demos, kinematics, episodes) -> dict:
         for episode in episodes[::2]:
             state = demos.episode(episode)[0]
             hold = demos.grasp_and_release(episode)[0]
-            _place(env, kinematics, state[0], kinematics.between_jaws(state[hold]))
+            _place(env, kinematics, state[0], kinematics.held_object(state[hold], scene["object"]["grasp_offset"]))
             for camera in ("front", "wrist"):
                 real_image, drawn_image = demos.image(episode, 0.03, camera), env.render_camera(camera)
                 real, drawn = fit.blue_blob(real_image, 150), fit.blue_blob(drawn_image, 150)
@@ -233,7 +247,7 @@ def _match_colours(scene, out, demos, kinematics, episodes) -> dict:
                 elif real_wood is not None and wood.sum() > 500:
                     gains["wood"].append(real_wood / np.maximum(np.percentile(image[wood], 70, axis=0), 1))
             index = int(hold * 0.6)
-            _place(env, kinematics, state[index], kinematics.between_jaws(state[hold]))
+            _place(env, kinematics, state[index], kinematics.held_object(state[hold], scene["object"]["grasp_offset"]))
             real_image, drawn_image = demos.image(episode, index / 30), env.render_camera("front")
             real_mask = fit.arm_mask(real_image, background, 640, 480) > 0
             drawn_mask = np.abs(drawn_image.astype(np.int16) - background.astype(np.int16)).max(axis=2) > 8
@@ -267,7 +281,8 @@ def replay(demos_root: Path, scene_dir: Path, episodes: list[int] | None, limit:
         state, action = demos.episode(episode)
         hold = demos.grasp_and_release(episode)[0]
         env.reset(seed=0)
-        _place(env, kinematics, state[0], kinematics.between_jaws(state[hold]))
+        _place(env, kinematics, state[0], kinematics.held_object(state[hold], env.scene["object"]["grasp_offset"]))
+        env._pending.clear()
         env.data.ctrl[env.actuators] = env.to_ctrl(state[0])
         track, height = [], []
         for frame, command in enumerate(action):
@@ -303,7 +318,7 @@ def replay(demos_root: Path, scene_dir: Path, episodes: list[int] | None, limit:
     }
 
 
-def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, frames: int = 80) -> dict:
+def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, frames: int = 80, appearance_on: bool = True) -> dict:
     """Does the model act the same on rendered images as on real ones?
 
     The model predicts actions from the same moment in real demos twice: once from the real camera images,
@@ -312,6 +327,8 @@ def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, fram
     """
     import torch
     from lerobot.policies.factory import get_policy_class, make_pre_post_processors
+
+    from so_101.sim import appearance
     from lerobot.configs.policies import PreTrainedConfig
 
     config = PreTrainedConfig.from_pretrained(policy_dir)
@@ -322,10 +339,10 @@ def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, fram
     )
     demos = fit.Demos(demos_root)
     kinematics = fit.Kinematics(GRIPPER_CLOSED)
-    env = sim_env.CylinderBowlEnv(scene_dir=str(scene_dir))
+    env = sim_env.CylinderBowlEnv(scene_dir=str(scene_dir), use_appearance=appearance_on)
     env.reset(seed=0)
     prompt = env.scene["prompt"]
-    episodes = env.scene["episodes"]
+    episodes = env.scene.get("held_back") or env.scene["episodes"]
     rng = np.random.default_rng(0)
 
     def predict(front: np.ndarray, wrist: np.ndarray, state: np.ndarray) -> np.ndarray:
@@ -346,8 +363,9 @@ def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, fram
         episode = int(rng.choice(episodes))
         state, action = demos.episode(episode)
         hold = demos.grasp_and_release(episode)[0]
-        index = int(rng.integers(0, max(hold, 1)))  # before the grasp, when the object is still where it started
-        _place(env, kinematics, state[index], kinematics.between_jaws(state[hold]))
+        let_go = demos.grasp_and_release(episode)[1]
+        index = int(rng.integers(0, len(state) - 1))  # any moment of the demo
+        appearance.place_for_frame(env, kinematics, state, index, hold, let_go, env.scene["object"]["grasp_offset"])
         chunk_len = min(50, len(action) - index)
         real = predict(demos.image(episode, index / 30), demos.image(episode, index / 30, "wrist"), state[index])
         sim_front_only = predict(env.render_camera("front"), demos.image(episode, index / 30, "wrist"), state[index])

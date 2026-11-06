@@ -72,15 +72,26 @@ class Demos:
         return np.stack(rows["observation.state"]), np.stack(rows["action"])
 
     def grasp_and_release(self, episode: int) -> tuple[int, int | None]:
-        """Frame where the gripper settles on the object, and where it lets go after carrying it."""
+        """Frame where the gripper settles on the object, and where it lets go after carrying it.
+
+        A grasp shows as the arm starting to lift with a closed gripper: people close in stages and
+        the widest opening is often the release, so the gripper alone doesn't give it away.
+        """
         state, action = self.episode(episode)
-        # The first time the gripper opens wide and then closes: its widest opening is often the release.
-        widest = np.maximum.accumulate(action[:, 5])
-        closing = int(np.argmax((widest > 20) & (action[:, 5] < widest * 0.6)))
-        hold = closing + int(np.argmin(state[closing : closing + 60, 5]))
-        lifted = np.flatnonzero(state[hold:, 1] < state[hold, 1] - 8)
-        carry = hold + (int(lifted[0]) if len(lifted) else 0)
-        let_go = np.flatnonzero(state[carry:, 5] > state[hold, 5] + 3)
+        opened = int(np.argmax(np.maximum.accumulate(action[:, 5]) > 20))
+        carry = None
+        for frame in range(opened + 1, len(state)):
+            widest = state[opened:frame, 5].max()
+            highest_reach = state[opened:frame, 1].max()
+            if state[frame, 5] < widest * 0.85 and state[frame, 1] < highest_reach - 8:
+                carry = frame
+                break
+        if carry is None:
+            carry = int(np.argmin(state[opened:, 5])) + opened
+        widest = opened + int(np.argmax(state[opened:carry, 5]))  # it's still opening before this
+        closed = state[widest:carry, 5].min()
+        hold = widest + int(np.argmax(state[widest:carry, 5] <= closed + 1))
+        let_go = np.flatnonzero(state[carry:, 5] > closed + 1.5)
         return hold, carry + int(let_go[0]) if len(let_go) else None
 
 
@@ -246,6 +257,12 @@ class Kinematics:
         self.data.qpos[self.qpos] = joints_to_qpos(state, self.gripper_closed)
         mujoco.mj_kinematics(self.model, self.data)
         return self.data.body(body).xpos.copy(), self.data.body(body).xmat.reshape(3, 3).copy()
+
+    def held_object(self, state: np.ndarray, offset: float) -> np.ndarray:
+        """Where a held object's centre is: past the jaw tips' midpoint, away from the arm's base."""
+        point = self.between_jaws(state)
+        outward = point[:2] / np.linalg.norm(point[:2])
+        return np.r_[point[:2] + offset * outward, point[2]]
 
     def between_jaws(self, state: np.ndarray) -> np.ndarray:
         """The point midway between the jaw tips: where a held object's centre is."""
@@ -431,3 +448,79 @@ def fit_wrist_outlines(env, demos: Demos, kinematics: Kinematics, episodes: list
         if trial_loss < loss:
             best, loss = trial, trial_loss
     return best, loss
+
+
+ARM_JOINTS = JOINTS[:5]
+
+
+def starting_motors() -> dict:
+    motors = {name: {"kp": 15.0, "kv": 2.0, "force": 2.94, "friction": 0.0, "armature": 0.028} for name in ARM_JOINTS}
+    motors["gripper"] = {"kp": 998.22, "kv": 2.731, "force": 2.94, "friction": 0.0, "armature": 0.028}
+    return motors
+
+
+def tracking_error(scene: dict, scene_dir: Path, demos: Demos, episodes: list[int], limit: float) -> np.ndarray:
+    """Per joint, how far the simulated arm ends up from the real one when given the real commands."""
+    from so_101.sim.env import CylinderBowlEnv
+
+    (scene_dir / "scene.json").write_text(json.dumps(scene))
+    env = CylinderBowlEnv(scene_dir=str(scene_dir), max_relative_target=limit)
+    env.reset(seed=0)
+    env.set_object([0.0, -0.4])  # out of the way: this is only about how the arm moves
+    errors = []
+    for episode in episodes:
+        state, action = demos.episode(episode)
+        hold = demos.grasp_and_release(episode)[0]
+        mujoco.mj_resetData(env._model, env.data)
+        env._pending.clear()
+        env.data.qpos[env.qadr] = env.to_ctrl(state[0])
+        env.set_object([0.0, -0.4])
+        env.data.ctrl[env.actuators] = env.to_ctrl(state[0])
+        mujoco.mj_forward(env._model, env.data)
+        track = []
+        for command in action:
+            env.apply(command)
+            track.append(env.joint_state().copy())
+        # The gripper only counts until it closes on the object, which isn't there.
+        difference = np.abs(np.asarray(track) - state)
+        difference[hold - 15 :, 5] = 0
+        errors.append(difference.mean(axis=0))
+    env.close()
+    return np.mean(errors, axis=0)
+
+
+def fit_motors(scene: dict, scene_dir: Path, demos: Demos, episodes: list[int], limit: float, rounds: int = 3) -> tuple[dict, np.ndarray]:
+    """Fit each joint's motor to the real follower: gain, damping, torque, friction, inertia, and delay."""
+    scene = json.loads(json.dumps(scene))
+    motors = scene["arm"]["motors"]
+
+    def trial(update) -> float:
+        update()
+        return float(tracking_error(scene, scene_dir, demos, episodes, limit).mean())
+
+    best = trial(lambda: None)
+    for delay in (0, 1, 2, 3, 4):
+        previous = scene["arm"]["delay_ticks"]
+        scene["arm"]["delay_ticks"] = delay
+        value = trial(lambda: None)
+        if value < best:
+            best = value
+        else:
+            scene["arm"]["delay_ticks"] = previous
+    for round_index in range(rounds):
+        for name in (*ARM_JOINTS, "gripper"):
+            motor = motors[name]
+            for field, factors in (("kp", (0.6, 0.8, 1.25, 1.6)), ("kv", (0.6, 0.8, 1.25, 1.6)), ("force", (0.7, 0.85, 1.15, 1.3)), ("armature", (0.5, 0.7, 1.4, 2.0)), ("friction", None)):
+                choices = [motor[field] * f for f in factors] if factors else [motor[field] + d for d in (-0.05, -0.02, 0.02, 0.05)]
+                for value in choices:
+                    if value < 0 or (name == "gripper" and field in ("kp", "force") and value < motors["gripper"][field]):
+                        continue  # the gripper has to keep squeezing
+                    old = motor[field]
+                    motor[field] = round(float(value), 4)
+                    result = trial(lambda: None)
+                    if result < best - 1e-3:
+                        best = result
+                    else:
+                        motor[field] = old
+        print(f"  round {round_index + 1}: mean joint error {best:.2f}", flush=True)
+    return scene, tracking_error(scene, scene_dir, demos, episodes, limit)

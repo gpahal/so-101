@@ -85,13 +85,17 @@ def build_model(scene: dict, scene_dir: Path, fovy_scale: dict[str, float]) -> m
     arm = scene["arm"]
     for material in spec.materials:
         material.rgba = [*(arm["motor_rgb"] if material.name.startswith("sts3215") else arm["rgb"]), 1.0]
-    # The gripper stays stiff: softer settings stop squeezing and drop the object.
+    # Each joint's motor as fitted to how the real follower moved. See `so_101.sim.fit.fit_motors`.
     for actuator in spec.actuators:
-        if actuator.name != "gripper":
-            actuator.gainprm[0] = arm["kp"]
-            actuator.biasprm[1] = -arm["kp"]
-            actuator.biasprm[2] = -arm["kv"]
-            actuator.forcerange = [-arm["force"], arm["force"]]
+        motor = arm["motors"][actuator.name]
+        actuator.gainprm[0] = motor["kp"]
+        actuator.biasprm[1] = -motor["kp"]
+        actuator.biasprm[2] = -motor["kv"]
+        actuator.forcerange = [-motor["force"], motor["force"]]
+    for joint in spec.joints:
+        if joint.name in arm["motors"]:
+            joint.frictionloss = arm["motors"][joint.name]["friction"]
+            joint.armature = arm["motors"][joint.name]["armature"]
 
     world = spec.worldbody
     table_quat = np.empty(4)
@@ -163,6 +167,20 @@ def build_model(scene: dict, scene_dir: Path, fovy_scale: dict[str, float]) -> m
     wrist = scene["cameras"].get("wrist", {})
     # The room's light. No shadows: MuJoCo's turn whatever they fall on black, which is further from the
     # real wrist camera's soft shadows than having none.
+    shadow = scene.get("shadow")
+    if shadow:
+        # What the light sees, for working out shadows.
+        back = -np.asarray(shadow["dir"], dtype=np.float64)
+        back /= np.linalg.norm(back)
+        right = np.cross([0.0, 1.0, 0.0], back)
+        right /= np.linalg.norm(right)
+        up = np.cross(back, right)
+        quat = np.empty(4)
+        mujoco.mju_mat2Quat(quat, np.column_stack([right, up, back]).ravel())
+        world.add_camera(
+            name="light", pos=(np.array([0.2, 0.0, 0.0]) + back * 1.0).tolist(), quat=quat.tolist(),
+            orthographic=True, fovy=shadow["view_m"],
+        )  # fmt: skip
     light = scene["light"]
     world.add_light(
         pos=light["pos"], dir=light["dir"], type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL, castshadow=False, diffuse=[light["direct"]] * 3,
@@ -197,6 +215,7 @@ class CylinderBowlEnv(gym.Env):
         episode_length: int = 900,
         max_relative_target: float = 10.0,
         settle_success_steps: int = 15,
+        use_appearance: bool = True,
     ):
         super().__init__()
         self.scene_dir = Path(scene_dir or os.environ[SCENE_DIR_ENV])
@@ -208,6 +227,7 @@ class CylinderBowlEnv(gym.Env):
         self._max_episode_steps = episode_length
         self.limit = max_relative_target
         self.settle_success_steps = settle_success_steps
+        self.use_appearance = use_appearance
         self.height, self.width = 480, 640
         self.initial_joints = np.asarray(self.scene["start_pose"], dtype=np.float32)
         self._model: mujoco.MjModel | None = None
@@ -221,6 +241,7 @@ class CylinderBowlEnv(gym.Env):
         self.action_space = spaces.Box(-360.0, 360.0, (len(JOINTS),), np.float32)
         self._steps = 0
         self._resting = 0
+        self._pending: list[np.ndarray] = []
 
     def _ensure_world(self) -> None:
         """Build on first use, so each process that renders owns its GL context."""
@@ -246,11 +267,54 @@ class CylinderBowlEnv(gym.Env):
             self.options["wrist"].geomgroup[group] = 1
         self.options["wrist"].geomgroup[3] = 0
         self.options["wrist"].geomgroup[0] = 0
+        self.table_geom = model.geom("table").id
         self.object_geoms = {camera: model.geom(f"object_{camera}").id for camera in ("front", "wrist")}
         jaw_bodies = {model.body(name).id for name in JAW_BODIES}
         self.is_jaw = np.array([model.geom_group[g] == 2 and model.geom_bodyid[g] in jaw_bodies for g in range(model.ngeom)])
         self.printed_materials = [m for m in range(model.nmat) if not model.material(m).name.startswith(("sts3215", "table", "object"))]
         self.maps = {"front": None, "wrist": self._lens_map(self.scene["cameras"]["wrist"].get("lens"))}
+        self._prepare_shadows()
+        self._prepare_appearance()
+
+    def _prepare_shadows(self) -> None:
+        """Soft shadows, drawn by hand: see which parts of the table the arm hides from the light."""
+        shadow = self.scene.get("shadow")
+        self.shadow = shadow
+        if not shadow:
+            return
+        self.shadow_renderer = mujoco.Renderer(self._model, 256, 256)
+        self.shadow_renderer.enable_segmentation_rendering()
+        self.shadow_options = mujoco.MjvOption()
+        self.shadow_options.geomgroup[:] = 0
+        self.shadow_options.geomgroup[GROUP_MOVING] = 1
+        self.shadow_options.geomgroup[GROUP_STILL] = 1
+        self.shadow_camera = self._model.camera("light").id
+        u, v = np.meshgrid(np.arange(self.width, dtype=np.float32), np.arange(self.height, dtype=np.float32))
+        lens = self.scene["cameras"]["wrist"].get("lens")
+        pixels = np.stack([u, v], -1).reshape(-1, 1, 2)
+        rays = cv2.undistortPoints(pixels, np.asarray(lens["matrix"]), np.asarray(lens["distortion"])).reshape(self.height, self.width, 2)
+        self.wrist_rays = np.dstack([rays[..., 0], -rays[..., 1], -np.ones(rays.shape[:2])])  # in MuJoCo's camera axes
+
+    def _shadow_map(self) -> np.ndarray:
+        self.shadow_renderer.update_scene(self.data, camera="light", scene_option=self.shadow_options)
+        hidden = (self.shadow_renderer.render()[:, :, 0] >= 0).astype(np.float32)
+        return cv2.GaussianBlur(hidden, (0, 0), self.shadow["soft_px"])
+
+    def _table_shadow(self, camera: str, rays: np.ndarray, shadow_map: np.ndarray) -> np.ndarray:
+        """How shadowed the table is, per pixel of a camera: 0 is full light."""
+        camera_id = self._model.camera(camera).id
+        position = self.data.cam_xpos[camera_id]
+        rotation = self.data.cam_xmat[camera_id].reshape(3, 3)
+        world = rays @ rotation.T
+        normal = self.frame[:, 2]
+        along = ((self.origin - position) @ normal) / np.minimum(world @ normal, -1e-6)
+        points = position + world * along[..., None]
+        light_id = self.shadow_camera
+        offset = (points - self.data.cam_xpos[light_id]) @ self.data.cam_xmat[light_id].reshape(3, 3)
+        half = self.shadow["view_m"] / 2
+        map_x = ((offset[..., 0] / half + 1) * 128).astype(np.float32)
+        map_y = ((1 - offset[..., 1] / half) * 128).astype(np.float32)
+        return cv2.remap(shadow_map, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
     @staticmethod
     def _mj_camera(name: str) -> str:
@@ -301,21 +365,45 @@ class CylinderBowlEnv(gym.Env):
             self._model.geom_group[geom] = GROUP_MOVING if camera == name else GROUP_HIDDEN
         self._model.geom_rgba[self.object_geoms[name], :3] = self.scene["object"][f"{name}_rgb"]
 
+    def _prepare_appearance(self) -> None:
+        self.appearance = None
+        if self.use_appearance and self.scene.get("appearance"):
+            import torch
+
+            from so_101.sim import appearance
+
+            self.appearance_module = appearance
+            self.appearance_device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
+            self.appearance = appearance.load(self.scene_dir, self.appearance_device)
+
     def render_camera(self, name: str) -> np.ndarray:
+        image = self._render(name)
+        if self.appearance is not None:
+            image = self.appearance_module.apply(self.appearance[name], image, self.joint_state(), self.appearance_device)
+        return image
+
+    def _render(self, name: str) -> np.ndarray:
         # Each real camera sees the same things in different colours, so they're matched separately.
         self._show_object(name)
         self._model.mat_rgba[self.printed_materials, :3] = self.scene["arm"][f"{name}_rgb"]
         self.renderer.update_scene(self.data, camera=self._mj_camera(name), scene_option=self.options[name])
         image = self.renderer.render().copy()
+        self.renderer.enable_segmentation_rendering()
+        self.renderer.update_scene(self.data, camera=self._mj_camera(name), scene_option=self.options[name])
+        ids = self.renderer.render()[:, :, 0].copy()
+        self.renderer.disable_segmentation_rendering()
         if name == "front":
-            self.renderer.enable_segmentation_rendering()
-            self.renderer.update_scene(self.data, camera="front", scene_option=self.options["front"])
-            drawn = self.renderer.render()[:, :, 0] >= 0
-            self.renderer.disable_segmentation_rendering()
+            drawn = ids >= 0
             soft = cv2.GaussianBlur(drawn.astype(np.float32), (0, 0), 0.8)[..., None]  # no hard rendered edge
-            return (self.background * (1 - soft) + cv2.GaussianBlur(image, (0, 0), 0.7) * soft).astype(np.uint8)
+            background = self.background.astype(np.float32)
+            return (background * (1 - soft) + cv2.GaussianBlur(image, (0, 0), 0.7) * soft).astype(np.uint8)
         if self.maps[name] is not None:
             image = cv2.remap(image, *self.maps[name], cv2.INTER_LINEAR)
+            ids = cv2.remap(ids.astype(np.float32), *self.maps[name], cv2.INTER_NEAREST).astype(np.int32)
+        if self.shadow:
+            dark = self._table_shadow("wrist_cam", self.wrist_rays, self._shadow_map())
+            dark[ids != self.table_geom] = 0
+            image = (image * (1 - dark * self.shadow["wrist_strength"])[..., None]).astype(np.uint8)
         return cv2.GaussianBlur(image, (0, 0), 0.8)  # a webcam's softness
 
     def _obs(self) -> dict[str, Any]:
@@ -346,11 +434,15 @@ class CylinderBowlEnv(gym.Env):
         self.set_object(xy)
         mujoco.mj_forward(self._model, self.data)
         self._steps, self._resting = 0, 0
+        self._pending.clear()
         return self._obs(), {"is_success": False}
 
     def apply(self, action: np.ndarray) -> None:
         """Advance one control period, with the same per-step cap the real follower applies."""
-        action = np.asarray(action, dtype=np.float64)
+        # The bus and the motors take a few ticks to act on a command.
+        self._pending.append(np.asarray(action, dtype=np.float64))
+        delay = self.scene["arm"]["delay_ticks"]
+        action = self._pending[0] if len(self._pending) <= delay else self._pending.pop(0)
         if self.limit:
             present = self.joint_state()
             action = present + np.clip(action - present, -self.limit, self.limit)
@@ -373,6 +465,8 @@ class CylinderBowlEnv(gym.Env):
     def close(self) -> None:
         if self._model is not None:
             self.renderer.close()
+            if getattr(self, "shadow", None):
+                self.shadow_renderer.close()
             self._model = None
 
 

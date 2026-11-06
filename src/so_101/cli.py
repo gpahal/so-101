@@ -205,7 +205,7 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         sys.exit(f"No scene yet. Run `uv run so101 sim build {task.name}` first.")
     limit = s.run.max_relative_target if ns.limit is None else ns.limit
     if ns.action == "build":
-        sim_build.build(demos, scene, task.prompt, s.sim, refit_cameras=ns.refit_cameras)
+        sim_build.build(demos, scene, task.prompt, s.sim, s.teleop.max_relative_target, s.run.device, refit_cameras=ns.refit_cameras, refit_motors=ns.refit_motors)
         print(f"\nScene written to {scene}. Check it with: uv run so101 sim replay {task.name}")
     elif ns.action == "replay":
         video = s.outputs_dir / "sim" / f"replay_{task.name}.mp4"
@@ -221,9 +221,8 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         result = sim_build.check(demos, scene, policy, s.run.device)
         for label, key in (("real images", "real"), ("sim images", "sim"), ("sim front, real wrist", "sim_front"), ("real front, sim wrist", "sim_wrist")):
             print(f"{label:24s} error from the demo: {result[key].mean():.2f}  shoulder pan {result[key][0]:.2f}")
-        ratio = result["sim"].mean() / result["real"].mean()
-        print(f"Sim images make its predictions {ratio:.1f}x worse than real ones.")
-        print("Under 2x, closed-loop results in the sim mean something. Above that, treat them as a smoke test only.")
+        gap = result["sim"].mean() - result["real"].mean()
+        print(f"Gap between sim and real images: {gap:.2f} degrees. Below 0.5, closed-loop results in the sim mean something.")
     elif ns.action == "eval":
         output = s.outputs_dir / "sim" / f"eval_{ns.policy}_{task.name}_{time.strftime('%Y%m%d-%H%M%S')}"
         policy = task.download_policy(ns.revision) if ns.policy == "act" else task.policy_for(ns.policy)
@@ -726,6 +725,7 @@ def main() -> None:
     p.add_argument("--action-steps", type=int, help="for eval: actions to carry out before predicting again")
     p.add_argument("--limit", type=float, help="the per-step movement limit (default: the run limit)")
     p.add_argument("--refit-cameras", action="store_true", help="for build: fit the cameras again, after moving one")
+    p.add_argument("--refit-motors", action="store_true", help="for build: fit the motors to the real follower again")
     p.set_defaults(fn=cmd_sim)
 
     p = sub.add_parser("pose", help="compare the follower's current pose with the demos' start pose (read-only)")
