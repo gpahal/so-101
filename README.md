@@ -240,20 +240,31 @@ If it fails at some cylinder positions, record 10 to 20 more demos there (`--epi
 
 ### Try a policy in simulation
 
-`so101 sim` builds a MuJoCo twin of a task from its demos, with nothing to measure by hand. Joint angles give the table, where the object was grasped and where it was released. Each joint's motor is fitted to how the real follower moved. The front camera's real background comes from averaging out the moving arm, both cameras' poses come from lining the simulated arm up with real frames, and a small network learns the remaining difference between rendered and real images.
+`so101 sim` builds a MuJoCo twin of a task from its demos, with nothing to measure by hand. Joint angles give the table, where the object was grasped and where it was released. Each joint's motor is fitted to how the real follower moved. The front camera's real background comes from averaging out the moving arm, both cameras' poses come from lining the simulated arm up with real frames, and a small network learns the remaining difference between rendered and real images. It only ever learns from real recordings, never from a policy, so it means the same for every model.
 
 ```bash
 uv sync --extra sim
 uv run so101 sim build                       # after new demos or changing [sim] in so101.toml; about 30 minutes
 uv run so101 sim replay                      # can the sim redo the real demos?
-uv run so101 sim tune --revision 50-demos    # match the sim's images to this model; about 50 minutes
-uv run so101 sim check --revision 50-demos   # how differently does the model act on sim images?
+uv run so101 sim score                       # how real is it? No model involved
 uv run so101 sim eval --revision 50-demos --episodes 20 --action-steps 100
+uv run so101 sim check --revision 50-demos   # how differently does this model act on sim images? Read-only
 ```
 
-Everything it works out goes in `data/<task>/sim/`. After moving a camera, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`. Measure the object and bowl and set them in `[sim]` to make it more accurate.
+Everything it works out goes in `data/<task>/sim/`. After moving a camera, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`.
 
-`check` scores demos held back from fitting. Trust closed-loop results only as far as its gap supports: it's the extra error the model makes on sim images. `tune` is specific to one model, so rerun it after retraining, and it hasn't been done for pi0.5. Grip contact and motor behaviour are approximations, and real attempts are still the final test.
+`score` compares the sim with held-back real frames, the arm's shapes and replays of real commands, and saves real and sim side by side. Its "real, same pose" column is how much two real moments differ, for scale. Don't change the sim to improve `check` or `eval` on a model: that fits it to that model.
+
+To make it more accurate, at the arm:
+
+1. Measure the object and bowl, and set them in `[sim]` in `so101.toml`. Then run `sim build --refit-cameras`.
+2. Record pushes, so the sim knows how the object slides. These never go into training, and this command doesn't need MuJoCo or the demos:
+   ```bash
+   uv run so101 sim nudge --episodes 3
+   ```
+   Start each at the demos' start pose with the object fully in the wrist camera's view, push it a few centimetres with the jaws, then return to the start pose and hold still until the end. Copy `data/<task>/nudges/` to the computer with the sim if it's a different one, then run `uv run so101 sim physics` followed by `uv run so101 sim replay`.
+
+Grip contact and motor behaviour are approximations, and the wrist camera's view is the weakest part. Sim results only predict real ones once they've been compared: run the same few models for real and in the sim, and see whether they rank the same.
 
 ### Run on a cloud GPU
 

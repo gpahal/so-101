@@ -2,8 +2,9 @@
 
 Rendering can't reproduce wood grain, reflections, cables, or how a webcam handles exposure. The demos
 give thousands of moments seen both ways, so a small network learns the difference and the sim applies
-it as a last rendering step. It only corrects appearance: geometry and physics come from the sim. Some
-demos are held back so `so101 sim check` is scored on frames it never saw.
+it as a last rendering step. It only corrects appearance: geometry and physics come from the sim. It
+learns from real camera frames alone, never from a policy, and some demos are held back so `so101 sim
+score` is measured on frames it never saw.
 """
 
 import json
@@ -131,16 +132,15 @@ def render_pairs(demos, kinematics, scene_dir: Path, episodes: list[int], every:
 
 
 class Features(nn.Module):
-    """Early ResNet-18 layers, the kind of features the policies look at, to compare images by."""
+    """Early VGG-16 layers, a general measure of how alike two images look. Neither ACT nor pi0.5 uses this
+    network, so what it teaches the sim isn't shaped by what either model happens to look at."""
 
     def __init__(self):
         super().__init__()
-        from torchvision.models import ResNet18_Weights, resnet18
+        from torchvision.models import VGG16_Weights, vgg16
 
-        net = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        self.a = nn.Sequential(net.conv1, net.bn1, net.relu)
-        self.b = nn.Sequential(net.maxpool, net.layer1)
-        self.c = net.layer2
+        layers = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features
+        self.stages = nn.ModuleList([layers[:4], layers[4:9], layers[9:16]])
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406])[None, :, None, None])
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225])[None, :, None, None])
         self.eval()
@@ -148,9 +148,11 @@ class Features(nn.Module):
             parameter.requires_grad_(False)
 
     def forward(self, image: torch.Tensor) -> list[torch.Tensor]:
-        a = self.a((image - self.mean) / self.std)
-        b = self.b(a)
-        return [a, b, self.c(b)]
+        found, x = [], (image - self.mean) / self.std
+        for stage in self.stages:
+            x = stage(x)
+            found.append(x)
+        return found
 
 
 def train(scene_dir: Path, sim: np.ndarray, real: np.ndarray, joints: np.ndarray, camera: str, device: str, steps: int, batch: int = 12) -> None:
@@ -184,80 +186,9 @@ def fit_appearance(demos, kinematics, scene_dir: Path, device: str, steps: int) 
     fit_on, held_back = split(scene["episodes"])
     print(f"Rendering pairs from {len(fit_on)} demos, holding back {held_back}...", flush=True)
     pairs, joints = render_pairs(demos, kinematics, scene_dir, fit_on)
-    cache = scene_dir / "appearance_pairs.npz"
-    np.savez(cache, joints=joints, **{f"{camera}_{kind}": pairs[camera][i] for camera in CAMERAS for i, kind in enumerate(("sim", "real"))})
     print(f"{len(joints)} moments.", flush=True)
     for camera in CAMERAS:
         train(scene_dir, *pairs[camera], joints, camera, device, steps)
     scene["appearance"] = True
     scene["held_back"] = held_back
     (scene_dir / "scene.json").write_text(json.dumps(scene, indent=1))
-
-
-def fit_for_policy(scene_dir: Path, policy_dir: Path, device: str, steps: int, batch: int = 6, every: int = 500) -> None:
-    """Refine both cameras' corrections so a policy predicts the same actions on them as on real images.
-
-    Starts from the appearance fit. This targets exactly what the sim is for, but it's specific to this
-    policy, so `so101 sim check` scoring it on held-back demos is what shows whether it really generalises.
-    """
-    from lerobot.configs.policies import PreTrainedConfig
-    from lerobot.policies.factory import get_policy_class, make_pre_post_processors
-
-    config = PreTrainedConfig.from_pretrained(policy_dir)
-    config.device = device
-    policy = get_policy_class(config.type).from_pretrained(policy_dir, config=config).to(device).eval()
-    for parameter in policy.parameters():
-        parameter.requires_grad_(False)
-    pre, _ = make_pre_post_processors(config, pretrained_path=policy_dir, preprocessor_overrides={"device_processor": {"device": device}})
-    data = np.load(scene_dir / "appearance_pairs.npz")
-    joints = data["joints"]
-    pairs = {camera: (data[f"{camera}_sim"], data[f"{camera}_real"]) for camera in CAMERAS}
-    models = load(scene_dir, device)
-    for model in models.values():
-        model.train()
-    features = Features().to(device)
-    parameters = [p for model in models.values() for p in model.parameters()]
-    optimizer = torch.optim.AdamW(parameters, lr=2e-4, weight_decay=1e-4)
-    schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=2e-4, total_steps=steps, pct_start=0.05)
-    rng = np.random.default_rng(1)
-    prompt = json.loads((scene_dir / "scene.json").read_text())["prompt"]
-
-    def chunk(front: torch.Tensor, wrist: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
-        big = {"front": F.interpolate(front, size=(480, 640), mode="bilinear", align_corners=False), "wrist": F.interpolate(wrist, size=(480, 640), mode="bilinear", align_corners=False)}
-        prepared = pre({
-            "observation.images.front": big["front"], "observation.images.wrist": big["wrist"],
-            "observation.state": state, "task": [prompt] * len(state),
-        })  # fmt: skip
-        prepared = dict(prepared)
-        prepared["observation.images"] = [prepared["observation.images.front"], prepared["observation.images.wrist"]]
-        return policy.model(prepared)[0]
-
-    started, averages = time.time(), {"action": None, "image": None}
-    for step in range(steps):
-        picks = rng.integers(0, len(joints), batch)
-        state = torch.from_numpy(joints[picks]).to(device)
-        output, real = {}, {}
-        image_loss = 0.0
-        for camera in CAMERAS:
-            source = torch.from_numpy(pairs[camera][0][picks]).permute(0, 3, 1, 2).float().to(device) / 255
-            real[camera] = torch.from_numpy(pairs[camera][1][picks]).permute(0, 3, 1, 2).float().to(device) / 255
-            output[camera] = (source + models[camera](source, state)).clamp(0, 1)
-            image_loss = image_loss + F.l1_loss(output[camera], real[camera])
-            for a, b in zip(features(output[camera]), features(real[camera])):
-                image_loss = image_loss + 0.1 * F.l1_loss(a, b)
-        with torch.no_grad():
-            wanted = chunk(real["front"], real["wrist"], state)
-        action_loss = F.l1_loss(chunk(output["front"], output["wrist"], state), wanted)
-        loss = action_loss + 0.5 * image_loss
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        schedule.step()
-        for name, value in (("action", action_loss.item()), ("image", float(image_loss.item()))):
-            averages[name] = value if averages[name] is None else 0.98 * averages[name] + 0.02 * value
-        if (step + 1) % every == 0:
-            print(f"  step {step + 1}/{steps}: action difference {averages['action']:.4f}, image {averages['image']:.3f}, {time.time() - started:.0f} s", flush=True)
-            for camera, model in models.items():
-                torch.save(model.state_dict(), scene_dir / f"appearance_{camera}.pt")
-    for camera, model in models.items():
-        torch.save(model.state_dict(), scene_dir / f"appearance_{camera}.pt")

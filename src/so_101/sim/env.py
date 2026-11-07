@@ -150,6 +150,12 @@ def build_model(scene: dict, scene_dir: Path, fovy_scale: dict[str, float]) -> m
         name="object_contact", type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[item["diameter"] / 2, item["height"] / 2, 0],
         mass=item["mass"], group=3, condim=4, friction=[item["friction"], 0.03, 0.003], solref=[0.01, 1.0],
     )  # fmt: skip
+    # How the object slides on the table, apart from how the jaws grip it. `so101 sim physics` fits this.
+    slide = item.get("table_friction", 1.0)
+    spec.add_pair(
+        name="object_on_table", geomname1="table", geomname2="object_contact", condim=4,
+        friction=[slide, slide, 0.03, 0.003, 0.003], solref=[0.015, 1.0],
+    )  # fmt: skip
     # One per camera, because each is drawn at the size that matches that real camera: their fitted lenses
     # disagree a little. The real object's measured size should bring these together.
     shiny = spec.add_material(name="object_mat", specular=0.5, shininess=0.5, reflectance=0.0)
@@ -382,6 +388,36 @@ class CylinderBowlEnv(gym.Env):
             image = self.appearance_module.apply(self.appearance[name], image, self.joint_state(), self.appearance_device)
         return image
 
+    def raw_render(self, name: str) -> np.ndarray:
+        """The render without the appearance network's correction."""
+        return self._render(name)
+
+    def segment(self, name: str) -> np.ndarray:
+        """Which geom each pixel of a camera shows, -1 for none."""
+        self._show_object(name)
+        self.renderer.enable_segmentation_rendering()
+        self.renderer.update_scene(self.data, camera=self._mj_camera(name), scene_option=self.options[name])
+        ids = self.renderer.render()[:, :, 0].copy()
+        self.renderer.disable_segmentation_rendering()
+        if self.maps[name] is not None:
+            ids = cv2.remap(ids.astype(np.float32), *self.maps[name], cv2.INTER_NEAREST).astype(np.int32)
+        return ids
+
+    def wrist_table_points(self, rays: np.ndarray, height: float = 0.0) -> np.ndarray:
+        """Where rays from the wrist camera, in its own axes, meet a plane `height` above the table. In the
+        table's frame. Needs `mj_forward` to have placed the camera."""
+        camera = self._model.camera("wrist_cam").id
+        position = self.data.cam_xpos[camera]
+        world = rays @ self.data.cam_xmat[camera].reshape(3, 3).T
+        normal = self.frame[:, 2]
+        along = ((self.origin + normal * height - position) @ normal) / np.minimum(world @ normal, -1e-6)
+        return (position + world * along[..., None] - self.origin) @ self.frame
+
+    def wrist_pixel_on_table(self, pixel, height: float = 0.0) -> np.ndarray:
+        """Where a real wrist camera pixel lands on the table, in the table's frame."""
+        x, y = np.round(pixel).astype(int).clip(0, [self.width - 1, self.height - 1])
+        return self.wrist_table_points(self.wrist_rays[y, x], height)[:2]
+
     def _render(self, name: str) -> np.ndarray:
         # Each real camera sees the same things in different colours, so they're matched separately.
         self._show_object(name)
@@ -396,7 +432,7 @@ class CylinderBowlEnv(gym.Env):
             drawn = ids >= 0
             soft = cv2.GaussianBlur(drawn.astype(np.float32), (0, 0), 0.8)[..., None]  # no hard rendered edge
             background = self.background.astype(np.float32)
-            return (background * (1 - soft) + cv2.GaussianBlur(image, (0, 0), 0.7) * soft).astype(np.uint8)
+            return (background * (1 - soft) + self._soften(image, name) * soft).astype(np.uint8)
         if self.maps[name] is not None:
             image = cv2.remap(image, *self.maps[name], cv2.INTER_LINEAR)
             ids = cv2.remap(ids.astype(np.float32), *self.maps[name], cv2.INTER_NEAREST).astype(np.int32)
@@ -404,7 +440,12 @@ class CylinderBowlEnv(gym.Env):
             dark = self._table_shadow("wrist_cam", self.wrist_rays, self._shadow_map())
             dark[ids != self.table_geom] = 0
             image = (image * (1 - dark * self.shadow["wrist_strength"])[..., None]).astype(np.uint8)
-        return cv2.GaussianBlur(image, (0, 0), 0.8)  # a webcam's softness
+        return self._soften(image, name)
+
+    def _soften(self, image: np.ndarray, name: str) -> np.ndarray:
+        """How soft the real camera's images are, measured from its frames by `so101 sim build`."""
+        sigma = self.scene.get("softness", {}).get(name, 0.8)
+        return cv2.GaussianBlur(image, (0, 0), sigma) if sigma > 0 else image
 
     def _obs(self) -> dict[str, Any]:
         return {"agent_pos": self.joint_state(), "pixels": {name: self.render_camera(name) for name in ("front", "wrist")}}

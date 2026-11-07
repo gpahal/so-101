@@ -21,7 +21,8 @@ DEFAULTS = {
     "object_height": 0.032,
     "grasp_offset": 0.012,  # how far past the jaw tips' midpoint, away from the base, the object's centre is
     "object_mass": 0.02,
-    "object_friction": 1.0,
+    "object_friction": 1.0,  # against the jaws
+    "table_friction": 1.0,  # against the table: `so101 sim physics` fits this from real pushes
     "fingertip_clearance": 0.012,  # how far the fingertips stop above the table at a grasp
     "bowl_rim_radius": 0.075,
     "bowl_base_radius": 0.032,
@@ -115,7 +116,7 @@ def build(
         },
         "object": {
             "spots": spots.round(4).tolist(), "grasp_offset": options["grasp_offset"], "diameter": options["object_diameter"], "height": options["object_height"], "mass": options["object_mass"],
-            "friction": options["object_friction"], "wrist_rgb": [0.12, 0.27, 0.62], "front_rgb": [0.15, 0.32, 0.42],
+            "friction": options["object_friction"], "table_friction": overrides.get("table_friction", previous.get("object", {}).get("table_friction", DEFAULTS["table_friction"])), "wrist_rgb": [0.12, 0.27, 0.62], "front_rgb": [0.15, 0.32, 0.42],
         },
         "cameras": {
             "front": {"pose": pose, "background": "front_background.png"},
@@ -163,8 +164,9 @@ def build(
         scene = fitted
         held_out = fit.tracking_error(scene, out, demos, list(range(2, count, max(1, count // 6))), teleop_limit)
         print("Joint error on demos it wasn't fitted to: " + ", ".join(f"{e:.1f}" for e in held_out), flush=True)
-    scene = _match_sizes(scene, out, demos, kinematics, episodes)
+    scene = _match_sizes(scene, out, demos, kinematics, episodes, measured="object_diameter" in overrides)
     scene = _match_colours(scene, out, demos, kinematics, episodes)
+    scene = _match_softness(scene, out, demos, kinematics, episodes)
     previous_path.write_text(json.dumps(scene, indent=1))
     from so_101.sim import appearance
 
@@ -179,8 +181,14 @@ def _place(env: sim_env.CylinderBowlEnv, kinematics: fit.Kinematics, state: np.n
     mujoco.mj_forward(env._model, env.data)
 
 
-def _match_sizes(scene, out, demos, kinematics, episodes) -> dict:
-    """Draw the object as big as it really looks in each camera. Doesn't change what the jaws grip."""
+def _match_sizes(scene, out, demos, kinematics, episodes, measured: bool) -> dict:
+    """Draw the object as big as it really looks in each camera. Doesn't change what the jaws grip.
+
+    A measured size needs no adjusting. If it still looks wrong in `so101 sim score`, a camera is off.
+    """
+    if measured:
+        scene["object"]["front_scale"] = scene["object"]["wrist_scale"] = 1.0
+        return scene
     # The real object's front view is too dark to measure reliably, so that size is judged by eye.
     scene["object"]["front_scale"] = 0.9
     for _ in range(3):
@@ -265,6 +273,49 @@ def _match_colours(scene, out, demos, kinematics, episodes) -> dict:
             texture *= np.median(gains["wood"], axis=0)[::-1]  # the file is BGR
             cv2.imwrite(str(table_file), texture.clip(0, 255).astype(np.uint8))
     print(f"Colours from real frames: wrist object {scene['object']['wrist_rgb']}, wrist arm {scene['arm']['wrist_rgb']}.", flush=True)
+    return scene
+
+
+def _sharpness(image: np.ndarray, mask: np.ndarray) -> float:
+    return float(cv2.Laplacian(cv2.cvtColor(image, cv2.COLOR_RGB2GRAY), cv2.CV_32F)[mask].var())
+
+
+def _match_softness(scene, out, demos, kinematics, episodes) -> dict:
+    """Blur each camera's rendered parts as much as the real camera's picture is blurred: the same sharpness
+    around the arm's edges, the one thing both show."""
+    from so_101.sim import appearance
+
+    (out / "scene.json").write_text(json.dumps(scene, indent=1))
+    env = sim_env.CylinderBowlEnv(scene_dir=str(out), use_appearance=False)
+    env.reset(seed=0)
+    grow = np.ones((9, 9), np.uint8)
+    moments = []
+    for episode in episodes[::2]:
+        state = demos.episode(episode)[0]
+        hold, let_go = demos.grasp_and_release(episode)
+        moments += [(episode, state, int(moment * hold), hold, let_go) for moment in (0.2, 0.6)]
+    real = {"front": [], "wrist": []}
+    for episode, _, frame, _, _ in moments:
+        front = demos.image(episode, frame / 30)
+        real["front"].append(_sharpness(front, cv2.dilate(fit.arm_mask(front, env.background, 640, 480), grow) > 0))
+        wrist = demos.image(episode, frame / 30, "wrist")
+        real["wrist"].append(_sharpness(wrist, cv2.dilate(fit.wrist_masks(wrist)[1].astype(np.uint8), grow) > 0))
+    softness = {}
+    for camera in appearance.CAMERAS:
+        trials = {}
+        for sigma in (0.0, 0.4, 0.6, 0.8, 1.0, 1.3, 1.6, 2.0):
+            env.scene["softness"] = {camera: sigma}
+            found = []
+            for episode, state, frame, hold, let_go in moments:
+                appearance.place_for_frame(env, kinematics, state, frame, hold, let_go, scene["object"]["grasp_offset"])
+                ids = env.segment(camera)
+                drawn = (ids >= 0) if camera == "front" else ((ids >= 0) & env.is_jaw[ids.clip(0)])
+                found.append(_sharpness(env.raw_render(camera), cv2.dilate(drawn.astype(np.uint8), grow) > 0))
+            trials[sigma] = abs(np.median(found) - np.median(real[camera]))
+        softness[camera] = min(trials, key=trials.get)
+    env.close()
+    scene["softness"] = softness
+    print(f"Softness from real frames: front {softness['front']}, wrist {softness['wrist']} pixels.", flush=True)
     return scene
 
 

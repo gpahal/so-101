@@ -173,8 +173,11 @@ job_timeout = "1h"
 # demos. Rebuild after recording new demos, or after changing anything here. Measure these for accuracy.
 # All are optional. See DEFAULTS in src/so_101/sim/build.py for the rest.
 [sim]
-# object_diameter = 0.036  # metres
+# Measured sizes, in metres. Setting object_diameter also stops the object being drawn at an adjusted size.
+# object_diameter = 0.036
 # object_height = 0.03
+# object_mass = 0.02  # kilograms
 # bowl_rim_radius = 0.075
 # bowl_base_radius = 0.032
 # bowl_height = 0.07
+# table_friction = 1.0  # `so101 sim physics` fits this from nudges; setting it here wins
