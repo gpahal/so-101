@@ -524,3 +524,38 @@ def fit_motors(scene: dict, scene_dir: Path, demos: Demos, episodes: list[int], 
                         motor[field] = old
         print(f"  round {round_index + 1}: mean joint error {best:.2f}", flush=True)
     return scene, tracking_error(scene, scene_dir, demos, episodes, limit)
+
+
+CAMERAS = ("front", "wrist")
+
+
+def place_for_frame(env, kinematics, state: np.ndarray, frame: int, hold: int, let_go: int | None, offset: float) -> None:
+    """Put the arm and object where they really were at a demo's frame: on the table, held, or in the bowl."""
+    point = kinematics.held_object(state[hold], offset)
+    if frame <= hold:
+        env.data.qpos[env.qadr] = env.to_ctrl(state[frame])
+        env.set_object(((point - env.origin) @ env.frame)[:2])
+    elif let_go is None or frame <= let_go:
+        grip_position, grip_rotation = kinematics.pose(state[hold])
+        table_point = env.origin + env.frame @ np.r_[(point - env.origin) @ env.frame[:, :2], env.scene["object"]["height"] / 2]
+        local = grip_rotation.T @ (table_point - grip_position)
+        position, rotation = kinematics.pose(state[frame])
+        env.data.qpos[env.qadr] = env.to_ctrl(state[frame])
+        adr = env.object_qadr
+        env.data.qpos[adr : adr + 3] = position + rotation @ local
+        quat = np.empty(4)
+        mujoco.mju_mat2Quat(quat, (rotation @ grip_rotation.T @ env.frame).ravel())
+        env.data.qpos[adr + 3 : adr + 7] = quat
+    else:
+        env.data.qpos[env.qadr] = env.to_ctrl(state[frame])
+        adr = env.object_qadr
+        env.data.qpos[adr : adr + 3] = env.origin + env.frame @ np.r_[env.scene["bowl"]["xy"], env.scene["object"]["height"] / 2 + 0.008]
+        quat = np.empty(4)
+        mujoco.mju_mat2Quat(quat, env.frame.ravel())
+        env.data.qpos[adr + 3 : adr + 7] = quat
+    mujoco.mj_forward(env._model, env.data)
+
+
+def split(episodes: list[int]) -> tuple[list[int], list[int]]:
+    """Every fourth demo is held back."""
+    return [e for i, e in enumerate(episodes) if i % 4 != 2], [e for i, e in enumerate(episodes) if i % 4 == 2]

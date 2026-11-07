@@ -221,7 +221,6 @@ class CylinderBowlEnv(gym.Env):
         episode_length: int = 900,
         max_relative_target: float = 10.0,
         settle_success_steps: int = 15,
-        use_appearance: bool = True,
     ):
         super().__init__()
         self.scene_dir = Path(scene_dir or os.environ[SCENE_DIR_ENV])
@@ -233,7 +232,6 @@ class CylinderBowlEnv(gym.Env):
         self._max_episode_steps = episode_length
         self.limit = max_relative_target
         self.settle_success_steps = settle_success_steps
-        self.use_appearance = use_appearance
         self.height, self.width = 480, 640
         self.initial_joints = np.asarray(self.scene["start_pose"], dtype=np.float32)
         self._model: mujoco.MjModel | None = None
@@ -280,7 +278,6 @@ class CylinderBowlEnv(gym.Env):
         self.printed_materials = [m for m in range(model.nmat) if not model.material(m).name.startswith(("sts3215", "table", "object"))]
         self.maps = {"front": None, "wrist": self._lens_map(self.scene["cameras"]["wrist"].get("lens"))}
         self._prepare_shadows()
-        self._prepare_appearance()
 
     def _prepare_shadows(self) -> None:
         """Soft shadows, drawn by hand: see which parts of the table the arm hides from the light."""
@@ -371,25 +368,7 @@ class CylinderBowlEnv(gym.Env):
             self._model.geom_group[geom] = GROUP_MOVING if camera == name else GROUP_HIDDEN
         self._model.geom_rgba[self.object_geoms[name], :3] = self.scene["object"][f"{name}_rgb"]
 
-    def _prepare_appearance(self) -> None:
-        self.appearance = None
-        if self.use_appearance and self.scene.get("appearance"):
-            import torch
-
-            from so_101.sim import appearance
-
-            self.appearance_module = appearance
-            self.appearance_device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
-            self.appearance = appearance.load(self.scene_dir, self.appearance_device)
-
     def render_camera(self, name: str) -> np.ndarray:
-        image = self._render(name)
-        if self.appearance is not None:
-            image = self.appearance_module.apply(self.appearance[name], image, self.joint_state(), self.appearance_device)
-        return image
-
-    def raw_render(self, name: str) -> np.ndarray:
-        """The render without the appearance network's correction."""
         return self._render(name)
 
     def segment(self, name: str) -> np.ndarray:

@@ -12,14 +12,13 @@ import cv2
 import numpy as np
 import torch
 
-from so_101.sim import appearance, fit
+from so_101.sim import fit
 from so_101.sim import build as sim_build
 from so_101.sim.env import CylinderBowlEnv
 
 
 class ImageDistance:
-    """Compares images by ImageNet ViT features. `appearance` learns with a different network, so a good
-    score here can't come from the network having learned to game its own measure."""
+    """Compares images by ImageNet ViT features, a network neither ACT nor pi0.5 uses."""
 
     def __init__(self, device: str):
         from torchvision.models import ViT_B_16_Weights, vit_b_16
@@ -33,7 +32,7 @@ class ImageDistance:
 
     def features(self, image: np.ndarray) -> torch.Tensor:
         small = cv2.resize(image, (224, 224), interpolation=cv2.INTER_AREA)
-        tensor = torch.from_numpy(small).permute(2, 0, 1).float()[None].to(self.device) / 255
+        tensor = torch.from_numpy(small).permute(2, 0, 1).float()[None].contiguous().to(self.device) / 255
         with torch.inference_mode():
             self.net((tensor - self.mean) / self.std)
         return torch.nn.functional.normalize(self.tokens[0, 1:], dim=-1)
@@ -45,6 +44,10 @@ class ImageDistance:
 
 def _pixels(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.abs(a.astype(np.float32) - b.astype(np.float32)).mean())
+
+
+def _sharpness(image: np.ndarray) -> float:
+    return float(cv2.Laplacian(cv2.cvtColor(image, cv2.COLOR_RGB2GRAY), cv2.CV_32F).var())
 
 
 def _overlap(a: np.ndarray, b: np.ndarray) -> float:
@@ -71,25 +74,29 @@ def images_and_geometry(demos_root: Path, scene_dir: Path, device: str, sheet: P
     episodes = env.scene.get("held_back") or env.scene["episodes"]
     offset = env.scene["object"]["grasp_offset"]
     rng = np.random.default_rng(0)
-    rows = {camera: {"pixels": [], "pixels_rendered": [], "pixels_reference": [], "features": [], "features_rendered": [], "features_reference": []} for camera in appearance.CAMERAS}
+    rows = {
+        camera: {f"{measure}{kind}": [] for measure in ("pixels", "features", "sharpness") for kind in ("", "_reference")}
+        for camera in fit.CAMERAS
+    }
     arm, jaws, object_px, object_mm, object_size, shown = [], [], [], [], [], []
     for sample in range(frames):
         episode = int(rng.choice(episodes))
         state = demos.episode(episode)[0]
         hold, let_go = demos.grasp_and_release(episode)
         frame = int(rng.integers(0, len(state)))
-        appearance.place_for_frame(env, kinematics, state, frame, hold, let_go, offset)
+        fit.place_for_frame(env, kinematics, state, frame, hold, let_go, offset)
         other, other_frame = _closest_moment(demos, state[frame], [e for e in episodes if e != episode])
         pair = {}
-        for camera in appearance.CAMERAS:
+        for camera in fit.CAMERAS:
             real = demos.image(episode, frame / 30, camera)
-            rendered = env.raw_render(camera)
             final = env.render_camera(camera)
             reference = demos.image(other, other_frame / 30, camera)
             row = rows[camera]
-            for name, image in (("", final), ("_rendered", rendered), ("_reference", reference)):
+            for name, image in (("", final), ("_reference", reference)):
                 row["pixels" + name].append(_pixels(real, image))
                 row["features" + name].append(distance(real, image))
+                # A blurry image can score well on the two above, since a smeared guess is never far off.
+                row["sharpness" + name].append(_sharpness(image) / max(_sharpness(real), 1e-6))
             pair[camera] = (real, final)
             ids = env.segment(camera)
             if camera == "front":
@@ -104,9 +111,9 @@ def images_and_geometry(demos_root: Path, scene_dir: Path, device: str, sheet: P
         # The object while it sits still on the table, before the gripper closes in.
         for moment in (0.0, 0.3, 0.6):
             index = int(moment * max(hold - 15, 1))
-            appearance.place_for_frame(env, kinematics, state, index, hold, let_go, offset)
+            fit.place_for_frame(env, kinematics, state, index, hold, let_go, offset)
             real = demos.image(episode, index / 30, "wrist")
-            found, drawn = fit.blue_blob(real), fit.blue_blob(env.raw_render("wrist"))
+            found, drawn = fit.blue_blob(real), fit.blue_blob(env.render_camera("wrist"))
             whole = lambda box: box[0] > 2 and box[1] > 2 and box[0] + box[2] < 638 and box[1] + box[3] < 478
             if found and whole(found[2]):
                 where = env.wrist_pixel_on_table(found[0], env.scene["object"]["height"])
@@ -137,12 +144,12 @@ def physics(demos_root: Path, scene_dir: Path, limit: float) -> dict:
 
 
 def show(result: dict) -> None:
-    print("\nImages, on demos held back from fitting. Lower is closer to the real frame.")
-    print(f"{'':8s}{'':12s}{'sim':>8s}{'no network':>12s}{'real, same pose':>17s}")
+    print("\nImages, on demos held back from fitting. Lower is closer to the real frame, and sharpness should be near 1.")
+    print(f"{'':8s}{'':12s}{'sim':>8s}{'real, same pose':>17s}")
     for camera, row in result["images"].items():
-        for label, key in (("pixels", "pixels"), ("features", "features")):
-            digits = 1 if key == "pixels" else 3
-            print(f"{camera:8s}{label:12s}{row[key]:8.{digits}f}{row[key + '_rendered']:12.{digits}f}{row[key + '_reference']:17.{digits}f}")
+        for label, key in (("pixels", "pixels"), ("features", "features"), ("sharpness", "sharpness")):
+            digits = 1 if key == "pixels" else 2 if key == "sharpness" else 3
+            print(f"{camera:8s}{label:12s}{row[key]:8.{digits}f}{row[key + '_reference']:17.{digits}f}")
     geometry = result["geometry"]
     print("\nGeometry, the sim's shapes against the real ones, on held-back demos.")
     print(f"Front camera: arm overlap {geometry['front_arm_overlap']:.2f} (1 is perfect, shadows and dark parts keep it below that)")

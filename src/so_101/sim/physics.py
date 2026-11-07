@@ -55,7 +55,7 @@ def locate(env: CylinderBowlEnv, demos: fit.Demos, episode: int, state: np.ndarr
         for _ in range(4):
             env.set_object(where)
             mujoco.mj_forward(env._model, env.data)
-            drawn = fit.blue_blob(env.raw_render("wrist"))
+            drawn = fit.blue_blob(env.render_camera("wrist"))
             if drawn is None:
                 break
             where = where + real - env.wrist_pixel_on_table(drawn[0], height)
@@ -65,7 +65,7 @@ def locate(env: CylinderBowlEnv, demos: fit.Demos, episode: int, state: np.ndarr
 
 def read_pushes(roots: list[Path], scene_dir: Path) -> tuple[list[Push], list[str]]:
     """The pushes in these recordings, and why any were left out."""
-    env = CylinderBowlEnv(scene_dir=str(scene_dir), use_appearance=False)
+    env = CylinderBowlEnv(scene_dir=str(scene_dir))
     env.reset(seed=0)
     pushes, skipped = [], []
     for root in roots:
@@ -103,9 +103,9 @@ def replay_push(env: CylinderBowlEnv, push: Push, start: np.ndarray) -> np.ndarr
 
 def errors_at(scene: dict, scene_dir: Path, pushes: list[Push], friction: float, limit: float) -> np.ndarray:
     """For each push, how far the sim's average move is from the real one."""
-    scene = {**scene, "object": {**scene["object"], "table_friction": friction}, "appearance": False}
+    scene = {**scene, "object": {**scene["object"], "table_friction": friction}}
     (scene_dir / "scene.json").write_text(json.dumps(scene, indent=1))
-    env = CylinderBowlEnv(scene_dir=str(scene_dir), max_relative_target=limit, use_appearance=False)
+    env = CylinderBowlEnv(scene_dir=str(scene_dir), max_relative_target=limit)
     found = []
     for push in pushes:
         moves = [replay_push(env, push, push.start + shift) for shift in START_SPREAD]

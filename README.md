@@ -240,11 +240,11 @@ If it fails at some cylinder positions, record 10 to 20 more demos there (`--epi
 
 ### Try a policy in simulation
 
-`so101 sim` builds a MuJoCo twin of a task from its demos, with nothing to measure by hand. Joint angles give the table, where the object was grasped and where it was released. Each joint's motor is fitted to how the real follower moved. The front camera's real background comes from averaging out the moving arm, both cameras' poses come from lining the simulated arm up with real frames, and a small network learns the remaining difference between rendered and real images. It only ever learns from real recordings, never from a policy, so it means the same for every model.
+`so101 sim` builds a MuJoCo twin of a task from its demos, with nothing to measure by hand. Joint angles give the table, where the object was grasped and where it was released. Each joint's motor is fitted to how the real follower moved. The front camera's real background comes from averaging out the moving arm, both cameras' poses come from lining the simulated arm up with real frames, and colours and softness are matched to real frames. It only ever learns from real recordings, never from a policy, so it means the same for every model.
 
 ```bash
 uv sync --extra sim
-uv run so101 sim build                       # after new demos or changing [sim] in so101.toml; about 30 minutes
+uv run so101 sim build                       # after new demos or changing [sim] in so101.toml; under a minute, refits take longer
 uv run so101 sim replay                      # can the sim redo the real demos?
 uv run so101 sim score                       # how real is it? No model involved
 uv run so101 sim eval --revision 50-demos --episodes 20 --action-steps 100

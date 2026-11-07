@@ -32,7 +32,7 @@ DEFAULTS = {
 
 def build(
     demos_root: Path, out: Path, prompt: str, overrides: dict, teleop_limit: float, device: str,
-    refit_cameras: bool = False, refit_motors: bool = False, appearance_steps: int = 4000,
+    refit_cameras: bool = False, refit_motors: bool = False,
 ) -> dict:
     """Write `scene.json`, the background and the table texture to `out`, and return the scene."""
     out.mkdir(parents=True, exist_ok=True)
@@ -45,6 +45,7 @@ def build(
     sessions = fit.split_sessions(demos, count)
     episodes = max(sessions, key=len)
     print(f"{count} demos in {len(sessions)} camera positions {[len(s) for s in sessions]}; using the largest, episodes {episodes[0]}-{episodes[-1]}.", flush=True)
+    fit_on, held_back = fit.split(episodes)  # `so101 sim score` checks the fit on demos it didn't see
 
     kinematics = fit.Kinematics(GRIPPER_CLOSED)
     grasp, release = {}, []
@@ -71,7 +72,7 @@ def build(
         print("Fitting the front camera, which takes a few minutes...", flush=True)
         def samples(width, height, every):
             found = []
-            for episode in episodes[::every]:
+            for episode in fit_on[::every]:
                 state = demos.episode(episode)[0]
                 for moment in (0.25, 0.45, 0.7):
                     index = int(moment * len(state))
@@ -90,7 +91,7 @@ def build(
     lens = previous.get("cameras", {}).get("wrist", {}).get("lens")
     if lens is None or refit_cameras:
         print("Starting the wrist camera from the object's position in its frames...", flush=True)
-        lens = fit.fit_wrist_lens(demos, kinematics, episodes, grasp)
+        lens = fit.fit_wrist_lens(demos, kinematics, fit_on, grasp)
         print(f"Wrist camera start: {lens['median_error_px']:.0f} px median error over {lens['points']} sightings.", flush=True)
 
     let_go = np.median(np.array(release), axis=0)
@@ -127,6 +128,7 @@ def build(
         # background is a real photo and comes out worse with more added.
         "shadow": {"dir": [0.3, 0.4, -1.0], "view_m": 1.0, "soft_px": 10, "wrist_strength": 0.45},
         "episodes": episodes,
+        "held_back": held_back,
     }
 
     # The table for the wrist camera: the front camera's real table, recoloured to how the wrist camera
@@ -135,7 +137,7 @@ def build(
     texture = fit.read_through_camera(background, np.asarray(pose), texture_points)
     wood = cv2.erode(fit.is_wood(texture).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
     # Bright percentiles, because the wrist camera often looks through the arm's own shadow.
-    wrist_wood = np.concatenate([demos.image(e, 0.03, "wrist")[40:300, 200:440].reshape(-1, 3) for e in episodes[::3]])
+    wrist_wood = np.concatenate([demos.image(e, 0.03, "wrist")[40:300, 200:440].reshape(-1, 3) for e in fit_on[::3]])
     gain = np.percentile(wrist_wood, 70, axis=0) / np.percentile(texture[wood], 70, axis=0)
     filled = texture.copy()
     filled[~wood] = np.median(texture[wood], axis=0)
@@ -150,7 +152,7 @@ def build(
         env.reset(seed=0)
         focal = lens["matrix"][1][1]
         start = np.r_[lens["position"], lens["rotation"], np.degrees(2 * np.arctan(240 / focal)), lens["distortion"][0]]
-        pose, loss = fit.fit_wrist_outlines(env, demos, kinematics, episodes, grasp, start)
+        pose, loss = fit.fit_wrist_outlines(env, demos, kinematics, fit_on, grasp, start)
         env.close()
         lens = {**fit.wrist_lens_from(pose), "outline_loss": loss}
         scene["cameras"]["wrist"]["lens"] = lens
@@ -164,15 +166,11 @@ def build(
         scene = fitted
         held_out = fit.tracking_error(scene, out, demos, list(range(2, count, max(1, count // 6))), teleop_limit)
         print("Joint error on demos it wasn't fitted to: " + ", ".join(f"{e:.1f}" for e in held_out), flush=True)
-    scene = _match_sizes(scene, out, demos, kinematics, episodes, measured="object_diameter" in overrides)
-    scene = _match_colours(scene, out, demos, kinematics, episodes)
-    scene = _match_softness(scene, out, demos, kinematics, episodes)
+    scene = _match_sizes(scene, out, demos, kinematics, fit_on, measured="object_diameter" in overrides)
+    scene = _match_colours(scene, out, demos, kinematics, fit_on)
+    scene = _match_softness(scene, out, demos, kinematics, fit_on)
     previous_path.write_text(json.dumps(scene, indent=1))
-    from so_101.sim import appearance
-
-    print("Teaching the sim how each real camera looks, which takes several minutes...", flush=True)
-    appearance.fit_appearance(demos, kinematics, out, device, appearance_steps)
-    return json.loads(previous_path.read_text())
+    return scene
 
 
 def _place(env: sim_env.CylinderBowlEnv, kinematics: fit.Kinematics, state: np.ndarray, point: np.ndarray) -> None:
@@ -277,16 +275,18 @@ def _match_colours(scene, out, demos, kinematics, episodes) -> dict:
 
 
 def _sharpness(image: np.ndarray, mask: np.ndarray) -> float:
+    """Detail around the masked edges, or NaN if there's too little to measure."""
+    if mask.sum() < 200:
+        return float("nan")
     return float(cv2.Laplacian(cv2.cvtColor(image, cv2.COLOR_RGB2GRAY), cv2.CV_32F)[mask].var())
 
 
 def _match_softness(scene, out, demos, kinematics, episodes) -> dict:
-    """Blur each camera's rendered parts as much as the real camera's picture is blurred: the same sharpness
-    around the arm's edges, the one thing both show."""
-    from so_101.sim import appearance
-
+    """Blur each camera's rendered parts as much as the real camera's picture is blurred. The front camera is
+    judged around the arm, its only rendered part. The wrist camera is judged over its whole picture: its
+    rendered jaws don't line up with the real ones closely enough to compare just their edges."""
     (out / "scene.json").write_text(json.dumps(scene, indent=1))
-    env = sim_env.CylinderBowlEnv(scene_dir=str(out), use_appearance=False)
+    env = sim_env.CylinderBowlEnv(scene_dir=str(out))
     env.reset(seed=0)
     grow = np.ones((9, 9), np.uint8)
     moments = []
@@ -299,19 +299,19 @@ def _match_softness(scene, out, demos, kinematics, episodes) -> dict:
         front = demos.image(episode, frame / 30)
         real["front"].append(_sharpness(front, cv2.dilate(fit.arm_mask(front, env.background, 640, 480), grow) > 0))
         wrist = demos.image(episode, frame / 30, "wrist")
-        real["wrist"].append(_sharpness(wrist, cv2.dilate(fit.wrist_masks(wrist)[1].astype(np.uint8), grow) > 0))
+        real["wrist"].append(_sharpness(wrist, np.ones(wrist.shape[:2], bool)))
     softness = {}
-    for camera in appearance.CAMERAS:
+    for camera in fit.CAMERAS:
         trials = {}
         for sigma in (0.0, 0.4, 0.6, 0.8, 1.0, 1.3, 1.6, 2.0):
             env.scene["softness"] = {camera: sigma}
             found = []
             for episode, state, frame, hold, let_go in moments:
-                appearance.place_for_frame(env, kinematics, state, frame, hold, let_go, scene["object"]["grasp_offset"])
+                fit.place_for_frame(env, kinematics, state, frame, hold, let_go, scene["object"]["grasp_offset"])
                 ids = env.segment(camera)
-                drawn = (ids >= 0) if camera == "front" else ((ids >= 0) & env.is_jaw[ids.clip(0)])
-                found.append(_sharpness(env.raw_render(camera), cv2.dilate(drawn.astype(np.uint8), grow) > 0))
-            trials[sigma] = abs(np.median(found) - np.median(real[camera]))
+                region = cv2.dilate((ids >= 0).astype(np.uint8), grow) > 0 if camera == "front" else np.ones(ids.shape, bool)
+                found.append(_sharpness(env.render_camera(camera), region))
+            trials[sigma] = abs(np.nanmedian(found) - np.nanmedian(real[camera]))
         softness[camera] = min(trials, key=trials.get)
     env.close()
     scene["softness"] = softness
@@ -369,7 +369,7 @@ def replay(demos_root: Path, scene_dir: Path, episodes: list[int] | None, limit:
     }
 
 
-def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, frames: int = 80, appearance_on: bool = True) -> dict:
+def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, frames: int = 80) -> dict:
     """Does the model act the same on rendered images as on real ones?
 
     The model predicts actions from the same moment in real demos twice: once from the real camera images,
@@ -379,7 +379,6 @@ def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, fram
     import torch
     from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
-    from so_101.sim import appearance
     from lerobot.configs.policies import PreTrainedConfig
 
     config = PreTrainedConfig.from_pretrained(policy_dir)
@@ -390,7 +389,7 @@ def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, fram
     )
     demos = fit.Demos(demos_root)
     kinematics = fit.Kinematics(GRIPPER_CLOSED)
-    env = sim_env.CylinderBowlEnv(scene_dir=str(scene_dir), use_appearance=appearance_on)
+    env = sim_env.CylinderBowlEnv(scene_dir=str(scene_dir))
     env.reset(seed=0)
     prompt = env.scene["prompt"]
     episodes = env.scene.get("held_back") or env.scene["episodes"]
@@ -398,7 +397,7 @@ def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, fram
 
     def predict(front: np.ndarray, wrist: np.ndarray, state: np.ndarray) -> np.ndarray:
         def image(pixels):
-            return torch.from_numpy(pixels.copy()).permute(2, 0, 1).float()[None] / 255
+            return torch.from_numpy(pixels.copy()).permute(2, 0, 1).float()[None].contiguous() / 255
 
         batch = {
             "observation.images.front": image(front),
@@ -416,7 +415,7 @@ def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, fram
         hold = demos.grasp_and_release(episode)[0]
         let_go = demos.grasp_and_release(episode)[1]
         index = int(rng.integers(0, len(state) - 1))  # any moment of the demo
-        appearance.place_for_frame(env, kinematics, state, index, hold, let_go, env.scene["object"]["grasp_offset"])
+        fit.place_for_frame(env, kinematics, state, index, hold, let_go, env.scene["object"]["grasp_offset"])
         chunk_len = min(50, len(action) - index)
         real = predict(demos.image(episode, index / 30), demos.image(episode, index / 30, "wrist"), state[index])
         sim_front_only = predict(env.render_camera("front"), demos.image(episode, index / 30, "wrist"), state[index])
