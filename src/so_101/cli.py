@@ -22,6 +22,8 @@ from so_101.devices import apply_camera_controls, find_camera, video_devices
 from so_101.report import Report
 from so_101.settings import ARMS, Arm, ConfigError, PortNotFoundError, cameras_arg
 
+SCENE_DIR_ENV = "SO101_SIM_SCENE"
+
 
 UNTIL_STOPPED_S = 24 * 3600  # an attempt of `--duration 0`: LeRobot needs a length, and Esc or Ctrl+C ends it
 
@@ -177,7 +179,8 @@ def cmd_pose(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None
     if start is None:
         for joint, position in pose.items():
             print(f"{joint:14s} now {position:7.1f}")
-        print(f"\n{task.name} has no local demos to compare with, so a run starts from wherever the arm is.")
+        print(f"\n{task.name} has no local demos on this computer to compare with, so a run starts from wherever the arm is.")
+        print(f"Get them with: uv run hf download {task.dataset} --repo-type dataset --local-dir {data.train_root(s, task)}")
         return
     off = 0
     for key, demo in start.items():
@@ -188,6 +191,124 @@ def cmd_pose(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None
         print(f"{joint:14s} now {pose[joint]:7.1f}  demos {demo:7.1f}  diff {difference:6.1f}  {'ok' if close else 'OFF'}")
     print(f"\nEvery joint is within {rollout.TOLERANCE:g} of the demos' start pose." if not off else
           f"\n{off} joint(s) more than {rollout.TOLERANCE:g} from the demos' start pose. `so101 run` moves them there first.")
+
+
+def record_nudges(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
+    """Teleoperated pushes for fitting the sim's physics. They stay out of the sessions a policy trains on."""
+    from so_101.recording import record_args, task_cameras
+
+    task = get_own_task(ns.task)
+    found, _ = preflight(
+        s, "recording", cameras=[s.camera(ours) for ours in task.cameras.values()], task=task, loop_fps=task.fps, keyboard=True
+    )
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    root = data.task_dir(s, task) / "nudges" / stamp / "dataset"
+    root.parent.mkdir(parents=True)
+    print(
+        "In each recording: start at the demos' start pose with the object fully in the wrist camera's view, push it a "
+        "few centimetres with the jaws, then go back to the start pose and hold still until the end. "
+        "These never go into training.\n"
+    )
+    args = record_args(
+        s, task, task_cameras(s, task, found), root=root, repo_id=f"local/so101_{task.name}_nudges_{stamp}",
+        episodes=ns.episodes or 3, episode_time_s=task.episode_time_s, reset_time_s=task.reset_time_s, display=False,
+    )
+    code = run_lerobot("lerobot-record", [*args, *extra])
+    print(f"\nSaved in {root}. Fit them with: uv run so101 sim physics {task.name}")
+    if code != 0:
+        sys.exit(code)
+
+
+def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
+    if ns.action == "nudge":  # on the arm's computer, which needs neither MuJoCo nor the demos
+        record_nudges(s, ns, extra)
+        return
+    try:
+        from so_101.sim import build as sim_build
+    except ImportError:
+        sys.exit("The simulator needs MuJoCo. Install it with: uv sync --extra sim")
+    from so_101.sim import source
+
+    task = get_own_task(ns.task)
+    demos, scene = data.train_root(s, task), data.sim_dir(s, task)
+    if ns.action != "build" and not (scene / "scene.json").is_file():
+        sys.exit(f"No scene yet. Run `uv run so101 sim build {task.name}` first.")
+    if ns.action not in ("eval", "physics"):  # those only need the scene
+        source.ensure_demos(demos, scene)
+    limit = s.run.max_relative_target if ns.limit is None else ns.limit
+    if ns.action == "build":
+        sim_build.build(demos, scene, task.prompt, s.sim, s.teleop.max_relative_target, s.run.device, task.dataset, refit_cameras=ns.refit_cameras, refit_motors=ns.refit_motors)
+        print(f"\nScene written to {scene}. Check it with `uv run so101 sim score {task.name}`, then commit it.")
+    elif ns.action == "replay":
+        video = s.outputs_dir / "sim" / f"replay_{task.name}.mp4"
+        episodes = list(range(0, ns.episodes)) if ns.episodes else None
+        result = sim_build.replay(demos, scene, episodes, limit, video)
+        count = len(result["results"])
+        print(f"Replaying real commands: {result['lifted']}/{count} lifted the object, {result['in_bowl']}/{count} reached the bowl.")
+        print("Joint error per joint: " + ", ".join(f"{e:.1f}" for e in result["error"]))
+        print(f"Real and sim side by side: {video}")
+    elif ns.action == "physics":
+        from so_101.sim import physics
+
+        nudges = data.task_dir(s, task) / "nudges"
+        source.ensure_nudges(nudges, json.loads((scene / "scene.json").read_text())["object"].get("table_friction_from"))
+        roots = physics.nudge_roots(data.task_dir(s, task))
+        if not roots:
+            sys.exit(f"No nudge recordings yet. Record them with: uv run so101 sim nudge {task.name}")
+        pushes, skipped = physics.read_pushes(roots, scene)
+        for reason in skipped:
+            print(f"Left out {reason}.")
+        if not pushes:
+            sys.exit("No usable pushes.")
+        print(f"Keeping the recordings with the sim: uploading them to the private Hub dataset {task.dataset}_nudges...", flush=True)
+        came_from = source.push_nudges(nudges, f"{task.dataset}_nudges")
+        result = physics.fit_friction(scene, pushes, s.teleop.max_relative_target, came_from)
+        for friction, error in result["by_friction"].items():
+            print(f"friction {friction:4.2f}: object ends {error:3.0f} mm from where it really stopped")
+        print(f"Using {result['friction']:g}, from {result['pushes']} pushes that really moved it {result['moved_mm']:.0f} mm on average.")
+        print(f"Check the demos still work with: uv run so101 sim replay {task.name}")
+    elif ns.action == "score":
+        from so_101.sim import score
+
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        sheet = s.outputs_dir / "sim" / f"score_{task.name}_{stamp}.jpg"
+        print(f"Comparing the sim with held-back real frames ({s.run.device})...", flush=True)
+        result = score.images_and_geometry(demos, scene, s.run.device, sheet)
+        result["physics"] = score.physics(demos, scene, s.teleop.max_relative_target)
+        score.show(result)
+        report = sheet.with_suffix(".json")
+        report.write_text(json.dumps(result, indent=1))
+        print(f"\nReal and sim side by side: {sheet}\nNumbers: {report}")
+    elif ns.action == "check":
+        policy = task.download_policy(ns.revision)
+        print(f"Comparing the model's predictions on real and sim images ({s.run.device})...", flush=True)
+        result = sim_build.check(demos, scene, policy, s.run.device)
+        for label, key in (("real images", "real"), ("sim images", "sim"), ("sim front, real wrist", "sim_front"), ("real front, sim wrist", "sim_wrist")):
+            print(f"{label:24s} error from the demo: {result[key].mean():.2f}  shoulder pan {result[key][0]:.2f}")
+        print(f"Extra error on sim images: {result['sim'].mean() - result['real'].mean():.2f} degrees. Compare this between sim versions, but don't tune the sim to it: that fits the sim to one model.")
+    elif ns.action == "eval":
+        output = s.outputs_dir / "sim" / f"eval_{ns.policy}_{task.name}_{time.strftime('%Y%m%d-%H%M%S')}"
+        policy = task.download_policy(ns.revision) if ns.policy == "act" else task.policy_for(ns.policy)
+        config = task.policy_config(ns.revision, ns.policy)
+        action_steps = resolve_action_steps(s, ns, config)
+        os.environ[SCENE_DIR_ENV] = str(scene.resolve())
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        args = [
+            f"--policy.path={policy}",
+            f"--policy.device={s.run.device}",
+            f"--policy.n_action_steps={action_steps}",
+            "--env.type=envhub",
+            f"--env.hub_path={Path(__file__).parent / 'sim'}",
+            "--env.trust_remote_code=true",
+            "--env.task=so101_cylinder_bowl",
+            f"--env.make_env_kwargs={json.dumps({'max_relative_target': limit, 'episode_length': int(s.run.duration_s * 30)})}",
+            f"--eval.n_episodes={ns.episodes or 10}",
+            "--eval.batch_size=1",
+            f"--output_dir={output}",
+        ]
+        code = run_lerobot("lerobot-eval", [*args, *extra])
+        print(f"\nResults and videos: {output}")
+        sys.exit(code)
 
 
 def cmd_setup_motors(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
@@ -522,7 +643,8 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     task = get_task(ns.task) if ns.policy == "act" else get_own_task(ns.task)
     if ns.policy == "pi05" and not ns.remote:
         sys.exit(f"pi0.5 runs on a cloud GPU. Add --remote, after: uv run so101 server start {task.name} --policy pi05")
-    server = remote.require_server(task.name, ns.policy, ns.revision or "main") if ns.remote else None
+    action_steps = resolve_action_steps(s, ns, task.policy_config(ns.revision, ns.policy))
+    server = remote.require_server(task.name, ns.policy, ns.revision or "main", action_steps) if ns.remote else None
 
     # Name each camera after the checkpoint's camera and capture at the size it was trained on.
     sizes = task.image_sizes(ns.revision, ns.policy)
@@ -547,7 +669,12 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     log = run_dir / "run.log"
     args = [
         "--strategy.type=episodic",
-        *(remote.client_args() if ns.remote else [f"--policy.path={task.download_policy(ns.revision)}"]),
+        # A remote server sets the action steps itself, and its client rejects --policy flags.
+        *(
+            remote.client_args()
+            if ns.remote
+            else [f"--policy.path={task.download_policy(ns.revision)}", f"--policy.n_action_steps={action_steps}"]
+        ),
         *s.follower.lerobot_args(),
         cameras_arg(specs),
         f"--robot.use_degrees={str(task.use_degrees).lower()}",
@@ -576,6 +703,7 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         print("  Each attempt starts at the demos' start pose: " + ", ".join(f"{v:g}" for v in start_pose.values()), flush=True)
     else:
         print("  Each attempt starts at the pose the arm is in now.", flush=True)
+    print(f"  Predicts every {action_steps} steps ({action_steps / task.fps:.1f} s), limit {s.run.max_relative_target:g} per step.", flush=True)
     print("  Keys: right arrow ends an attempt or reset, left arrow redoes it, Esc stops.\n", flush=True)
     code = 130
     try:
@@ -588,6 +716,17 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         if server:
             print(f"The policy server keeps billing until: uv run so101 server stop (job {server.id})")
     sys.exit(code)
+
+
+def resolve_action_steps(s: settings.Settings, ns: argparse.Namespace, config: dict) -> int:
+    """How many actions to carry out per prediction: at least 1, and no more than the model predicts."""
+    steps = s.run.action_steps if ns.action_steps is None else ns.action_steps
+    chunk = config.get("chunk_size", steps)
+    if steps < 1:
+        sys.exit(f"--action-steps must be at least 1, not {steps}.")
+    if steps > chunk:
+        print(f"This model predicts {chunk} steps at a time, so using {chunk} action steps instead of {steps}.", flush=True)
+    return min(steps, chunk)
 
 
 def print_rollout_summary(run_dir: Path, dataset: Path, log: Path) -> None:
@@ -611,12 +750,14 @@ def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     if ns.policy not in s.remote:
         sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
     recipe = s.remote[ns.policy]
+    config = task.policy_config(ns.revision, ns.policy)
     remote.start_server(
         repo=task.policy_for(ns.policy),
         task=task.name,
         policy_type=ns.policy,
         revision=ns.revision or "main",
-        config=task.policy_config(ns.revision, ns.policy),
+        config=config,
+        action_steps=resolve_action_steps(s, ns, config),
         target=ns.target or recipe.job_target,
         timeout=ns.timeout or recipe.job_timeout,
     )
@@ -637,6 +778,18 @@ def main() -> None:
     p = sub.add_parser("scan", help="ping the motors on each bus at every baud rate (read-only)")
     p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
     p.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("sim", help="build a simulated twin of a task from its demos, and try policies in it")
+    p.add_argument("action", choices=["build", "replay", "score", "nudge", "physics", "check", "eval"])
+    p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
+    p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="for eval: which model (default: act)")
+    p.add_argument("--revision", help="for check and eval: which version of the model")
+    p.add_argument("--episodes", type=int, help="for replay, nudge and eval: how many")
+    p.add_argument("--action-steps", type=int, help="for eval: actions to carry out before predicting again")
+    p.add_argument("--limit", type=float, help="the per-step movement limit (default: the run limit)")
+    p.add_argument("--refit-cameras", action="store_true", help="for build: fit the cameras again, after moving one")
+    p.add_argument("--refit-motors", action="store_true", help="for build: fit the motors to the real follower again")
+    p.set_defaults(fn=cmd_sim)
 
     p = sub.add_parser("pose", help="compare the follower's current pose with the demos' start pose (read-only)")
     p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
@@ -709,6 +862,7 @@ def main() -> None:
     p.add_argument("--duration", type=float, help="seconds per attempt; 0 runs until Esc or Ctrl+C (default: [run] in so101.toml)")
     p.add_argument("--episodes", type=int, help="how many attempts to make (default: [run] in so101.toml)")
     p.add_argument("--reset-time", type=float, help="seconds to reset the scene between attempts (default: the task's reset_time_s)")
+    p.add_argument("--action-steps", type=int, help="actions to carry out before predicting again (default: [run] in so101.toml)")
     p.add_argument("--display", action="store_true", help="stream cameras and joints to a Rerun viewer")
     p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to run (default: act)")
@@ -720,6 +874,7 @@ def main() -> None:
     p.add_argument("task", nargs="?", help="for start, default: `default` in tasks.toml")
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to serve (default: act)")
     p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
+    p.add_argument("--action-steps", type=int, help="actions to carry out before predicting again (default: [run] in so101.toml)")
     p.add_argument("--target", help="HF Jobs flavor (default: [remote.<policy>] in so101.toml)")
     p.add_argument("--timeout", help="stop the job after this long, like 30m or 2h (default: [remote.<policy>] in so101.toml)")
     p.set_defaults(fn=cmd_server)

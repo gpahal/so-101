@@ -129,6 +129,7 @@ class Run:
     episodes: int
     device: str
     max_relative_target: float
+    action_steps: int
 
 
 @dataclass(frozen=True)
@@ -172,6 +173,7 @@ class Settings:
     run: Run
     train: dict[str, Train]
     remote: dict[str, Remote]
+    sim: dict
     data_dir: Path
     path: Path
 
@@ -231,7 +233,8 @@ def load() -> Settings:
             duration_s=run.get("duration_s", 30),
             episodes=run.get("episodes", 1),
             device=run.get("device", "mps"),
-            max_relative_target=run.get("max_relative_target", 5),
+            max_relative_target=run.get("max_relative_target", teleop.get("max_relative_target", 0)),
+            action_steps=run.get("action_steps", 30),
         ),
         train={
             policy: Train(
@@ -248,6 +251,7 @@ def load() -> Settings:
             policy: Remote(job_target=section["job_target"], job_timeout=section["job_timeout"])
             for policy, section in data.get("remote", {}).items()
         },
+        sim=data.get("sim", {}),
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,
     )

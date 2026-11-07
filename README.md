@@ -33,6 +33,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 check [task] [--live] [--save-reference]` | Check arms, cameras and setup. Read-only unless `--live`. See [Checking the setup](#checking-the-setup) |
 | `uv run so101 info` | Show config, resolved ports, camera indices and calibration status |
 | `uv run so101 find-port follower` | Detect a board by unplugging it, and save its port and serial number to `so101.toml` |
+| `uv run so101 sim build\|replay\|check\|eval [task]` | Build a simulated twin of a task from its demos, check it, and try a policy in it (needs `uv sync --extra sim`) |
 | `uv run so101 pose [task]` | Compare the follower's current pose with the demos' start pose (read-only) |
 | `uv run so101 motors [follower\|leader] [--watch S]` | Show each motor's temperature, voltage, load, position within its calibrated range, and alarms. Read-only; `--watch 2` refreshes every 2 seconds |
 | `uv run so101 scan [follower\|leader]` | Ping motors at every baud rate and list the ids that answer. Read-only |
@@ -47,7 +48,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 build [task]` | Make the training dataset from all sessions plus your edits (`train` does this itself) |
 | `uv run so101 train [task] [--policy act\|pi05] [--target FLAVOR]` | Train a policy on your demos, ACT by default, on Hugging Face Jobs by default |
 | `uv run so101 backup [task]` | Upload a task's sessions and edits to a private Hub dataset |
-| `uv run so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU, and record it to `outputs/rollouts/` |
+| `uv run so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--action-steps N] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU, and record it to `outputs/rollouts/` |
 | `uv run so101 run [task] --policy act\|pi05 --remote [--revision TAG]` | Run a policy on the cloud GPU below, with the arm and cameras on the Mac |
 | `uv run so101 server start\|stop\|status [task] [--policy act\|pi05] [--revision TAG]` | Start, stop or check the cloud GPU job that `run --remote` uses |
 | `uv run so101 env` | Print the settings as shell variables |
@@ -230,11 +231,42 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - `--target local` trains ACT on this Mac instead, which takes days at these settings.
 6. **Run:** `uv run so101 run --display`, from the same rest pose with the cylinder somewhere you recorded.
    - Every run records to its own folder, `outputs/rollouts/<policy>_<task>_<time>/`: the video and joint data in `dataset/`, and the terminal output in `run.log`. It prints where at the start and at the end, including after Ctrl+C.
+   - It predicts every 30 steps, or 1 second (`action_steps` in `[run]`, or `--action-steps`), and uses the same `max_relative_target` as recording, because a lower limit changes the arm's path.
    - It makes one attempt of 30 seconds by default (`[run]` in `so101.toml`). `--episodes 5` makes more, with `--reset-time` seconds between them to reset the scene: right arrow ends an attempt or reset early, left arrow redoes an attempt, and Esc stops.
    - Every attempt starts from the pose your demos start from (the arm's pose at launch, for a task with no local demos). The arm goes there after each attempt and holds it, so reset the scene around it. An attempt won't start until the arm has arrived: if it can't get there, right arrow turns the motors off so you can move it by hand, and right arrow again carries on. Support the arm first, because it goes limp.
    - Retraining replaces the model in the same repo. To keep the current one, tag it first: `uv run hf repos tag create <you>/act_so101_<task> 50-demos`. Then `--revision 50-demos` runs that version, and leaving it out runs the newest.
 
 If it fails at some cylinder positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.
+
+### Try a policy in simulation
+
+`so101 sim` builds a MuJoCo twin of a task from its demos, with nothing to measure by hand. Joint angles give the table, where the object was grasped and where it was released. Each joint's motor is fitted to how the real follower moved. The front camera's real background comes from averaging out the moving arm, both cameras' poses come from lining the simulated arm up with real frames, and colours and softness are matched to real frames. It only ever learns from real recordings, never from a policy, so it means the same for every model.
+
+```bash
+uv sync --extra sim
+uv run so101 sim build                       # after new demos or changing [sim] in so101.toml; under a minute, refits take longer
+uv run so101 sim replay                      # can the sim redo the real demos?
+uv run so101 sim score                       # how real is it? No model involved
+uv run so101 sim eval --revision 50-demos --episodes 20 --action-steps 100
+uv run so101 sim check --revision 50-demos   # how differently does this model act on sim images? Read-only
+```
+
+Everything it works out goes in `sims/<task>/`, which is committed: fitting cameras again gives a slightly different fit, so the repo keeps the one in use. The scene records the Hub revision of the demos it was built from, and commands download that revision when a computer has no demos, so `sim build` on any computer gives the same files. Commit `sims/<task>/` after each `build`.
+
+After moving a camera, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`. If the demos aren't on the Hub yet, `build` warns that only this computer can rebuild the sim; a cloud `so101 train` uploads them.
+
+`score` compares the sim with held-back real frames, the arm's shapes and replays of real commands, and saves real and sim side by side. Its "real, same pose" column is how much two real moments differ, for scale. Don't change the sim to improve `check` or `eval` on a model: that fits it to that model.
+
+To make it more accurate, at the arm:
+
+1. Measure the object and bowl, and set them in `[sim]` in `so101.toml`. Then run `sim build --refit-cameras`.
+2. Record pushes, so the sim knows how the object slides. These never go into training, and this command doesn't need MuJoCo or the demos:
+   ```bash
+   uv run so101 sim nudge --episodes 3
+   ```
+   Start each at the demos' start pose with the object fully in the wrist camera's view, push it a few centimetres with the jaws, then return to the start pose and hold still until the end. Copy `data/<task>/nudges/` to the computer with the sim if it's a different one, then run `uv run so101 sim physics` followed by `uv run so101 sim replay`. `physics` uploads the recordings to the private Hub dataset `<you>/so101_<task>_nudges` and records which revision the friction came from, so it can be fitted again anywhere.
+
+Grip contact and motor behaviour are approximations, and the wrist camera's view is the weakest part. Sim results only predict real ones once they've been compared: run the same few models for real and in the sim, and see whether they rank the same.
 
 ### Run on a cloud GPU
 
