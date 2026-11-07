@@ -31,10 +31,16 @@ DEFAULTS = {
 
 
 def build(
-    demos_root: Path, out: Path, prompt: str, overrides: dict, teleop_limit: float, device: str,
+    demos_root: Path, out: Path, prompt: str, overrides: dict, teleop_limit: float, device: str, repo: str,
     refit_cameras: bool = False, refit_motors: bool = False,
 ) -> dict:
-    """Write `scene.json`, the background and the table texture to `out`, and return the scene."""
+    """Write `scene.json`, the background and the table texture to `out`, and return the scene.
+
+    Fits already in `out` are kept, so rebuilding from the same demos gives the same files. `repo` is where
+    the demos are on the Hub, recorded with their revision so the sim can be rebuilt elsewhere.
+    """
+    from so_101.sim import source
+
     out.mkdir(parents=True, exist_ok=True)
     options = {**DEFAULTS, **overrides}
     previous_path = out / "scene.json"
@@ -96,8 +102,8 @@ def build(
 
     let_go = np.median(np.array(release), axis=0)
     scene = {
-        "arm_xml": str(fit.arm_xml()),
         "prompt": prompt,
+        "demos": source.describe(demos_root, repo),
         "start_pose": np.median(np.stack([demos.episode(e)[0][0] for e in range(count)]), axis=0).round(2).tolist(),
         "arm": {
             "rgb": [0.95, 0.88, 0.76], "motor_rgb": [0.08, 0.08, 0.08],
@@ -117,7 +123,8 @@ def build(
         },
         "object": {
             "spots": spots.round(4).tolist(), "grasp_offset": options["grasp_offset"], "diameter": options["object_diameter"], "height": options["object_height"], "mass": options["object_mass"],
-            "friction": options["object_friction"], "table_friction": overrides.get("table_friction", previous.get("object", {}).get("table_friction", DEFAULTS["table_friction"])), "wrist_rgb": [0.12, 0.27, 0.62], "front_rgb": [0.15, 0.32, 0.42],
+            "friction": options["object_friction"], "table_friction": overrides.get("table_friction", previous.get("object", {}).get("table_friction", DEFAULTS["table_friction"])),
+            "table_friction_from": None if "table_friction" in overrides else previous.get("object", {}).get("table_friction_from"), "wrist_rgb": [0.12, 0.27, 0.62], "front_rgb": [0.15, 0.32, 0.42],
         },
         "cameras": {
             "front": {"pose": pose, "background": "front_background.png"},

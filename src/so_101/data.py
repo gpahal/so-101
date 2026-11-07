@@ -7,6 +7,9 @@
       edits.toml        trims and deletions from `so101 review`
       train/            the training dataset `so101 build` makes from sessions + edits
       build.json        what `train/` was built from, to tell when it is out of date
+      nudges/<YYYYmmdd-HHMMSS>/dataset/   pushes recorded by `so101 sim nudge`, never trained on
+
+    sims/<task>/        in the repo: the simulated twin `so101 sim build` makes from `train/`
 """
 
 import hashlib
@@ -25,6 +28,11 @@ if TYPE_CHECKING:
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 
     from so_101.tasks import Task
+
+
+def sim_dir(s: Settings, task: "Task") -> Path:
+    """A task's simulated twin. Kept in the repo, since it's small and fitting it again gives a different fit."""
+    return s.path.parent / "sims" / task.name
 
 
 def task_dir(s: Settings, task: "Task") -> Path:

@@ -227,16 +227,18 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         from so_101.sim import build as sim_build
     except ImportError:
         sys.exit("The simulator needs MuJoCo. Install it with: uv sync --extra sim")
+    from so_101.sim import source
+
     task = get_own_task(ns.task)
-    demos, scene = data.train_root(s, task), data.task_dir(s, task) / "sim"
-    if not demos.joinpath("meta", "info.json").is_file():
-        sys.exit(f"No training set at {demos}. Run `uv run so101 build {task.name}` first.")
+    demos, scene = data.train_root(s, task), data.sim_dir(s, task)
     if ns.action != "build" and not (scene / "scene.json").is_file():
         sys.exit(f"No scene yet. Run `uv run so101 sim build {task.name}` first.")
+    if ns.action not in ("eval", "physics"):  # those only need the scene
+        source.ensure_demos(demos, scene)
     limit = s.run.max_relative_target if ns.limit is None else ns.limit
     if ns.action == "build":
-        sim_build.build(demos, scene, task.prompt, s.sim, s.teleop.max_relative_target, s.run.device, refit_cameras=ns.refit_cameras, refit_motors=ns.refit_motors)
-        print(f"\nScene written to {scene}. Check it with: uv run so101 sim replay {task.name}")
+        sim_build.build(demos, scene, task.prompt, s.sim, s.teleop.max_relative_target, s.run.device, task.dataset, refit_cameras=ns.refit_cameras, refit_motors=ns.refit_motors)
+        print(f"\nScene written to {scene}. Check it with `uv run so101 sim score {task.name}`, then commit it.")
     elif ns.action == "replay":
         video = s.outputs_dir / "sim" / f"replay_{task.name}.mp4"
         episodes = list(range(0, ns.episodes)) if ns.episodes else None
@@ -248,6 +250,8 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     elif ns.action == "physics":
         from so_101.sim import physics
 
+        nudges = data.task_dir(s, task) / "nudges"
+        source.ensure_nudges(nudges, json.loads((scene / "scene.json").read_text())["object"].get("table_friction_from"))
         roots = physics.nudge_roots(data.task_dir(s, task))
         if not roots:
             sys.exit(f"No nudge recordings yet. Record them with: uv run so101 sim nudge {task.name}")
@@ -256,7 +260,9 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
             print(f"Left out {reason}.")
         if not pushes:
             sys.exit("No usable pushes.")
-        result = physics.fit_friction(scene, pushes, s.teleop.max_relative_target)
+        print(f"Keeping the recordings with the sim: uploading them to the private Hub dataset {task.dataset}_nudges...", flush=True)
+        came_from = source.push_nudges(nudges, f"{task.dataset}_nudges")
+        result = physics.fit_friction(scene, pushes, s.teleop.max_relative_target, came_from)
         for friction, error in result["by_friction"].items():
             print(f"friction {friction:4.2f}: object ends {error:3.0f} mm from where it really stopped")
         print(f"Using {result['friction']:g}, from {result['pushes']} pushes that really moved it {result['moved_mm']:.0f} mm on average.")

@@ -114,7 +114,7 @@ def errors_at(scene: dict, scene_dir: Path, pushes: list[Push], friction: float,
     return np.asarray(found)
 
 
-def fit_friction(scene_dir: Path, pushes: list[Push], limit: float) -> dict:
+def fit_friction(scene_dir: Path, pushes: list[Push], limit: float, came_from: dict | None = None) -> dict:
     """Try each friction value and keep the best. Restores `scene.json` if anything goes wrong."""
     path = scene_dir / "scene.json"
     original = path.read_text()
@@ -125,6 +125,7 @@ def fit_friction(scene_dir: Path, pushes: list[Push], limit: float) -> dict:
         path.write_text(original)
     best = min(table, key=lambda friction: table[friction].mean())
     scene["object"]["table_friction"] = best
+    scene["object"]["table_friction_from"] = came_from
     path.write_text(json.dumps(scene, indent=1))
     return {
         "friction": best,

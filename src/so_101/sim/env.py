@@ -28,6 +28,9 @@ GROUP_HIDDEN = 3
 STILL_BODIES = ("base", "shoulder")
 JAW_BODIES = ("gripper", "moving_jaw_so101_v1")
 SCENE_DIR_ENV = "SO101_SIM_SCENE"
+# MuJoCo Menagerie's SO-101, at a fixed revision so every computer builds the same arm.
+ARM_REPO = "lerobot/so101-tabletop-mujoco"
+ARM_REVISION = "43a427cc783cd2c09445cf341bea6bb5bd9c22d1"
 
 LEROBOT_SIM = {
     "fps": 30,
@@ -37,6 +40,12 @@ LEROBOT_SIM = {
     "action_names": JOINT_NAMES,
     "robot_type": "so_follower",
 }
+
+
+def arm_xml() -> Path:
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(ARM_REPO, revision=ARM_REVISION)) / "robotstudio_so101" / "so101.xml"
 
 
 def rotation_quat(vector) -> np.ndarray:
@@ -78,7 +87,7 @@ def cap_mesh(diameter: float, height: float, rim: float, segments: int = 48) -> 
 
 
 def build_model(scene: dict, scene_dir: Path, fovy_scale: dict[str, float]) -> mujoco.MjModel:
-    spec = mujoco.MjSpec.from_file(scene["arm_xml"])
+    spec = mujoco.MjSpec.from_file(str(arm_xml()))
     origin, frame = plane_frame(scene)
     spec.option.gravity = (-9.81 * frame[:, 2]).tolist()
 

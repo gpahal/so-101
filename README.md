@@ -251,7 +251,9 @@ uv run so101 sim eval --revision 50-demos --episodes 20 --action-steps 100
 uv run so101 sim check --revision 50-demos   # how differently does this model act on sim images? Read-only
 ```
 
-Everything it works out goes in `data/<task>/sim/`. After moving a camera, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`.
+Everything it works out goes in `sims/<task>/`, which is committed: fitting cameras again gives a slightly different fit, so the repo keeps the one in use. The scene records the Hub revision of the demos it was built from, and commands download that revision when a computer has no demos, so `sim build` on any computer gives the same files. Commit `sims/<task>/` after each `build`.
+
+After moving a camera, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`. If the demos aren't on the Hub yet, `build` warns that only this computer can rebuild the sim; a cloud `so101 train` uploads them.
 
 `score` compares the sim with held-back real frames, the arm's shapes and replays of real commands, and saves real and sim side by side. Its "real, same pose" column is how much two real moments differ, for scale. Don't change the sim to improve `check` or `eval` on a model: that fits it to that model.
 
@@ -262,7 +264,7 @@ To make it more accurate, at the arm:
    ```bash
    uv run so101 sim nudge --episodes 3
    ```
-   Start each at the demos' start pose with the object fully in the wrist camera's view, push it a few centimetres with the jaws, then return to the start pose and hold still until the end. Copy `data/<task>/nudges/` to the computer with the sim if it's a different one, then run `uv run so101 sim physics` followed by `uv run so101 sim replay`.
+   Start each at the demos' start pose with the object fully in the wrist camera's view, push it a few centimetres with the jaws, then return to the start pose and hold still until the end. Copy `data/<task>/nudges/` to the computer with the sim if it's a different one, then run `uv run so101 sim physics` followed by `uv run so101 sim replay`. `physics` uploads the recordings to the private Hub dataset `<you>/so101_<task>_nudges` and records which revision the friction came from, so it can be fitted again anywhere.
 
 Grip contact and motor behaviour are approximations, and the wrist camera's view is the weakest part. Sim results only predict real ones once they've been compared: run the same few models for real and in the sim, and see whether they rank the same.
 

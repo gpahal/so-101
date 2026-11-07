@@ -14,20 +14,15 @@ import cv2
 import mujoco
 import numpy as np
 import pandas as pd
-from huggingface_hub import snapshot_download
 from scipy.optimize import minimize
 from torchcodec.decoders import VideoDecoder
 
-ARM_REPO = "lerobot/so101-tabletop-mujoco"
-ARM_REVISION = "43a427cc783cd2c09445cf341bea6bb5bd9c22d1"
+from so_101.sim.env import arm_xml
+
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 STILL_BODIES = ("base", "shoulder")
 # The real gripper's calibrated range is 129.4 degrees, so 1% is more than the model's 1.1 degrees.
 GRIPPER_DEG_PER_PERCENT = 1.294
-
-
-def arm_xml() -> Path:
-    return Path(snapshot_download(ARM_REPO, revision=ARM_REVISION)) / "robotstudio_so101" / "so101.xml"
 
 
 def joints_to_qpos(state: np.ndarray, gripper_closed: float) -> np.ndarray:
