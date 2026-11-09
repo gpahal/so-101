@@ -47,7 +47,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 build [task]` | Make the training dataset from all sessions plus your edits (`train` does this itself) |
 | `uv run so101 train [task] [--policy act\|pi05] [--target FLAVOR]` | Train a policy on your demos, ACT by default, on Hugging Face Jobs by default |
 | `uv run so101 backup [task]` | Upload a task's sessions and edits to a private Hub dataset |
-| `uv run so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU, and record it to `outputs/rollouts/` |
+| `uv run so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--action-steps N] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU, and record it to `outputs/rollouts/` |
 | `uv run so101 run [task] --policy act\|pi05 --remote [--revision TAG]` | Run a policy on the cloud GPU below, with the arm and cameras on the Mac |
 | `uv run so101 server start\|stop\|status [task] [--policy act\|pi05] [--revision TAG]` | Start, stop or check the cloud GPU job that `run --remote` uses |
 | `uv run so101 env` | Print the settings as shell variables |
@@ -188,7 +188,7 @@ There is no general-purpose pretrained ACT model. Every ACT checkpoint was train
 
 What the policy uses: both camera images and the six joint positions, read 30 times a second. It outputs six target joint positions. ACT ignores the task text.
 
-`run` downloads the checkpoint to `outputs/policies/`, names your cameras after the checkpoint's cameras, captures at the resolution it was trained on, and runs it on the Mac's GPU (`[run] device`). It stops after `[run] duration_s` seconds and moves the arm back to where it started. `[run] max_relative_target` caps each joint at 5 degrees per step. Keep a hand near the follower's power switch; Ctrl+C stops the run.
+`run` downloads the checkpoint to `outputs/policies/`, names your cameras after the checkpoint's cameras, captures at the resolution it was trained on, and runs it on the Mac's GPU (`[run] device`). It stops after `[run] duration_s` seconds and moves the arm back to where it started. It uses the same per-step limit as recording (`[teleop] max_relative_target`, 10 degrees) unless `[run]` sets its own. Keep a hand near the follower's power switch; Ctrl+C stops the run.
 
 | Task | Props | Cameras |
 | --- | --- | --- |
@@ -230,6 +230,7 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - `--target local` trains ACT on this Mac instead, which takes days at these settings.
 6. **Run:** `uv run so101 run --display`, from the same rest pose with the cylinder somewhere you recorded.
    - Every run records to its own folder, `outputs/rollouts/<policy>_<task>_<time>/`: the video and joint data in `dataset/`, and the terminal output in `run.log`. It prints where at the start and at the end, including after Ctrl+C.
+   - It predicts as often as the model was trained to, every 100 steps for ACT and 50 for pi0.5 (set `action_steps` in `[run]`, or pass `--action-steps`, to change it), and uses the same `max_relative_target` as recording, because a lower limit changes the arm's path.
    - It makes one attempt of 30 seconds by default (`[run]` in `so101.toml`). `--episodes 5` makes more, with `--reset-time` seconds between them to reset the scene: right arrow ends an attempt or reset early, left arrow redoes an attempt, and Esc stops.
    - Every attempt starts from the pose your demos start from (the arm's pose at launch, for a task with no local demos). The arm goes there after each attempt and holds it, so reset the scene around it. An attempt won't start until the arm has arrived: if it can't get there, right arrow turns the motors off so you can move it by hand, and right arrow again carries on. Support the arm first, because it goes limp.
    - Retraining replaces the model in the same repo. To keep the current one, tag it first: `uv run hf repos tag create <you>/act_so101_<task> 50-demos`. Then `--revision 50-demos` runs that version, and leaving it out runs the newest.

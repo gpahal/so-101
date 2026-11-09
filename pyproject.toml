@@ -19,5 +19,5 @@ so101 = "so_101.cli:main"
 so101-rollout = "so_101.rollout:main"
 
 [build-system]
-requires = ["uv_build>=0.12.0,<0.13.0"]
+requires = ["uv_build>=0.13.7,<0.14.0"]
 build-backend = "uv_build"
