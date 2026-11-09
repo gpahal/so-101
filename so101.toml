@@ -107,10 +107,14 @@ episodes = 1
 duration_s = 30
 # Torch device for the policy, here and when training locally: "mps" (Apple GPU), "cpu" or "cuda".
 device = "mps"
-# Max a joint may move per control step while a policy drives the arm, in teleop's units. Lower than
-# teleop's, because a policy can command sudden jumps, especially one trained on someone else's arm.
-# 0 turns it off.
-max_relative_target = 5
+# How many of each predicted chunk of actions to carry out before predicting again. Unset, it uses the
+# value the model was trained with: 100 for ACT, 50 for pi0.5. Fewer reacts sooner to what the cameras
+# see, but pauses for a prediction more often; 30 is 1 second at 30 fps. It can't exceed the model's
+# chunk. Change it with --action-steps.
+# action_steps = 30
+# max_relative_target follows [teleop], because the demos were recorded with that limit and a lower one
+# changes how the arm moves, not just how fast. Set it here only for a specific reason, like a policy
+# trained on someone else's arm, which can command sudden jumps.
 
 # `uv run so101 train <task> [--policy act|pi05]`: train a policy on a task you recorded.
 # job_target is the Hugging Face Jobs hardware, and `uv run hf jobs hardware` lists flavors and
