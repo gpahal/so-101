@@ -20,10 +20,6 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     if any(arg == "--fps" or arg.startswith("--fps=") for arg in extra):
         sys.exit(f"serve runs at the task's fps, {task.fps}: set fps under [{task.name}] in tasks.toml "
                  "instead of passing --fps.")
-    # The preflight fails on a missing, partial or out-of-range rest pose, a rest pose saved without the
-    # follower's calibration fingerprint or before it was recalibrated, and any `[control]` value out of
-    # its range. A plugged-in leader that fails its checks only warns: only Teleop needs it, and the
-    # control center refuses Teleop while it can't connect the leader.
     setup = policy_setup(s, ns, task, serving=True)
     server = setup.server
     # so101-control reads so101.toml and tasks.toml itself, and works out and prints the demos' start
@@ -56,8 +52,8 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
 
 
 def print_serve_summary(run: data.Run) -> None:
-    """Say where the run is and how its attempts went, from its events.jsonl. run.json, written once
-    at the start, is never changed: how the run ended is the `run_end` event the recorder appends."""
+    """Say where the run is and how its attempts went, from its events.jsonl (how it ended is its
+    `run_end` event)."""
     from so_101.control.analysis import read_events
 
     if not run.path.is_dir():  # the child stopped before it was ready, as when the port is taken

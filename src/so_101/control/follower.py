@@ -70,7 +70,8 @@ class Arm:
     Every goal goes through `send_action` or `hold`. A hold does what LeRobot's position hold does: it
     resends the last goal sent, or the measured pose before any goal, through `send_action` and so
     through `max_relative_target`. It goes through here rather than `ThreadSafeRobot.hold`, which
-    returns nothing, so that `goal` is the capped goal the motors got. The cap matters when a hand
+    returns nothing, so that `goal` is the capped goal the motors got; a robot that holds by itself
+    (`supports_command_hold`) gets no goal. The cap matters when a hand
     pushes the arm more than a step from its goal: the hold then sends a goal a step from where the
     arm is, and that is what's recorded, never the uncapped goal nor the measured pose.
 
@@ -120,8 +121,8 @@ class Follower:
     """The follower's reads and holds, and what they last found.
 
     `robot` is LeRobot's robot wrapper (ThreadSafeRobot). `present` is the pose measured last, in
-    the arm's units and keyed like its actions; `present` starts it. `say(message)` tells the operator. With `previews`,
-    each observation's camera frames are handed to it at its rate."""
+    the arm's units and keyed like its actions; `present` starts it. `say(message)` tells the
+    operator. With `previews`, each observation's camera frames are handed to it at its rate."""
 
     def __init__(self, robot, present: dict[str, float], clock: Callable[[], float],
                  say: Callable[[str], None], previews: Previews | None) -> None:
@@ -301,10 +302,10 @@ class Follower:
     def hold_in_fault(self, policy) -> None:
         """Hold the arm, and keep reading it so the status shows when the follower answers again.
 
-        Every hold goes through here. The arm and its motors' restart marks are read before the hold,
+        Every hold in Fault goes through here. The arm and its motors' restart marks are read before the hold,
         so a power cut or a restart is caught before it resends the old goal. A failure that doesn't
         mean the follower is lost, such as a motor alarm, is noted and the arm holds all the same.
-        After the follower was lost, it's marked again first, then its goal is set to its measured
+        After the follower was lost, it's read and marked again first, then its goal is set to its measured
         pose, and only then is its torque turned on: explicitly, rather than trusting the goal write
         to turn it on. A fault always closes the attempt, so no camera is required here: one that
         fails is only noted in `read_errors`, as in `observe` with no attempt open. Nothing is raised

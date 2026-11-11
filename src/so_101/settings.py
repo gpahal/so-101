@@ -1,4 +1,4 @@
-"""Load `so101.toml` and resolve each arm's current serial port."""
+"""Load `so101.toml`, resolve each arm's current serial port, and save ports and the rest pose back into it."""
 
 import hashlib
 import json

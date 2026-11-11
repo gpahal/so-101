@@ -236,7 +236,7 @@ class BuildTest(unittest.TestCase):
             self.assertTrue((np.ravel(np.stack(rows["control.label"])) == analysis.FrameLabel.CORRECTION).all())
             self.assertTrue(np.ravel(np.stack(rows["intervention"])).all())
             success = np.ravel(np.stack(rows["control.attempt_success"]))
-            self.assertTrue((success == (ep == 0)).all(), "attempt 1 succeeded, attempt 3 failed")
+            self.assertTrue((success == (ep == 0)).all(), "attempt 1 succeeded; attempts 3 and 4 failed")
 
         # Neither reading nor building changed the run.
         self.assertEqual(digest(run_dir), before)
@@ -289,7 +289,7 @@ class BuildTest(unittest.TestCase):
             self.bad = first.with_name("file-999.parquet")
             self.bad.write_bytes(first.read_bytes()[: first.stat().st_size // 2])
 
-        def unindexed(run: Path) -> None:  # a kill after the data file was finished and before its index row was
+        def unindexed(run: Path) -> None:  # a kill between finishing the data file and writing its index row
             sorted((run / "dataset" / "meta" / "episodes").glob("*/*.parquet"))[-1].unlink()
 
         rows = [("save", "save", footerless), ("torn info.json", "save", tear("info.json")),

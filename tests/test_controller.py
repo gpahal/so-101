@@ -57,12 +57,12 @@ check = unittest.TestCase()  # its assertions, for the rig's own steps
 
 class Rig:
     def __init__(self, run_dir: Path | None = None, actions: list[list[float]] = POLICY_ACTIONS, **options) -> None:
-        """With `run_dir`, the run is recorded there, and `disk.full` makes every write to its event log fail
-        as on a full disk; without, nothing is recorded (`fakes.NoRecorder`). The policy sends `actions` in
-        order. `options` go to the Controller. A leader is plugged in, folded at rest like the follower; it
-        connects on the first tick. The `[control]` settings are
-        so101.toml's defaults, without camera previews, unless `options` has `control`. While `presence_error` is
-        set, the device watch raises it."""
+        """With `run_dir`, the run is recorded there, and `disk.full` makes every flush of its event log
+        fail as on a full disk; without, nothing is recorded (`fakes.NoRecorder`). The policy sends
+        `actions` in order. `options` go to the Controller. The `[control]` settings are so101.toml's
+        defaults, without camera previews, unless `options` has `control`. A leader is plugged in, folded
+        at rest like the follower; it connects on the first tick. While `presence_error` is set, the
+        device watch raises it."""
         self.clock = FakeClock()
         self.robot, self.motors = make_follower(self.clock, REST_STEPS)
         make, self.leader_motors = make_leader(self.clock, REST_STEPS)
@@ -569,6 +569,33 @@ class RecordingTest(RigTest):
         self.assertTrue((waited["control.phase"] == Phase.TELEOP).any())
         self.assertFalse(waited["intervention"].any(), "a policy that only waited drove nothing to step in on")
 
+    def test_frames_the_video_encoder_dropped_are_on_the_saved_attempts_attempt_end(self) -> None:
+        """LeRobot keeps the frames its streaming encoder dropped only in the encoder's private
+        `_dropped_frames`, per video feature and cleared as each episode starts. This fails if a
+        LeRobot upgrade moves them, which would leave builds training on misaligned attempts."""
+        rig = self.rig
+        rig.start_policy()
+        writer = rig.controller.recorder.dataset.writer
+        self.assertTrue(hasattr(writer, "_streaming_encoder"), "LeRobot's dataset writer moved its streaming encoder")
+        encoder = writer._streaming_encoder
+        self.assertIsNotNone(encoder, "the run records with streaming encoding")
+        self.assertTrue(hasattr(encoder, "_dropped_frames"), "LeRobot's streaming encoder moved its dropped frames")
+        self.assertEqual(encoder._dropped_frames, {}, "the attempt's episode started with no frames dropped")
+        encoder._dropped_frames["observation.images.front"] = 3  # as `feed_frame` counts a frame its full queue refused
+        with self.assertLogs("lerobot.datasets.video_utils", "WARNING") as logs:
+            rig.reset("succeeded")
+        self.assertIn("3 dropped frame(s) for observation.images.front", "\n".join(logs.output),
+                      "LeRobot reads the count as its own as it finishes the episode")
+
+        [end] = rig.events("attempt_end")
+        self.assertEqual((end["saved"], end.get("dropped_frames")), (True, {"front": 3}))
+
+        # The next attempt's episode starts its count again.
+        rig.tick(2 * FPS)  # past the toggle's rule, so a new attempt may start
+        rig.start_policy()
+        rig.reset("failed")
+        self.assertNotIn("dropped_frames", rig.events("attempt_end")[1])
+
 
 class RewindTest(RigTest):
     options = {"actions": GRIPPER_ACTIONS}
@@ -629,6 +656,23 @@ class TimeLimitTest(RigTest):
         self.assertEqual((outcome["attempt"], outcome["outcome"], outcome["episode"]), (1, "failed", 0))
         self.assertIsNone(self.rig.status()["prompt"])
 
+    def test_an_answer_labels_only_the_attempt_it_was_given_for(self) -> None:
+        for _ in range(2):  # attempt 1 is left unanswered, and attempt 2 reaches its limit too
+            self.rig.policy(self.LIMIT_S)
+            self.rig.tick_until("resting")
+        self.assertEqual(self.rig.status()["prompt"], 2)
+
+        refused = self.rig.command("outcome", outcome="succeeded", for_attempt=1)
+        self.assertFalse(refused.accepted)
+        self.assertIn("attempt 2 is the one waiting", refused.reason)
+        self.assertFalse(self.rig.command("outcome", outcome="succeeded", for_attempt=None).accepted,
+                         "sent before attempt 2 asked")
+        self.assertEqual(self.rig.events("outcome"), [])
+
+        self.assertEqual(self.rig.press("f"), "", "the terminal answers for the attempt its status shows")
+        [outcome] = self.rig.events("outcome")
+        self.assertEqual((outcome["attempt"], outcome["outcome"]), (2, "failed"))
+
 
 class LinkLossTest(RigTest):
     PHONE = "phone-page"  # the client id the controlling page made for itself
@@ -661,7 +705,7 @@ class LinkLossTest(RigTest):
         self.assertEqual(self.rig.status()["state"], "paused")
         [lost] = self.events("link_lost")
         self.assertGreaterEqual(lost["seconds"], self.TIMEOUT_S)
-        self.assertEqual(lost["on_link_loss"], "pause")
+        self.assertEqual((lost["on_link_loss"], lost["driving"]), ("pause", True))
         paused = [e for e in self.events("state") if e["state"] == "paused"]
         self.assertEqual([e["cause"] for e in paused], ["link_lost"])
         held = len(self.rig.goals())

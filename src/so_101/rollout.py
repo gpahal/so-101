@@ -135,6 +135,7 @@ def install() -> None:
     def target_for(hw) -> dict[str, float] | None:
         return configured or hw.initial_position
 
+    # LeRobot's signature; the move takes as long as `drive_to` needs.
     def return_to_initial_position(hw, duration_s: float = 3.0, fps: int = 50) -> bool:
         target = target_for(hw)
         if target is None or hw.robot_wrapper.hardware_failure is not None:

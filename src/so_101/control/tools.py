@@ -1,4 +1,4 @@
-"""Run checks and Check pose: read-only tools the control loop runs between ticks, on the devices it has open.
+"""Run checks and Check pose: read-only tools the control loop runs inside a tick, on the devices it has open.
 
 They run inside the loop, so no serial port is ever opened twice. Run checks takes about 3 s, during
 which the loop sends no goal, so it runs only while the arm holds still: Resting, Paused or Fault
@@ -24,8 +24,8 @@ def pose_report(pose: dict[str, float], start_pose: dict[str, float] | None) -> 
     if start_pose is None:
         for key, position in pose.items():
             report.ok(key.removesuffix(".pos"), f"now {position:.1f}")
-        report.warn("start pose", "no local demos to compare with, so an attempt starts from wherever the arm is",
-                    fix="download the task's dataset with `uv run hf download`, as `uv run so101 pose` shows")
+        report.warn("start pose", "no build to take the demos' start pose from, so an attempt starts from wherever "
+                    "the arm is", fix="make one with `uv run so101 build`")
         return report
     for key, demo in start_pose.items():
         difference = pose[key] - demo

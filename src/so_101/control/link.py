@@ -10,9 +10,8 @@ A phone's browser slows or stops a hidden page's timers, so the page also says w
 (the screen locked, or another app or tab in front): the link is lost at once, logged as
 `page_hidden`, and the polls heard before the report are dropped. Each poll says whether the page is
 visible, and only a visible page's polls count, so the link comes back with the first poll after the
-page is back in sight. A visible poll
-that reaches the server after the hide report can bring the link back early; the pause has already
-happened, and the next timeout loses the link again.
+page is back in sight. A visible poll that reaches the server after the hide report can bring the
+link back early; the pause has already happened, and the next timeout loses the link again.
 """
 
 import threading
@@ -107,7 +106,7 @@ class Link:
         is also told when a running policy keeps running. Returns whether to pause now."""
         self.lost = True
         pause = self.on_loss == "pause" and driving
-        self.record(event, who=self.who, **fields, on_link_loss=self.on_loss)
+        self.record(event, who=self.who, **fields, on_link_loss=self.on_loss, driving=driving)
         if pause:
             self.say(f"{why} Pausing: the policy never runs unsupervised.")
         elif explain and driving:

@@ -43,7 +43,7 @@ class Attempt:
     # the way to rest clears both.
     ended_by: str | None = None
     outcome: str | None = None
-    episode: int | None = None  # the run's episode it was saved as; None until saved, or if the save failed
+    episode: int | None = None  # the run's episode it was saved as; None until saved, or if it wasn't (no frames, a failed save)
 
     def count(self, limit: str, seconds: float, limit_s: float) -> bool:
         """Add a tick's seconds toward `limit`. Returns whether the attempt has used up its `limit_s`."""

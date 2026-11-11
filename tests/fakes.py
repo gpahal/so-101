@@ -1,4 +1,4 @@
-"""Fakes for testing the controller without hardware.
+"""Fakes for the tests: the arms, cameras, policy, recorder, disk and terminal, without hardware.
 
 The follower and leader are LeRobot's real SO101Follower, SO101Leader and Feetech motor code. Only
 the layer under them is fake:

@@ -5,8 +5,8 @@ The leader is optional. `Leader` connects it when the device watch sees its boar
 calibration file exists, retries a failed connect with a growing wait, and turns any error from its
 bus into `LeaderLost`. `Handover` drives it to the follower's measured pose one step per tick, so
 Pause can cut it short; the controller frees it only once every joint is within `rollout.TOLERANCE`.
-`Mirror` sends it the follower's goals during a rewind. `Leader` keeps the handover or mirror running, and
-dropping the leader ends either.
+`Mirror` sends it the follower's goals during a rewind. `Leader` keeps the handover or mirror
+running, and dropping the leader ends either.
 
 Losing the leader in Handover or Teleop pauses the follower where it is (`states.Event.LEADER_LOST`).
 Its pose is recorded every tick of an attempt while it's connected; a read that fails elsewhere only

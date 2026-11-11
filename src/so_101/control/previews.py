@@ -11,8 +11,8 @@ The page asks for one snapshot at a time, at the preview rate, rather than holdi
 browser allows about 6 connections to a server over plain HTTP, and open streams from a few tabs
 would leave the newest none to poll the status or send Pause with.
 
-Previews are the only optional work in the loop. The controller sheds them when the loop falls
-behind with `set_fps`: half rate first, then none, and back up once the loop keeps up again.
+Previews are the only optional work in the loop. `shedding.Pace` sheds them with `set_fps` when the
+loop falls behind: half rate first, then none, and back up once the loop keeps up again.
 """
 
 import threading

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build uvc-util (https://github.com/jtfrey/uvc-util) and install it to ~/.local/bin.
+# Build uvc-util (https://github.com/jtfrey/uvc-util) and install it to ~/.local/bin, or to the folder given as the
+# first argument, which must then be on PATH.
 # `so101` uses it to set camera controls (exposure, anti-flicker) that macOS gives OpenCV no access to.
 # Needs the Xcode command line tools (`xcode-select --install`).
 set -euo pipefail

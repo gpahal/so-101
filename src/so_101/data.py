@@ -364,7 +364,7 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
     """Everything a build depends on. A build is current when this equals what build.json recorded.
 
     `sources` are the run sources besides the demos (`so101 build --with`). A demos-only build
-    without labels records exactly what it did before runs existed, so its build.json is unchanged.
+    without labels records the same inputs as before runs existed, so builds made then stay current.
     """
     inputs = {
         "prompt": task.prompt,

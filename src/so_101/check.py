@@ -6,7 +6,7 @@ camera's UVC controls, the only thing written. Only `live_test` moves the follow
 asked for with `so101 check --live`.
 
 The checks open the buses and cameras they need and close them again. A caller that already holds
-a device open, such as a control server, passes it in instead: the checks use it as it is and leave
+a device open, such as the control center (`control/main.py`), passes it in instead: the checks use it as it is and leave
 it open. Opening a second connection isn't an option for an arm, because two processes on one
 serial port corrupt each other's packets.
 """
@@ -63,8 +63,8 @@ def narrow_joints_warning(arm: Arm) -> str:
 
 
 def check_system(report: Report, s: Settings, cameras: list[Camera], keyboard: bool, hub: bool = True) -> None:
-    """Hugging Face login (unless not `hub`), disk space, uvc-util, and with `keyboard` the
-    Accessibility permission. The login check asks the Hub, with no timeout."""
+    """Hugging Face login (with `hub`), disk space, uvc-util, and with `keyboard` the Accessibility
+    permission. The login check asks the Hub, with no timeout."""
     from so_101.tasks import hf_user
 
     if hub:
@@ -642,12 +642,8 @@ def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] =
     follower's calibration file only.
 
     `settings.load()` doesn't check them, so a bad value never stops the commands that fix it. Each
-    problem gets `status`: FAIL in `serve`'s preflight, WARN in `so101 check`. Only `serve` needs
-    them all; `runs`, `build --with` and `review --runs` read `blame_s` too, and check it themselves
-    (`analysis.check_blame_s`). The rest pose's first problem (`rest_pose_problem`) gets `status`,
-    including a pose saved without a calibration fingerprint: `serve` never drives to a rest pose it
-    can't match with the follower's calibration. Without the follower's calibration file there's
-    nothing to compare the fingerprint with: a WARN, beside the follower check's own FAIL."""
+    problem gets `status`: FAIL in `serve`'s preflight, WARN in `so101 check`. `runs`, `build --with`
+    and `review --runs` check `blame_s` themselves (`analysis.check_blame_s`)."""
     c = s.control
 
     def problem(group: str, detail: str, fix: str) -> None:
@@ -800,7 +796,7 @@ def live_test(report: Report, s: Settings, seconds: float = 10.0) -> None:
     group = "live test"
     names = list(follower.action_features)
     commanded, measured = [], []
-    fps = 30  # the rate LeRobot records at
+    fps = 30  # tasks.toml's default rate: the live test runs without a task
     try:
         leader.connect(calibrate=False)
         follower.connect(calibrate=False)

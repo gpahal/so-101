@@ -5,10 +5,9 @@ restores it on exit. The arrows and Esc mean what they mean in LeRobot's recordi
 the right arrow ends the attempt and asks how it went, the left arrow ends it as one to ignore.
 The answer applies only to the attempt the right arrow asked about: the question is dropped once the
 attempt has ended, except in Fault, where the answer labels the attempt the fault saved, and the
-controller refuses it once another attempt is the current one. With no
-attempt open (in Fault, where the attempt was already saved, or resting away from rest) the right
-arrow resets to rest without asking.
-After a time limit ends an attempt, s, f or i answers the controller's outcome prompt. c runs the
+controller refuses it once another attempt is the current one. With no attempt open (in Fault,
+where the attempt was already saved, or resting away from rest) the right arrow resets to rest
+without asking. After a time limit ends an attempt, s, f or i answers the controller's outcome prompt. c runs the
 checks and prints their report, o the pose against the demos' start pose. Space only pauses, and r
 starts or resumes: a terminal sends no key-up, so it can't tell a held Space from a fresh press, and
 once the OS's key-repeat delay runs past the control loop's 1 s rule a held Space would start the arm
@@ -157,7 +156,7 @@ class KeyReader:
         elif key == "left":
             self._send("reset", outcome="ignored")
         elif outcome := OUTCOME_KEYS.get(key):
-            self._send("outcome", outcome=outcome)
+            self._send("outcome", outcome=outcome, for_attempt=status["prompt"])
         elif key in HELP_KEYS:
             print(HELP, flush=True)
         elif key == "space":

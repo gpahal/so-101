@@ -1,7 +1,8 @@
 """Run a policy on a Hugging Face Jobs GPU while the arm and cameras stay on this Mac.
 
 The job runs LeRobot's policy server, listening only on its own loopback. An SSH tunnel makes that
-port appear on this Mac, and `lerobot-rollout --inference.type=remote` connects to it.
+port appear on this Mac, and `so101-rollout` (`run --remote`) or `so101-control` (`serve --remote`)
+connects to it with `client_args`.
 """
 
 import base64
@@ -17,7 +18,8 @@ from contextlib import contextmanager, suppress
 from so_101 import svtshim
 
 # LeRobot publishes no image tagged for a release, so this is what `latest` was on 2026-11-11, by
-# digest: a job must not change under a working setup when `latest` moves. Move it on purpose.
+# digest: a job must not change under a working setup when `latest` moves. Move it on purpose. No job
+# has run this image against the 0.7.0 client yet.
 SERVER_IMAGE = "huggingface/lerobot-gpu@sha256:aed1a4990fedee463b545050f33a38afce4f6ec18f7ceb8be17f850737860d6c"
 PORT = 7447
 DEPLOYMENT = "so101"

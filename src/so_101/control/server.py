@@ -16,7 +16,8 @@ and read `status` and `events`, so the control loop stays the one thread that dr
                          has no frame (previews.py)
     POST /command        {"command": ..., "outcome"?: ..., "label"?: ..., "for_attempt"?: ...}.
                          Any other key is refused. Waits for the tick that applies it, then replies
-                         {"accepted", "reason", "status"}. The commands `check` (Run checks: `so101
+                         {"command", "accepted", "reason", "status"}, where "command" is the pause or
+                         resume a toggle became. The commands `check` (Run checks: `so101
                          check` on the devices the control loop has open) and `pose` (Check pose: the
                          follower's pose against the demos' start pose) wait longer, and add "summary"
                          and "results", where each result is {"group", "status": PASS, WARN or FAIL,

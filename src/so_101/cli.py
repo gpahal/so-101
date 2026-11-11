@@ -188,8 +188,9 @@ def cmd_pose(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None
     if start is None:
         for joint, position in pose.items():
             print(f"{joint:14s} now {position:7.1f}")
-        print(f"\n{task.name} has no local demos on this computer to compare with, so a run starts from wherever the arm is.")
-        print(f"Get them with: uv run hf download {task.dataset} --repo-type dataset --local-dir {data.train_root(s, task)}")
+        print(f"\n{task.name} has no build in {data.train_root(s, task)} to take the demos' start pose from, so a run "
+              "starts from wherever the arm is.")
+        print(f"Make one with: uv run so101 build {task.name}")
         return
     off = 0
     for key, demo in start.items():
@@ -199,7 +200,7 @@ def cmd_pose(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None
         off += not close
         print(f"{joint:14s} now {pose[joint]:7.1f}  demos {demo:7.1f}  diff {difference:6.1f}  {'ok' if close else 'OFF'}")
     print(f"\nEvery joint is within {rollout.TOLERANCE:g} of the demos' start pose." if not off else
-          f"\n{off} joint(s) more than {rollout.TOLERANCE:g} from the demos' start pose. `so101 run` moves them there first.")
+          f"\n{off} joint(s) more than {rollout.TOLERANCE:g} from the demos' start pose. `so101 run` and `serve` move them there first.")
 
 
 def cmd_setup_motors(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
@@ -573,7 +574,7 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         args.append("--display_data=true")
     run_dir.mkdir(parents=True)
     print(f"\nRecording this run to {run_dir}\n  Video and joint data: {dataset}\n  Log: {log}", flush=True)
-    # so101-rollout drives to the demos' start pose before each attempt, when there are local demos.
+    # so101-rollout drives to the demos' start pose before each attempt, when the task has a build.
     if start_pose := data.demo_start_pose(s, task):
         os.environ[rollout.START_POSE_ENV] = json.dumps(start_pose)
         print(f"  Each attempt starts at the demos' start pose: {data.describe_pose(start_pose)}", flush=True)
@@ -652,7 +653,7 @@ def main() -> None:
         dest="command", required=True, parser_class=partial(argparse.ArgumentParser, allow_abbrev=False),
     )
 
-    sub.add_parser("info", help="show config, resolved ports and calibration status").set_defaults(fn=cmd_info)
+    sub.add_parser("info", help="show config, resolved ports, camera indices and calibration status").set_defaults(fn=cmd_info)
 
     p = sub.add_parser("find-port", help="detect an arm's board by unplugging it, and save its port")
     p.add_argument("arm", choices=ARMS)
@@ -697,7 +698,7 @@ def main() -> None:
     sub.add_parser("cameras", help="list cameras and save a snapshot from each, to match indices").set_defaults(
         fn=cmd_cameras, forwards=True
     )
-    sub.add_parser("tasks", help="list tasks in tasks.toml, with props and camera setup").set_defaults(fn=cmd_tasks)
+    sub.add_parser("tasks", help="list tasks in tasks.toml, with props, camera setup and demo counts").set_defaults(fn=cmd_tasks)
 
     p = sub.add_parser("record", help="record demos of one of your tasks by teleoperating, as a new session")
     add_task(p)
@@ -759,7 +760,7 @@ def main() -> None:
     p = sub.add_parser("serve", help="supervise a task's policy from a control page over Tailscale, or the terminal: start, pause, rewind, take over with the leader and end attempts")
     add_task(p)
     add_policy_flags(p, "run", remote_flag=True)
-    p.add_argument("--operator", help="your name, recorded with every command and shown on the page (default: none)")
+    p.add_argument("--operator", help="your name, recorded on every event your actions cause and shown on the page (default: none)")
     p.set_defaults(fn=cmd_serve, forwards=True)
 
     p = sub.add_parser("server", help="start, stop or check the cloud GPU job that `run --remote` and `serve --remote` use")

@@ -50,7 +50,7 @@ The follower's gripper sometimes stops answering and blinks red until its power 
 
 | Register | Address | Default | Note |
 | --- | --- | --- | --- |
-| Max temperature | 13 | 70 °C | `serve` warns at 55 °C and `check` fails at 60 °C |
+| Max temperature | 13 | 70 °C | `check` warns at 50 °C and fails at 60 °C; `serve` warns above 55 °C |
 | Min voltage | 15 | 4.0 V | Cuts output only if bit 0 of the unload condition is set |
 | Max torque | 16 | 1000 (0.1% units) | LeRobot sets the gripper's to 500. Copied into `torque_limit` at power-on |
 | Unload condition | 19 | Model-specific bitmask | Which protections cut output: temperature, voltage, current and load each have a bit |
@@ -70,7 +70,7 @@ Unchecked: the actual values of registers 19 and 20 on these servos, which Feete
 
 ### Speed
 
-Measured on the 60 cylinder-bowl demos: 99.9% of joint motion is under 92 °/s, and the fastest single frame was 227 °/s (the elbow). `max_relative_target` (10 units a tick at 30 Hz) allows up to 300 °/s. A speed cap in the servos' own memory (Goal speed, address 46) was considered and dropped: it would stay set until power-off, so it would also slow `teleop` and `record` after a `serve` session.
+Measured on the 60 cylinder-bowl demos: 99.9% of joint motion is under 92 °/s, and the fastest single frame was 227 °/s (the elbow). `max_relative_target` (10 degrees a tick at 30 Hz) allows up to 300 °/s. A speed cap in the servos' own memory (Goal speed, address 46) was considered and dropped: it would stay set until power-off, so it would also slow `teleop` and `record` after a `serve` session.
 
 ## Stopping the arm
 
@@ -126,7 +126,7 @@ A leader and follower whose calibrations disagree train a policy with an offset:
 - **Foot pedal (not built):**
   - The plan: on Linux, `serve` reads a 3-pedal PCsensor FootSwitch at `/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd`, the pedal and keys LeRobot's DAgger rollout uses. Left (`KEY_A`) acts like Space on the page, middle (`KEY_B`) takes over with the leader, right (`KEY_C`) rewinds.
   - It should grab the device (`EVIOCGRAB`) while it runs, so presses don't also type `a`, `b` or `c` into the focused window: in `serve`'s own terminal `b` also rewinds and `c` runs the checks. LeRobot's own pedal listener doesn't grab.
-  - A reader that did this was removed before PR #16 merged, so it isn't in `main`'s history. The PR's commit list on GitHub still has it: the parent of the commit titled "Delete the features that were cut" holds `src/so_101/control/pedal.py` and its tests, `tests/test_pedal.py`.
+  - A reader that did this was cut from PR #16 before review, so neither `main` nor the PR has it. Only the local branch `control-center-before-squash` keeps it: `git show 092dbd9^:src/so_101/control/pedal.py` and `git show 092dbd9^:tests/test_pedal.py`.
   - Check the grab once it's built: with `serve` running and another terminal window focused at a shell prompt, press each pedal. Nothing is typed there, and `serve` acts on each press. After `serve` exits, a press types its letter again.
 
 ## Sources

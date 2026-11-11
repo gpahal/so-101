@@ -193,8 +193,9 @@ def port_open(port: int) -> bool:
 
 
 class ControlShutdown(unittest.TestCase):
-    """`so101-control`'s whole run on the fake follower, with only what reaches beyond this process
-    stubbed: the page's server, the policy's loading and the key reader. The key reader's start quits
+    """`so101-control`'s whole run on the fake follower, with what reaches beyond this process
+    stubbed: config files, devices, signal handlers, the page's server, the policy's loading and the
+    key reader. The key reader's start quits
     at rest, and its stop raises, as the first cleanup to run."""
 
     def setUp(self) -> None:

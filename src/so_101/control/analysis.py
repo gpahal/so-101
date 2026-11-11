@@ -1,17 +1,18 @@
 """Read a recorded `so101 serve` run back into attempts, interruptions, suspect frames and training cuts.
 
-`so101 runs`, `so101 review --runs` and `so101 build --with` all read runs through `analyse`, which
-is two steps. `read_run` reads the run's files once into a `RunRecord`: its `events.jsonl`, and the
-`control.phase`, `control.policy_action` and `control.leader` columns of its dataset with its fps.
-`analyse_record` derives everything below from that record, the run's `labels.toml` and `blame_s`,
-and reads no file, so `review --runs` keeps the record across its decisions and the rules can be
-run on small inputs. Nothing here modifies the recorded dataset, `events.jsonl` or `run.json`. The one file of a run that changes is
+`so101 runs` and `so101 build --with` read runs through `analyse`, which is two steps, and
+`so101 review --runs` takes the two steps itself. `read_run` reads the run's files once into a
+`RunRecord`: its `events.jsonl`, and the `control.phase`, `control.policy_action` and
+`control.leader` columns of its dataset with its fps. `analyse_record` derives everything below from
+that record, the run's `labels.toml` and `blame_s`, and reads no file, so `review --runs` keeps the
+record across its decisions and the rules can be run on small inputs. Nothing here modifies the
+recorded dataset, `events.jsonl` or `run.json`. The one file of a run that changes is
 `labels.toml`, which `save_labels` writes for `so101 review --runs`. Each file's place in the run's
 folder comes from `data.Run`, which the functions here take.
 
 Each Parquet data file of the dataset is read on its own. One that can't be read, such as the file a
-hard kill during a save leaves without its footer, is skipped and named in `notes` and `skipped`, and
-only the episodes in it are lost: an attempt whose episode was in it counts as not saved. The fps
+hard kill during a save leaves without its footer, is skipped, listed in the record's `skipped` and
+named in the analysis's `notes`, and only the episodes in it are lost: an attempt whose episode was in it counts as not saved. The fps
 comes from `meta/info.json`, or from the recorder's copy of it when a kill during a save tore it
 (`data.Run.info`).
 
@@ -39,8 +40,9 @@ the `rewind` event's.
   through pauses and waiting frames but not through anything else. The frames any other rewind
   undid, such as one from Teleop or after a lost link, are suspect too.
 - **Corrections:** the Teleop segments after the policy had driven in the attempt (sent its first
-  action), a human stepping in on the policy. Only their frames are interventions (`intervention_mask`). Teleop before the
-  policy first drove, as in a human attempt, corrects no policy: it is a human driving, like a demo.
+  action), a human stepping in on the policy. Only their frames are interventions
+  (`intervention_mask`). Teleop before the policy first drove, as in a human attempt, corrects no
+  policy: it is a human driving, like a demo.
 - **Failure-fix pairs:** a rewind that undid policy frames, followed by Teleop from the pose it went
   back to (only pauses and the handover in between).
 - **Outcomes:** from the `outcome` events, overridden by `labels.toml`. Ignored attempts count in no
@@ -182,7 +184,7 @@ class Cut:
 @dataclass(frozen=True)
 class Attempt:
     number: int
-    episode: int | None  # None when it wasn't saved, as when the process quit away from rest
+    episode: int | None  # None when it wasn't saved: no frames, a failed save, a kill, or its episode missing from the dataset
     ended_by: str | None
     recorded_outcome: str | None  # from the run's `outcome` events
     outcome: str | None  # after labels.toml; None is unlabelled
@@ -255,7 +257,7 @@ class RunAnalysis:
     folder: Run  # where the run's files are; its name is YYYYmmdd-HHMMSS
     fps: float
     attempts: tuple[Attempt, ...]
-    notes: tuple[str, ...]  # what couldn't be read, one line each
+    notes: tuple[str, ...]  # what couldn't be read or used, one line each
 
     @property
     def counted(self) -> tuple[Attempt, ...]:

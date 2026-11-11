@@ -323,7 +323,7 @@ function hint(command, st) {
     case "pause": return "Stop and hold, motors on";
     case "rewind": return st.state === "rewinding" ? `Go back another ${st.rewind_s} s` : `${st.rewind_available_s ?? 0} s of motion to undo`;
     case "teleop": return st.state === "resting" ? "Start a human demo with the leader" : "Leader moves to match first";
-    case "reset": return st.state === "fault" ? "Back to rest, no attempt open" : "Asks how it went, then back to rest";
+    case "reset": return st.attempt_open ? "Asks how it went, then back to rest" : "Back to rest, no attempt open";
   }
   return "";
 }
@@ -686,7 +686,7 @@ function describe(e) {
     case "handover": return "The leader lined up with the follower: Teleop";
     case "fault": return `Fault: ${e.error}`;
     case "control_taken": return e.previous ? `A page (${e.who}) took control from ${e.previous}` : `A page (${e.who}) has control`;
-    case "link_lost": return `Lost the controlling page (${e.who}): no poll for ${Math.round(e.seconds)} s${e.on_link_loss === "pause" ? "" : ", the policy kept running"}`;
+    case "link_lost": return `Lost the controlling page (${e.who}): no poll for ${Math.round(e.seconds)} s${e.on_link_loss !== "pause" && e.driving ? ", the policy kept running" : ""}`;
     case "page_hidden": return `The controlling page (${e.who}) was hidden: screen locked or another app in front${e.on_link_loss === "pause" ? ", so a running policy pauses" : ""}`;
     case "link_restored": return `The controlling page (${e.who}) is back`;
     case "check": return `Checks: ${e.summary}`;
@@ -749,10 +749,10 @@ $("results-close").onclick = () => { $("results-sheet").hidden = true; };
 $("results-sheet").onclick = (event) => { if (event.target === $("results-sheet")) $("results-sheet").hidden = true; };
 $("take-control").onclick = () => send({ command: "take_control" });
 for (const button of document.querySelectorAll("[data-outcome]")) {
-  button.onclick = () => send({ command: "outcome", outcome: button.dataset.outcome });
+  button.onclick = () => send({ command: "outcome", outcome: button.dataset.outcome, for_attempt: status ? status.prompt : null });
 }
 
-// Keys on a laptop, the same as at the robot's terminal. Each acts through its button, so a key does
+// Keys on a laptop, mostly as at the robot's terminal; Esc here only closes a sheet. Each acts through its button, so a key does
 // only what the button would, and says why when the button is disabled. Space sends "toggle": the
 // control loop decides between pause and resume against the state it has, not this page's copy. A held
 // Space sends nothing more: its repeats are ignored, and so is any keydown until the key has come up,

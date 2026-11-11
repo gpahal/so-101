@@ -8,14 +8,15 @@
 #   uv run so101 review    trim idle time and delete bad demos
 #   uv run so101 train     build the training dataset and train ACT or (--policy pi05) pi0.5, on Hugging Face Jobs by default
 #   uv run so101 run       run the trained policy
+#   uv run so101 serve     supervise the trained policy and record corrections (see the README)
 # Each command works on `default` below; add a task name to use another, e.g. `so101 record <task>`.
 #
 # Fields:
-#   prompt          The task text saved with each demo and given to the policy. ACT ignores it.
+#   prompt          The task text saved with each demo and given to the policy (required). ACT ignores it.
 #   fps             Control rate to record and run at (default 30).
-#   episodes        Demos to keep. ~50 for one pick-and-place, spread over 5+ start positions.
-#   episode_time_s  Seconds per demo; press Right arrow or n to finish one early.
-#   reset_time_s    Seconds between demos to put the props back.
+#   episodes        Demos to keep (default 50). ~50 for one pick-and-place, spread over 5+ start positions.
+#   episode_time_s  Seconds per demo (default 20); press Right arrow or n to finish one early.
+#   reset_time_s    Seconds between demos to put the props back (default 10).
 #   cameras         Your cameras to record, named as in so101.toml (default: ["front", "wrist"]).
 #   props, setup    What to put on the table and where the cameras go.
 # Copy a task's section and change the name, prompt and props to add another task.
@@ -31,11 +32,11 @@ reset_time_s = 15
 props = [
   "Cylindrical block, standing upright",
   "Bowl",
-  "Plain mat under the workspace",
+  "Matte black mat under the workspace",
 ]
 setup = [
   "Front camera above the mat, fixed: don't move it between recording and running",
   "Bowl stays in one spot; move the cylinder to a new spot every 10 demos (5 spots for 50)",
   "Start every demo from the same folded rest pose, and do the task the same way each time",
-  "The policy learns the props' colours: if you change one, record new demos with it",
+  "The policy learns the props' colours and the surface: if you change one, record new demos with it",
 ]

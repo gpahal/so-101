@@ -92,5 +92,5 @@ Once a PyAV release bundles SVT-AV1 4.3.0 or later and LeRobot allows it:
 
 1. upgrade;
 2. confirm `uv run so101 check` says "has its teardown crash fixed";
-3. delete `svtshim.py`, `svtsem.c`, `tests/test_svtshim.py` and the `ensure()`, `require()` and `check_video` calls;
+3. delete `svtshim.py`, `svtsem.c`, `tests/test_svtshim.py`, `cli.VIDEO_COMMANDS`, every `svtshim` import and `env=svtshim.other_env()` argument, and the `ensure()` (`tests/fakes.py` has one too), `require()` and `check_video` calls;
 4. update the README section and this note's `Status:`.

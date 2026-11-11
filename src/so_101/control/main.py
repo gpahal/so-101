@@ -28,14 +28,14 @@ import threading
 from pathlib import Path
 
 # No `from __future__ import annotations` here: LeRobot's parser reads the config's type from the
-# annotation of `control`, and a string annotation breaks it.
+# annotation of `cfg` on `main`'s `run`, and a string annotation breaks it.
 
 # JSON: dir (the run's folder, <data_dir>/<task>/runs/<name>, not made yet) and manifest (run.json's
 # contents: `control.fps`, `operator`, and `policy` with its type, revision, inference ("local" or
 # "remote") and job; a remote run adds the checkpoint its server admitted it to, `artifact_identity`).
 # The remote server itself is reached through `--inference.*` arguments; the manifest says what it serves.
 RUN_ENV = "SO101_RUN"
-# Ctrl+C, `kill` and a closed terminal (SIGHUP, sent to the whole process group) all quit as Esc does:
+# Ctrl+C, `kill` and a closed terminal all quit as Esc does:
 # the arm goes to rest before the motors turn off. Without a handler, SIGTERM and SIGHUP would end the
 # process at once, and the motors would turn off wherever the arm is. They submit Quit with source
 # `signal`, and no signal can confirm exiting where the arm can't get to rest: only y at the terminal
@@ -84,7 +84,7 @@ def interrupt_on_signals() -> None:
 def check_settings(s) -> None:
     """Exit unless the rest pose and the `[control]` settings pass the checks `so101 serve`'s preflight
     runs (`check.check_control`). `serve` runs them before it starts this process, but this process
-    reads so101.toml again, which may have changed since (loading the policy can take minutes). The
+    reads so101.toml again, which may have changed since (downloading the policy can take minutes). The
     checks read so101.toml and the follower's calibration file only."""
     from so_101.check import check_control
     from so_101.report import Report
@@ -235,7 +235,8 @@ def control(cfg) -> None:
     if start_pose:
         print(f"Each attempt starts at the demos' start pose: {data.describe_pose(start_pose)}", flush=True)
     else:
-        print(f"{task.name} has no local demos, so each attempt starts from wherever the arm is.", flush=True)
+        print(f"{task.name} has no build to take the demos' start pose from, so each attempt starts from wherever the "
+              f"arm is. Make one with: uv run so101 build {task.name}", flush=True)
     # The page's port is taken before the policy loads, so a port in use fails in seconds.
     # With `tailscale serve` set up for the port, the page is HTTPS on this Mac's MagicDNS name, and
     # the server listens on 127.0.0.1 behind it. A Tailscale route that would make it unsafe stops
@@ -246,9 +247,9 @@ def control(cfg) -> None:
     except ValueError as error:
         sys.exit(str(error))
     # Each cleanup is registered as its resource is made, so every one runs, even when one before it
-    # fails, in the reverse order of setup: the key reader stops, the run closes, writing
-    # run_end after a quit, the policy stops, the follower disconnects, its motors turning off, and the
-    # page's server, bound first, stops last.
+    # fails, in the reverse order of setup: the key reader stops, the run closes, writing run_end
+    # after a quit, the device watch stops, the policy stops, the follower disconnects, its motors
+    # turning off, and the page's server, bound first, stops last.
     with contextlib.ExitStack() as cleanup:
         try:
             # Tailscale's routes are checked again every few seconds while serve runs, off the control loop.

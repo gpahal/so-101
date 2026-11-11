@@ -270,8 +270,8 @@ class UnsafeRouteTest(unittest.TestCase):
             self.assertEqual((code, body["server_warning"]), (200, None))
 
     def watch(self, https: str | None = None, reads: bool = True) -> tuple[Server, list[str | None], list[int]]:
-        """A started server whose route watch asks every 10 ms, as `serve` does, with the Tailscale CLI
-        faked, printing nothing at first unless it `reads`. Returns the server; a list whose one item
+        """A started server whose route watch asks `route_warning` as `serve`'s does, but every 10 ms
+        instead of 5 s, with the Tailscale CLI faked, printing nothing at first unless it `reads`. Returns the server; a list whose one item
         is what the CLI prints for `serve status --json`, None for a CLI that printed nothing (it timed
         out, say); and the checks so far."""
         answer: list[str | None] = [serve_status({}) if reads else None]

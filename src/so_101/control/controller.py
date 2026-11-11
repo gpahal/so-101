@@ -43,7 +43,7 @@ from so_101.report import Report
 from so_101.settings import Control
 from so_101.control import rewind, status, wording
 from so_101.control.attempt import COUNTS, LIMITED, Attempt
-from so_101.control.commands import LABELS, Result, Toggle, intake
+from so_101.control.commands import LABELS, Result, Toggle, intake, stale_prompt
 from so_101.control.follower import Failure, Follower
 from so_101.control.leader import Handover, Leader, LeaderLost
 from so_101.control.link import Link
@@ -113,7 +113,7 @@ class Controller:
         """`robot` is LeRobot's robot wrapper (ThreadSafeRobot) with hold configured. `policy` is an
         EngineDriver. Poses are in the arm's units, keyed like its actions. `rest_pose` is the
         `[control]` rest pose, already converted from raw steps with `pose_from_steps`. Without
-        `start_pose` (no local demos), attempts start from wherever the arm is. `notify(message,
+        `start_pose` (no build), attempts start from wherever the arm is. `notify(message,
         state)` hears every message, with the new state when it announces one. `recorder` records the
         run. `control` is so101.toml's `[control]` section, as `settings.load()` gives it; so101.toml
         says what each setting does.
@@ -373,7 +373,7 @@ class Controller:
             policy_action, leader_pose, event = self._drive(observation, seconds)
         except LeaderLost as lost:
             self.leader.drop(str(lost))
-            if state is State.TELEOP:  # a handover already held the follower this tick
+            if state is State.TELEOP:  # in Handover, `_drive` already held the follower this tick
                 self.policy.hold(arm)  # the follower holds rather than chase a stale pose
             policy_action, leader_pose, event = Driven(event=Event.LEADER_LOST)
         if state is State.AUTONOMOUS and (failure := self.policy.failure):
@@ -385,8 +385,6 @@ class Controller:
             # cloud GPU's chunk, say) drove nothing, though the phase is Autonomous.
             attempt.policy_drove |= policy_action is not None
             frame = self.recorder.frames
-            # An intervention is a human stepping in on the policy: Teleop once the policy has driven
-            # in this attempt. A human attempt, or Teleop before the policy first drove, is none.
             self.recorder.add_frame(observation, arm.goal, Phase[state.name], policy_action=policy_action,
                                     intervention=state is State.TELEOP and attempt.policy_drove, leader=leader_pose)
             if state in DRIVEN:
@@ -429,7 +427,7 @@ class Controller:
         return Driven()
 
     def _fault(self, error: BaseException) -> None:
-        """Hold the arm, save any open attempt where it is as `fault`, and allow only Reset.
+        """Hold the arm, save any open attempt where it is as `fault`, and allow only Reset and Run checks.
 
         The hold goes first, before any file is written (`Follower.fault`: a follower that may have
         lost power gets no goal). Already in Fault, it doesn't hold again: `hold_in_fault` holds once
@@ -578,6 +576,8 @@ class Controller:
             return Result("outcome", False, f"Unknown outcome {outcome!r}: use {', '.join(OUTCOMES)}.")
         if self._prompt is None:
             return Result("outcome", False, "No attempt is waiting for an outcome.")
+        if "for_attempt" in options and (reason := stale_prompt(options["for_attempt"], self._prompt)):
+            return Result("outcome", False, reason)
         self._label(outcome)
         self._prompt = None
         return Result("outcome", True)

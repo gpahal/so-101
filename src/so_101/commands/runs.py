@@ -17,7 +17,8 @@ def _minutes(seconds: float) -> str:
 
 def runs_summary(metrics, pairs: int) -> str:
     """One line of run metrics, for example: 5 attempts: 3 succeeded, 1 failed, 1 unlabelled (75% of
-    labelled, 95% interval 30-95%), 1 ignored. The policy drove 82% of 4.1 min. 0.8 interruptions per attempt. 2 failure-fix pairs."""
+    labelled, 95% interval 30-95%), 1 ignored. The policy drove 82% of 4.1 min of driving. 0.8
+    interruptions per attempt. 2 failure-fix pairs."""
     m = metrics
     rate = ""
     if m.success_interval is not None:

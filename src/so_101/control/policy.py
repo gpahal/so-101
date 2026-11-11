@@ -1,8 +1,8 @@
 """Run a LeRobot inference engine one control tick at a time, as LeRobot's rollout strategies do.
 
 The controller calls `step` only while the policy drives. Every action goes through LeRobot's
-dispatch gate (`next_interpolated_action`, `commit_action`), the robot action processor and the
-robot wrapper, so `max_relative_target` still caps it.
+dispatch gate (`next_interpolated_action`, `commit_action`), the robot action processor and
+`follower.Arm`, so `max_relative_target` still caps it.
 
 The engine is local (sync) or remote (the cloud GPU's policy server). Both clear their queued actions
 on `pause` and `reset`; the remote one also tells the server to drop its own, and holds the arm until
@@ -16,8 +16,9 @@ follower's, not the policy's, and isn't kept.
 
 LeRobot's remote engine never reconnects after a fault. With `reconnect`, a function that connects a
 new remote engine, the driver builds one in a background thread once the policy has failed, retrying
-every RECONNECT_EVERY_S, and swaps it in on the control loop's thread in `maintain`. Nothing moves:
-the controller is in Fault, and Resume stays refused until the new engine is in. LeRobot's policy
+every RECONNECT_EVERY_S, and swaps it in on the control loop's thread in `maintain`. Nothing moves
+meanwhile: a failure while the policy drives faults the arm, and Resume stays refused until the new
+engine is in. LeRobot's policy
 server admits one session at a time, and an engine that failed releases its own. One that didn't,
 because the exception came from a step on the policy's side, still holds it, so that thread stops
 the old engine before it connects: otherwise every new session would be refused as busy.

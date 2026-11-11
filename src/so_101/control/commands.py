@@ -90,6 +90,20 @@ def stale_sheet(attempt, current: int) -> str | None:
     return None
 
 
+def stale_prompt(attempt, prompt: int) -> str | None:
+    """Why an answer to the time-limit prompt, sent for `attempt`, is refused while attempt `prompt`
+    is the one waiting, or None. `attempt` is None when the sender saw no prompt. A card left on a page,
+    or a key pressed as a later attempt reached its limit, would otherwise label the later attempt."""
+    if attempt is None:
+        return f"Attempt {prompt} reached its time limit after that answer was sent: nothing was labelled. Answer again."
+    if type(attempt) is not int:
+        return f"An outcome's for_attempt must be an attempt number, not {attempt!r}. Reload the page."
+    if attempt != prompt:
+        return (f"That answer was for attempt {attempt}, and attempt {prompt} is the one waiting: nothing was "
+                "labelled. Answer again.")
+    return None
+
+
 # --- The table of commands ------------------------------------------------------------------------
 
 
@@ -107,7 +121,7 @@ def _transition(controller, name: str, options: dict, source: str) -> Result:
 # Every command, with the options it takes. `outcome` and `label` come first, so OPTIONS lists them in
 # that order.
 COMMANDS: dict[str, tuple[str, ...]] = {
-    "outcome": ("outcome",),
+    "outcome": ("outcome", "for_attempt"),
     "label": ("label",),
     **{command.value: ("outcome", "for_attempt") if command is Command.RESET else () for command in Command},
     **{tool.value: () for tool in Tool},
@@ -116,7 +130,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     PAGE_HIDDEN: (),
 }
 # Every option some command takes. The web server refuses a request carrying any other key before it
-# reaches the loop. for_attempt: the attempt the Reset sheet was opened for.
+# reaches the loop. for_attempt: the attempt the Reset sheet was opened for, or the time-limit prompt asked about.
 OPTIONS = tuple(dict.fromkeys(option for options in COMMANDS.values() for option in options))
 # The names of the state machine's commands, and of the read-only tools.
 TRANSITIONS = frozenset(command.value for command in Command)
@@ -128,7 +142,7 @@ TOOLS = frozenset(tool.value for tool in Tool)
 
 def intake(controller, name: str, source: str, client: str | None, who: str | None, options: dict) -> Result:
     """Take in one command on the loop's thread: check its options, then page control, then carry
-    it out, and log it as a `command` event (page_hidden is logged as its own event instead).
+    it out, and log it as a `command` event (page_hidden is logged only as the link's `page_hidden` event, when it loses the link).
 
     Options are checked before anything else, and only known ones are logged: an option named like a
     field of the event (accepted, type, id) must neither crash the loop nor rewrite the log. A Quit

@@ -48,6 +48,7 @@ class Task:
         """Hub dataset your built demos are uploaded to."""
         return f"{hf_user()}/so101_{self.name}"
 
+    # Only ACT runs locally: pi0.5 needs --remote (`commands.policy.policy_task`).
     def local_policy_dir(self, revision: str | None) -> Path:
         """Where a checkpoint is downloaded. Each revision gets its own folder, so they can't mix."""
         folder = config_path().parent / "outputs" / "policies" / self.policy_for("act")

@@ -1,8 +1,7 @@
 """The control loop's own rate, and the optional work it sheds when it falls behind.
 
 `Pace` counts the loop's ticks over each RATE_WINDOW_S. When the rate crosses SLOW_FRACTION of the
-task's fps, in either direction, it logs a `loop_rate` event; nothing else changes, and the policy
-runs on. Previews are the only optional work: while the loop is slow they drop to half rate, then
+task's fps, in either direction, it logs a `loop_rate` event, and the policy runs on. Previews are the only optional work: while the loop is slow they drop to half rate, then
 stop, and they step back up after PREVIEW_RECOVER_S of keeping up. With nothing left to shed, the
 status warns with the measured rate.
 """

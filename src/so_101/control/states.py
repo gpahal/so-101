@@ -3,8 +3,8 @@
 It is pure: it decides the next state and the actions the controller must carry out, and refuses a
 command that isn't allowed with a reason the operator can act on. It touches nothing.
 
-States in italics in the spec (Starting, Handover, Rewinding, Returning) are moves the controller
-runs itself, one command per tick, so Pause can cut them short.
+Starting, Handover, Rewinding and Returning are moves the controller runs itself, one goal per tick,
+so Pause can cut them short.
 
 Fault is where a hardware, camera, motor-alarm or policy failure leaves the arm: it holds where it
 is, the attempt is saved there, and only Reset and Run checks are allowed.
@@ -61,7 +61,8 @@ STEP_INS = frozenset({Command.PAUSE, Command.REWIND, Command.TELEOP})
 
 
 class Event(StrEnum):
-    """What happens to a move the controller is running, or to the attempt's clock."""
+    """What happens without an operator's command: a move ends, a time limit runs out, the leader or
+    the controlling page is lost, or a fault."""
 
     ARRIVED = "arrived"
     STOPPED_SHORT = "stopped_short"
@@ -88,7 +89,7 @@ class Action(StrEnum):
     QUIT_AT_REST = "quit_at_rest"  # exit once the arm arrives at rest
     # The arm can't get to rest: hold it, and ask for EXIT_HERE, pending for CONFIRM_S from now.
     CONFIRM_QUIT = "confirm_quit"
-    CLOSE_ATTEMPT = "close_attempt"  # the arm arrived at rest: the attempt is over
+    CLOSE_ATTEMPT = "close_attempt"  # the arm arrived at rest, or a quit's drive stopped short: save the attempt
     EXIT = "exit"
 
 
@@ -103,7 +104,7 @@ class Facts:
     """What the state alone doesn't say."""
 
     underway: bool  # the attempt got past Starting (the policy or a human drove), so Resume continues it
-    quitting: bool  # Esc or Ctrl+C was pressed, so the process exits at rest
+    quitting: bool  # a Quit is under way (Esc or a signal), so the process exits at rest
     # A Quit asked to confirm exiting where the arm is, under CONFIRM_S ago, and the state hasn't changed since.
     confirm_pending: bool
     source: str | None  # where the command came from: terminal, page or signal
@@ -119,7 +120,7 @@ class Facts:
     teleop_next: bool  # Teleop started this move to the start pose, so the leader takes over there
     # Why Rewind has nothing to play back, or None when the attempt's history has motion left to undo.
     rewind: str | None
-    policy: str | None  # why the policy can't run again (it failed for good), or None when it can
+    policy: str | None  # why the policy can't run now (it failed; a remote one may reconnect), or None
     recording: str | None  # why a new attempt can't be recorded (little free disk, a failed dataset)
     outcome: bool  # the command came with an outcome to record (Reset's)
     fault_saved: bool  # the last fault saved an attempt, which an outcome given with Reset in Fault labels

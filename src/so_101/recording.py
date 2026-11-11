@@ -1,4 +1,5 @@
-"""Shared by `so101 record` and its dry run: the lerobot-record command line and session records."""
+"""Shared by `so101 record`, its dry run and `serve`: the lerobot-record command line, and the session and run
+records."""
 
 import json
 import platform

@@ -7,8 +7,8 @@ re-encoding loses a little image quality, so the build encodes at a higher quali
 than recording does.
 
 `--with` adds frames of `so101 serve` runs, from `control.analysis.training_cuts`: each cut is its
-own episode, after the demos. The cuts already leave out paused and scripted frames, suspect
-frames and ignored attempts. A cut whose episode the run's episode index doesn't list, as when a kill
+own episode, after the demos. The cuts already leave out scripted, suspect and waiting frames and
+ignored attempts (`analysis.training_cuts` has the full list). A cut whose episode the run's episode index doesn't list, as when a kill
 came after its data file was finished and before its index row was written, is left out with a note.
 Only the demos' columns are written, unless `keep_labels` is set.
 With either, build.json records `analysis.RULES_VERSION`, so a build made under older cut or label
@@ -206,7 +206,6 @@ def plan_runs(s: Settings, task: Task, sources: tuple[str, ...], reference) -> t
         indexed = {int(e) for e in meta.episodes["episode_index"]}
         for cut in cuts:
             if cut.episode not in indexed:
-                # A kill after the episode's data file was finished and before its index row was written.
                 notes.append(f"run {run.name} attempt {cut.attempt}: episode {cut.episode} isn't in the dataset's "
                              "episode index, left out")
                 continue

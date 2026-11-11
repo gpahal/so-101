@@ -20,9 +20,10 @@ up with the `control.phase` column. No other field can replace these.
     attempt_start  attempt
     command        command, accepted, reason (None when accepted), its options (outcome, label, for_attempt),
                    source (terminal, page or signal), who (a page's caller, for page commands
-                   only: its Tailscale login behind HTTPS, "this Mac", or its IP address), via ("toggle" when the page's Space became this
-                   pause or resume) and operator (the name given with `so101 serve --operator`, or None)
-    state          state, previous, cause (the command or move event), ended_by (when returning), note
+                   only: its Tailscale login behind HTTPS, "this Mac", or its IP address), via
+                   ("toggle" when the page's Space became this pause or resume) and operator
+    state          state, previous, cause (the command or event that caused it), ended_by (when
+                   returning), note
     fault          error (what failed, and the fix), device (follower or a camera's name, when one is to
                    blame) and traceback (when there is one). The arm holds where it is, and an open
                    attempt is saved there, ended_by fault
@@ -39,13 +40,15 @@ up with the `control.phase` column. No other field can replace these.
                    and when the video encoder fell behind and dropped frames of a saved attempt,
                    dropped_frames (per camera, such as {"front": 3}): its video and its other columns
                    don't line up, so builds leave it out
-    outcome        outcome (succeeded, failed or ignored), episode and operator. An outcome given at
-                   rest, after a time limit, carries the attempt it labels but no frame.
+    outcome        outcome (succeeded, failed or ignored), episode and operator. An outcome given after
+                   its attempt closed (at rest after a time limit, or with the Reset after a fault)
+                   carries the attempt it labels but no frame.
     label          reason (why the operator stepped in, such as missed_grasp) and operator
     control_taken  who (the caller of the page that took control), previous (who had it, or None),
                    implicit (true when a page's first command took it, not Take control) and operator
-    link_lost      who, seconds (since the controlling page's last poll) and on_link_loss
-    page_hidden    who and on_link_loss: the controlling page went out of sight, which loses
+    link_lost      who, seconds (since the controlling page's last poll), on_link_loss and driving (whether
+                   the policy drove, or the arm moved to the start pose to start it)
+    page_hidden    who, on_link_loss and driving: the controlling page went out of sight, which loses
                    the link at once
     link_restored  who and seconds (how long the link was lost)
     check, pose    Run checks and Check pose: summary, fails, warns, problems (each result that
@@ -240,9 +243,9 @@ class Recorder:
         """One frame of the open attempt. `action` is the goal sent this tick, after the step cap.
         `intervention` is set in Teleop once the policy has driven in the attempt (an action of its
         reached the arm): a human stepping in on the policy. `policy_action` is the policy's raw action
-        on a tick one reached the arm, and NaN on an Autonomous tick it sent none, as while waiting for
-        a cloud GPU. `leader` is the leader's pose, read every tick it's connected. A missing policy
-        action or leader pose is recorded as NaN."""
+        on a tick one reached the arm, and `leader` the leader's pose, read every tick it's connected.
+        Either is NaN when missing: an Autonomous tick the policy sent none, as while waiting for a
+        cloud GPU, or a tick the leader wasn't read."""
         from lerobot.utils.feature_utils import build_dataset_frame
 
         if self.attempt is None:
@@ -278,7 +281,8 @@ class Recorder:
         loses the attempt and sets `failure`: the dataset may be left half-written, so no new attempt
         is recorded into it. It returns None and doesn't raise: the arm is at rest or holds either
         way. Reopening the dataset for the next attempt can fail too (`_reopen`), which keeps this
-        attempt saved."""
+        attempt saved. An attempt with no frames (a fault on the tick it opened) is discarded, and
+        None returned."""
         if self.attempt is None:
             return None
         if self.frames == 0:
@@ -321,7 +325,8 @@ class Recorder:
     def _dropped_frames(self) -> dict[str, int]:
         """The video frames LeRobot's streaming encoder dropped in the open attempt, per camera, as when
         it fell behind and its queue was full. LeRobot keeps the counts in the encoder's private
-        `_dropped_frames` and only logs them; test_controller fails if they move."""
+        `_dropped_frames` and only logs them. test_controller's
+        `test_frames_the_video_encoder_dropped_are_on_the_saved_attempts_attempt_end` fails if they move."""
         encoder = getattr(getattr(self.dataset, "writer", None), "_streaming_encoder", None)
         counts = getattr(encoder, "_dropped_frames", None) or {}
         return {key.removeprefix("observation.images."): int(n) for key, n in counts.items() if n}
@@ -355,11 +360,10 @@ class Recorder:
 
     def close(self, run_end: dict | None = None) -> None:
         """Finish the dataset's files. Call once, at exit. After a failed save it tries again, which
-        may fail the same way. With `run_end` (the run ended cleanly),
-        the event log ends with a `run_end` event: its fields, plus when the run finished and how
-        many episodes it saved, written once the dataset is finished. A second call does nothing.
-        Closing the event log never raises: on a disk still full, the lines it couldn't write are lost,
-        with a warning."""
+        may fail the same way. With `run_end` (the run ended cleanly), the event log ends with a
+        `run_end` event: its fields, plus when the run finished and how many episodes it saved,
+        written once the dataset is finished. A second call does nothing. Closing the event log never
+        raises: on a disk still full, the lines it couldn't write are lost, with a warning."""
         if self._events.closed:
             return
         try:

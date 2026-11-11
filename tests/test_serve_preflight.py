@@ -2,7 +2,7 @@
 
 `settings.load()` reads every file below without complaint: only `check.check_control`, which
 `serve`'s preflight runs, finds the problems. `serve` is called as the CLI calls it, with the checks
-that would open a serial port stubbed out.
+that would open a serial port or ask the Hugging Face Hub stubbed out.
 """
 
 import argparse
@@ -76,8 +76,8 @@ class ServePreflightTest(ConfigTest):
         return [f"{r.group}: {r.detail}" for r in report.results if r.status == "FAIL"]
 
     def serve(self, s: settings.Settings) -> None:
-        """Run `serve` up to where it would download the policy, with every check that opens a device
-        stubbed out. Raises SystemExit when the preflight fails."""
+        """Run `serve` up to where it would download the policy, with the checks that open a device or
+        ask the Hub stubbed out. Raises SystemExit when the preflight fails."""
 
         def download_policy(revision=None):
             raise AssertionError("serve passed its preflight")
