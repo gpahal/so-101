@@ -80,6 +80,23 @@ class Arm:
             f"--{p}.calibration_dir={self.calibration_dir}",
         ]
 
+    def lerobot_device(self, port: str, use_degrees: bool = True, max_relative_target: float | None = None):
+        """A new, unconnected LeRobot SO101Follower or SO101Leader for this arm on `port`. `use_degrees`
+        picks LeRobot's units (its default, degrees, or -100 to 100 of each joint's range without it), and
+        `max_relative_target` caps the follower's step per goal (None, the default, for no cap)."""
+        if self.name == "follower":
+            from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+
+            return SO101Follower(SO101FollowerConfig(
+                port=port, id=self.id, calibration_dir=self.calibration_dir, use_degrees=use_degrees,
+                max_relative_target=max_relative_target,
+            ))
+        from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+
+        return SO101Leader(SO101LeaderConfig(
+            port=port, id=self.id, calibration_dir=self.calibration_dir, use_degrees=use_degrees,
+        ))
+
 
 class ConfigError(RuntimeError):
     pass
@@ -246,6 +263,11 @@ class Settings:
     def arm(self, name: ArmName) -> Arm:
         return self.follower if name == "follower" else self.leader
 
+    def follower_args(self) -> list[str]:
+        """The follower's LeRobot arguments, with `[teleop]`'s per-step cap when it's set."""
+        cap = self.teleop.max_relative_target
+        return [*self.follower.lerobot_args(), *([f"--robot.max_relative_target={cap}"] if cap else [])]
+
     def camera(self, name: str) -> Camera:
         if name not in self.cameras:
             raise ConfigError(f"No camera named {name!r} in {self.path}. Cameras: {', '.join(self.cameras) or 'none'}.")
@@ -336,7 +358,7 @@ def _parse(path: Path) -> Settings:
     )
 
 
-def _replace_file(path: Path, text: str) -> None:
+def replace_file(path: Path, text: str) -> None:
     """Write `text` to `path` through a temporary file, so a kill leaves the old file or the new one."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text)
@@ -353,7 +375,7 @@ def save_port(name: ArmName, port: str, serial_number: str) -> bool:
     new_text = "".join(lines)
     if new_text == old_text:
         return False
-    _replace_file(path, new_text)
+    replace_file(path, new_text)
     return True
 
 
@@ -424,5 +446,5 @@ def save_rest_pose(pose: dict[str, int], path: Path | None = None, *, calibratio
     got = {key: saved.get(key) for key in wanted}
     if got != wanted:
         raise ConfigError(f"Saving rest_pose to {path} didn't round-trip (read back {got!r}), so it was left unchanged.")
-    _replace_file(path, new_text)
+    replace_file(path, new_text)
     return path

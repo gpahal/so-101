@@ -39,9 +39,9 @@ class Result:
 TOGGLE = "toggle"
 TOGGLE_RESUME_AFTER_S = 1.0
 TAKE_CONTROL = "take_control"
-# The control page reports when it goes out of sight (screen locked, another app in front) and back.
-PAGE_HIDDEN, PAGE_VISIBLE = "page_hidden", "page_visible"
-SIGHT = (PAGE_HIDDEN, PAGE_VISIBLE)
+# The control page reports when it goes out of sight (screen locked, another app in front). Its first
+# poll in sight brings the link back (`link`).
+PAGE_HIDDEN = "page_hidden"
 # Why the operator stepped in, as the page's pause reason chips offer them. `label` records one.
 LABELS = ("missed_grasp", "about_to_collide", "wrong_object", "dropped_it", "stuck", "other")
 
@@ -114,7 +114,6 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     TAKE_CONTROL: (),
     TOGGLE: (),
     PAGE_HIDDEN: (),
-    PAGE_VISIBLE: (),
 }
 # Every option some command takes. The web server refuses a request carrying any other key before it
 # reaches the loop. for_attempt: the attempt the Reset sheet was opened for.
@@ -129,7 +128,7 @@ TOOLS = frozenset(tool.value for tool in Tool)
 
 def intake(controller, name: str, source: str, client: str | None, who: str | None, options: dict) -> Result:
     """Take in one command on the loop's thread: check its options, then page control, then carry
-    it out, and log it as a `command` event (a sight report is logged as what it did instead).
+    it out, and log it as a `command` event (page_hidden is logged as its own event instead).
 
     Options are checked before anything else, and only known ones are logged: an option named like a
     field of the event (accepted, type, id) must neither crash the loop nor rewrite the log. A Quit
@@ -141,8 +140,8 @@ def intake(controller, name: str, source: str, client: str | None, who: str | No
     elif unknown := set(options) - set(COMMANDS.get(name, ())):
         result = Result(name, False, f"{name.capitalize()} takes no {', '.join(sorted(map(str, unknown)))}.")
         options = {}
-    elif name in SIGHT:
-        return _sight(controller, name, source, client)
+    elif name == PAGE_HIDDEN:
+        return _hidden(controller, name, source, client)
     elif name == Command.QUIT and source == "page":
         result = Result(name, False, "Quit only from the robot's terminal (Esc or Ctrl+C): whoever ends the "
                                      "process should see the arm. Reset ends the attempt from here.")
@@ -170,17 +169,14 @@ def intake(controller, name: str, source: str, client: str | None, who: str | No
     return result
 
 
-def _sight(controller, name: str, source: str, client: str | None) -> Result:
-    """The controlling page went out of sight or came back. Logged as page_hidden and link_restored,
-    not as commands; from any other page, ignored."""
+def _hidden(controller, name: str, source: str, client: str | None) -> Result:
+    """The controlling page went out of sight. Logged as page_hidden, not as a command; from any
+    other page, ignored."""
     link = controller.link
     if source != "page" or client is None or client != link.client:
         return Result(name, False, "Only the page in control reports whether it's in sight.")
-    if name == PAGE_HIDDEN:
-        if link.hide(controller._driving):
-            controller._apply(Event.LINK_LOST)
-    else:
-        link.hear()
+    if link.hide(step(controller._state, Event.LINK_LOST, controller._facts()).accepted):
+        controller._apply(Event.LINK_LOST)
     return Result(name, True)
 
 

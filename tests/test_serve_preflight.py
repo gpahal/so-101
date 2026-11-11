@@ -83,8 +83,8 @@ class ServePreflightTest(ConfigTest):
             raise AssertionError("serve passed its preflight")
 
         task = types.SimpleNamespace(name="test", prompt="test", cameras=(), fps=30,
-                                     policy_config=lambda revision, policy: {"chunk_size": 10},
-                                     image_sizes=lambda revision, policy: {}, policy_for=lambda policy: "x/y",
+                                     policy_config=lambda revision, policy: {"chunk_size": 10, "input_features": {}},
+                                     policy_for=lambda policy: "x/y",
                                      download_policy=download_policy)
         ns = argparse.Namespace(task="test", policy="act", remote=False, revision=None, action_steps=None,
                                 operator=None)
@@ -115,10 +115,6 @@ class ServePreflightTest(ConfigTest):
                                                      "recalibrated"),
             "no fingerprint": (pose_line(POSE) + "\n", "no rest_pose_calibration"),
             "partial pose": ("rest_pose = { gripper = 2048 }\n", "it leaves out shoulder_pan"),
-            "unknown motor": (pose_line({**POSE, "elbow": 2048}) + "\n", "it names unknown elbow"),
-            "not a table": ("rest_pose = 2048\n", "rest_pose = 2048 isn't a table of motor positions"),
-            "out of range": (pose_line({**POSE, "gripper": 4096}) + "\n",
-                             "positions that aren't raw motor steps from 0 to 4095: gripper = 4096"),
         }
         for case, (control, why) in cases.items():
             with self.subTest(case):

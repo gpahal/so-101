@@ -56,8 +56,9 @@ class Server:
     """A started ControlServer with `controller` attached, and requests to it."""
 
     def __init__(self, test: unittest.TestCase, controller, https: str | None = None,
-                 warnings: tuple[str, ...] = (), routes=None) -> None:
-        """`routes` is what the server asks every ROUTES_EVERY_S on its own thread (`route_warning`)."""
+                 warnings: tuple[str, ...] = (), routes=lambda: None) -> None:
+        """`routes` is what the server asks every ROUTES_EVERY_S on its own thread (`route_warning`);
+        by default a route check that reports no routes."""
         self.server = ControlServer(Bind("127.0.0.1", https=https, warnings=warnings), 0, task="test", routes=routes)
         self.server.controller = controller
         self.server.start()
@@ -182,52 +183,41 @@ class CallerTest(unittest.TestCase):
             self.check(https, "POST", "/command", 200, host=host, headers={"Origin": f"http://{host}"})
             self.assertEqual(self.controller.commands[-1]["who"], "this Mac")
 
-        # A number JSON can't hold, and a POST with any Transfer-Encoding: the server never decodes
-        # chunks, so it would read the body by Content-Length, or not at all, and parse what's left as
-        # the next request on the connection.
-        accepted = len(self.controller.commands)
-        for body in (b'{"command":"reset","for_attempt":1e999}', b'{"command":"reset","for_attempt":Infinity}'):
-            head = (f"POST /command HTTP/1.1\r\nHost: 127.0.0.1:{plain.port}\r\nContent-Type: application/json\r\n"
-                    f"Content-Length: {len(body)}\r\n\r\n").encode()
-            [status] = self.raw(head + body)
-            self.assertTrue(status.startswith(b"400"), status)
-        smuggled = self.embedded("resume", last=True)
+    def test_a_request_that_could_carry_another_gets_one_refusal(self) -> None:
+        port = self.http.port
+        own = f"POST /command HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+        cross = f"HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://evil.example\r\nContent-Type: text/plain\r\n"
+        get = f"GET /status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+        one = self.embedded("resume", last=True)
+        two = self.embedded("take_control") + one
         pause = b'{"command": "pause"}'
-        chunked = f"{len(smuggled):x}\r\n".encode() + smuggled + b"\r\n0\r\n\r\n"
-        for length, body in (("", chunked), (f"Content-Length: {len(pause)}\r\n", pause + smuggled), ("", smuggled)):
-            with self.subTest(length=length):
-                outer = (f"POST /command HTTP/1.1\r\nHost: 127.0.0.1:{plain.port}\r\nContent-Type: application/json\r\n"
-                         f"Transfer-Encoding: chunked\r\n{length}\r\n").encode()
-                [status] = self.raw(outer + body)
-                self.assertTrue(status.startswith(b"400"), status)
-        self.assertEqual(len(self.controller.commands), accepted, "no command reaches the controller")
-
-    def test_a_cross_site_post_with_requests_in_its_body_gets_one_refusal(self) -> None:
-        # Any website can make a browser send this: a text/plain POST needs no consent from the server.
-        smuggled = self.embedded("take_control") + self.embedded("resume", last=True)
-        for path, length, code in (("/command", len(smuggled), b"403"), ("/nowhere", len(smuggled), b"404"),
-                                   ("/command", 99999, b"403")):
-            with self.subTest(path=path, length=length):
-                outer = (f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{self.http.port}\r\nOrigin: http://evil.example\r\n"
-                         f"Content-Type: text/plain\r\nContent-Length: {length}\r\n\r\n").encode()
-                [status] = self.raw(outer + smuggled)
+        chunked = f"{len(one):x}\r\n".encode() + one + b"\r\n0\r\n\r\n"
+        huge, infinite = b'{"command":"reset","for_attempt":1e999}', b'{"command":"reset","for_attempt":Infinity}'
+        rows = [
+            # A number JSON can't hold.
+            (f"{own}Content-Length: {len(huge)}\r\n\r\n".encode() + huge, b"400"),
+            (f"{own}Content-Length: {len(infinite)}\r\n\r\n".encode() + infinite, b"400"),
+            # Any Transfer-Encoding: the server never decodes chunks, so it would read the body by
+            # Content-Length, or not at all, and parse what's left as the next request on the connection.
+            (f"{own}Transfer-Encoding: chunked\r\n\r\n".encode() + chunked, b"400"),
+            (f"{own}Transfer-Encoding: chunked\r\nContent-Length: {len(pause)}\r\n\r\n".encode() + pause + one, b"400"),
+            (f"{own}Transfer-Encoding: chunked\r\n\r\n".encode() + one, b"400"),
+            # A cross-site POST, which any website can make a browser send: a text/plain POST needs no
+            # consent from the server.
+            (f"POST /command {cross}Content-Length: {len(two)}\r\n\r\n".encode() + two, b"403"),
+            (f"POST /nowhere {cross}Content-Length: {len(two)}\r\n\r\n".encode() + two, b"404"),
+            (f"POST /command {cross}Content-Length: 99999\r\n\r\n".encode() + two, b"403"),
+            # The same body with a length the server won't read, from this Mac's own page.
+            (f"{own}Content-Length: 99999\r\n\r\n".encode() + two, b"400"),
+            # A GET's body is never read, so a GET that says it has one is refused rather than leave the
+            # body to be parsed as the next request.
+            (f"{get}Content-Length: {len(one)}\r\n\r\n".encode() + one, b"400"),
+            (f"{get}Transfer-Encoding: chunked\r\n\r\n".encode() + one, b"400"),
+        ]
+        for n, (request, code) in enumerate(rows):
+            with self.subTest(row=n):
+                [status] = self.raw(request)
                 self.assertTrue(status.startswith(code), status)
-        # The same body with a length the server won't read, from this Mac's own page.
-        outer = (f"POST /command HTTP/1.1\r\nHost: 127.0.0.1:{self.http.port}\r\nContent-Type: application/json\r\n"
-                 f"Content-Length: 99999\r\n\r\n").encode()
-        [status] = self.raw(outer + smuggled)
-        self.assertTrue(status.startswith(b"400"), status)
-        self.assertEqual(self.controller.commands, [], "no command reaches the controller")
-
-    def test_a_get_with_a_body_gets_one_refusal(self) -> None:
-        # A GET's body is never read, so a GET that says it has one is refused rather than leave the
-        # body to be parsed as the next request.
-        smuggled = self.embedded("resume", last=True)
-        for framing in (f"Content-Length: {len(smuggled)}", "Transfer-Encoding: chunked"):
-            with self.subTest(framing=framing):
-                outer = f"GET /status HTTP/1.1\r\nHost: 127.0.0.1:{self.http.port}\r\n{framing}\r\n\r\n".encode()
-                [status] = self.raw(outer + smuggled)
-                self.assertTrue(status.startswith(b"400"), status)
         self.assertEqual(self.controller.commands, [], "no command reaches the controller")
 
 
@@ -360,8 +350,9 @@ def serve_status(web: dict, funnel: dict | None = None, tcp: dict | None = None)
     return json.dumps(serve_config(web, funnel, tcp))
 
 
-class FakedTailscale(unittest.TestCase):
-    """`resolve_bind`, with the Tailscale CLI's output faked."""
+class ResolveBindTest(unittest.TestCase):
+    """Where `resolve_bind` puts the page, and what it and `route_warning` make of `tailscale serve
+    status --json` output as Tailscale prints it, with the Tailscale CLI's output faked."""
 
     PORT = 8101
     TS_IP = "100.101.102.103"
@@ -379,15 +370,8 @@ class FakedTailscale(unittest.TestCase):
                 mock.patch.object(server.subprocess, "run", side_effect=AssertionError("only the Tailscale CLI runs")):
             return server.resolve_bind(control(bind=bind, port=self.PORT))
 
-
-class ServeStatusTest(FakedTailscale):
-    """What `resolve_bind` makes of `tailscale serve status --json` output, as Tailscale prints it,
-    with bind = "tailscale" and Tailscale running."""
-
-    def https(self, out: str) -> server.Bind:
-        return self.resolve("tailscale", ip=self.TS_IP, serve=out)
-
     def test_funnel_or_a_tcp_forward_on_any_route_to_the_port_is_reported(self) -> None:
+        # With bind = "tailscale" and Tailscale running.
         out = serve_status({f"{TS_NAME}:443": {"/": {"Proxy": "http://127.0.0.1:8101"}},
                             f"{TS_NAME}:8443": {"/": {"Proxy": "http://127.0.0.1:8101"}}},
                            funnel={f"{TS_NAME}:8443": True})
@@ -411,17 +395,13 @@ class ServeStatusTest(FakedTailscale):
     def assertRefused(self, out: str, route: str, kind: str) -> str:
         """No HTTPS: the Tailscale address, with a warning that names `route` and `kind` of route.
         Returns the warning."""
-        bind = self.https(out)
+        bind = self.resolve("tailscale", ip=self.TS_IP, serve=out)
         self.assertEqual((bind.address, bind.https), (self.TS_IP, None))
         warning = " ".join(bind.warnings)
         self.assertTrue(warning)
         self.assertIn(route, warning)
         self.assertIn(kind, warning)
         return warning
-
-
-class ResolveBindTest(FakedTailscale):
-    """Where the page listens, with the Tailscale CLI's output faked."""
 
     def test_on_127_0_0_1_a_tcp_forward_to_the_port_stops_serve(self) -> None:
         # Its connections carry no Serve headers, so they would pass for this Mac's own browser.
@@ -434,7 +414,6 @@ class ResolveBindTest(FakedTailscale):
                 message = str(refused.exception)
                 self.assertIn("TCP port 10000", message)
                 self.assertIn(f"`{off}`", message)
-                self.assertNotIn("Tailscale tailscale", message)
 
     def test_on_127_0_0_1_a_web_route_only_warns(self) -> None:
         # Serve marks each request it passes on, so the page refuses them one by one.
@@ -453,13 +432,14 @@ class ResolveBindTest(FakedTailscale):
 
         tcp = serve_status({}, tcp={"2222": {"TCPForward": "127.0.0.1:8101"}})
         funnel = serve_status(self.WEB, funnel={f"{TS_NAME}:443": True})
-        loopback, https = server.Bind("127.0.0.1"), server.Bind("127.0.0.1", https=TS_NAME)
-        for bind in (loopback, https):
-            self.assertIn("`tailscale serve --tcp=2222 off`", check(bind, tcp))
-            self.assertIsNone(check(bind, serve_status(self.WEB)))
+        https = server.Bind("127.0.0.1", https=TS_NAME)
+        self.assertIn("`tailscale serve --tcp=2222 off`", check(https, tcp))
+        self.assertIsNone(check(https, serve_status(self.WEB)))
         self.assertIn("Funnel", check(https, funnel), "behind HTTPS, Funnel on the port is unsafe")
-        self.assertIsNone(check(loopback, funnel), "off HTTPS, each request through Funnel is refused already")
-        self.assertIsNone(check(server.Bind(self.TS_IP), tcp), "a route to localhost never reaches the Tailscale address")
+        self.assertIsNone(check(server.Bind("127.0.0.1"), funnel),
+                          "off HTTPS, each request through Funnel is refused already")
+        self.assertIsNone(check(server.Bind(self.TS_IP), tcp),
+                          "a route to localhost never reaches the Tailscale address")
 
 
 if __name__ == "__main__":

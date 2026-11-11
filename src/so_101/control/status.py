@@ -22,7 +22,7 @@ def build(controller, refusals: dict[str, str | None]) -> dict:
         "state": c._state.value,
         "attempt": c._attempt,
         "attempt_open": attempt is not None,
-        "elapsed_s": round(c.clock() - attempt.started, 1) if attempt is not None and attempt.started else None,
+        "elapsed_s": round(c.clock() - attempt.started, 1) if attempt is not None else None,
         "policy_s": round(attempt.spent["attempt_limit_s"], 1) if attempt is not None else None,
         "limit_s": c.control.attempt_limit_s,
         "teleop_s": round(attempt.spent["human_limit_s"], 1) if attempt is not None else None,
@@ -33,7 +33,6 @@ def build(controller, refusals: dict[str, str | None]) -> dict:
         "allowed": {command: reason is None for command, reason in refusals.items()},
         "refusals": {command: reason for command, reason in refusals.items() if reason is not None},
         "ending": attempt.ended_by if attempt is not None else None,
-        "quitting": c._quitting,
         "confirm_quit": c._confirm_pending,  # y at the terminal now exits where the arm is
         "last_attempt": {"attempt": closed.number, "ended_by": closed.ended_by, "outcome": closed.outcome,
                          "saved": closed.episode is not None} if closed else None,
@@ -41,9 +40,8 @@ def build(controller, refusals: dict[str, str | None]) -> dict:
         "device_problems": {device: reason for device, reason in devices.items() if reason},
         "fault": c._fault_error if c._state is State.FAULT else None,
         "warnings": [warning for warning in (c._follower.hot, c._pace.behind) if warning],
-        "loop_hz": round(c._pace.hz, 1) if c._pace.hz is not None else None,
         "previews": {"fps": c.previews.fps if c.previews else 0, "note": c._pace.preview_note},
-        "prompt": c._prompt,
+        "prompt": c._prompt,  # the attempt a time limit ended, waiting for its outcome, or None
         "operator": c.operator,
         "controller": c.link.who if c.link.client is not None else None,
         "you_have_control": None,  # per page: `seen_by` answers it

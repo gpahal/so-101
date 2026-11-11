@@ -11,7 +11,7 @@ The SO-101 uses Feetech STS3215 servos on a Waveshare bus servo board. Register 
 The STS3215 has no watchdog or communication timeout: none of its registers (0 to 86) is one. If the host process dies, each servo keeps driving to the last goal it received, then holds it with torque on. Only cutting its power makes it go limp.
 
 - **A clean exit** (Esc, Ctrl+C, SIGTERM, or SIGHUP from closing its terminal) turns torque off: `serve` first drives the arm to rest. Where it can't (after a fault, after a move to rest that stopped short, or resting away from the rest pose), only `y` at the terminal exits there, and no signal does, so with no terminal the arm holds until someone switches its power off.
-- **A crash or `kill -9`** skips that. The arm most likely finishes its last move and holds there until someone switches the power off. Untested: hardware check 3 (the kill test) settles it.
+- **A crash or `kill -9`** skips that. The arm most likely finishes its last move and holds there until someone switches the power off. Untested. To settle it, run `kill -9` on `so101-control` while the arm moves to the start pose, again while the policy drives, and pull the follower's USB cable mid-move, with a hand under the arm each time. Then note whether the arm stops and holds, finishes its last move and holds, or goes limp.
 - **For operators away from the robot**, see [Stopping the arm](#stopping-the-arm).
 
 ### Power loss and restarts
@@ -26,9 +26,9 @@ A servo that loses power, or restarts in a brownout, comes back with torque off.
 
 Untested on this firmware:
 
-- that `torque_limit` really is reloaded at power-on. Hardware check 9: switch the arm's power off and on while `serve` holds it.
-- whether overload protection changes `torque_limit` at all. Feetech's table says a trip drops output to the holding torque (address 34), not whether it writes address 48. Hardware check 22: close the gripper on a rigid object for 3 s while paused, then read address 48.
-- whether a held grasp sets the overload bit (32) in the error byte of the gripper's status replies. `serve` reads every motor's temperature once a second and faults on any alarm bit in those replies, so if a firm grip sets it, holding a grasp faults the attempt. Hardware check 23.
+- that `torque_limit` really is reloaded at power-on. To test it, switch the arm's power off and on while `serve` holds it.
+- whether overload protection changes `torque_limit` at all. Feetech's table says a trip drops output to the holding torque (address 34), not whether it writes address 48. To test it, close the gripper on a rigid object for 3 s while paused, then read address 48.
+- whether a held grasp sets the overload bit (32) in the error byte of the gripper's status replies. `serve` reads every motor's temperature once a second and faults on any alarm bit in those replies, so if a firm grip sets it, holding a grasp faults the attempt. To test it, grip a rigid object and then a sponge for 10 s each while paused, and see whether `serve` faults with "Motors in a protection alarm: gripper (overload)".
 
 ### The gripper's overload trips (left as is)
 

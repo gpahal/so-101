@@ -10,6 +10,7 @@ This file parses the arguments and dispatches. The longer commands, `serve` and 
 
 import argparse
 import json
+import os
 import sys
 import time
 from functools import partial
@@ -19,7 +20,7 @@ from serial.tools import list_ports
 
 from so_101 import data, remote, rollout, settings, svtshim, tasks
 from so_101.check import narrow_joints_warning, preflight
-from so_101.commands.policy import policy_setup, policy_task, resolve_action_steps, set_start_pose
+from so_101.commands.policy import policy_setup, policy_task, resolve_action_steps
 from so_101.commands.runs import cmd_runs
 from so_101.commands.serve import cmd_serve
 from so_101.console import filter_stderr, run_lerobot
@@ -247,9 +248,7 @@ def cmd_check(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> Non
 
 def cmd_teleop(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
     cameras, _ = preflight(s, "teleoperating", cameras=list(s.cameras.values()) if ns.cameras else [])
-    args = [*s.follower.lerobot_args(), *s.leader.lerobot_args(), f"--fps={s.teleop.fps}"]
-    if s.teleop.max_relative_target:
-        args.append(f"--robot.max_relative_target={s.teleop.max_relative_target}")
+    args = [*s.follower_args(), *s.leader.lerobot_args(), f"--fps={s.teleop.fps}"]
     if ns.cameras:
         args += [cameras_arg([cam.lerobot_spec() for cam in cameras]), "--display_data=true"]
     lerobot("lerobot-teleoperate", [*args, *extra])
@@ -291,7 +290,7 @@ def cmd_tasks(s: settings.Settings, __: argparse.Namespace, ___: list[str]) -> N
 
 
 def cmd_record(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
-    from so_101.recording import record_args, session_manifest, task_cameras
+    from so_101.recording import record_args, session_manifest
 
     if not ns.dry_run and (flags := [flag for flag, on in (("--replay", ns.replay), ("--keep", ns.keep),
                                                            ("--no-train", ns.no_train)) if on]):
@@ -313,11 +312,10 @@ def cmd_record(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -
             f"{task.name} already has {kept} demos (target {task.episodes}). "
             f"Add more with `uv run so101 record {task.name} --episodes 10`, or build and train it."
         )
-    found, report = preflight(
+    cameras, report = preflight(
         s, "recording", cameras=[s.camera(name) for name in task.cameras], task=task,
         loop_fps=task.fps, keyboard=True, video=True,
     )
-    cameras = task_cameras(s, task, found)
     session = data.new_session(s, task)
     manifest = session_manifest(s, task, cameras, report, ns.note or "")
     session.write_manifest(manifest)
@@ -575,8 +573,10 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         args.append("--display_data=true")
     run_dir.mkdir(parents=True)
     print(f"\nRecording this run to {run_dir}\n  Video and joint data: {dataset}\n  Log: {log}", flush=True)
-    if start_pose := set_start_pose(s, task):
-        print(f"  Each attempt starts at the demos' start pose: {start_pose}", flush=True)
+    # so101-rollout drives to the demos' start pose before each attempt, when there are local demos.
+    if start_pose := data.demo_start_pose(s, task):
+        os.environ[rollout.START_POSE_ENV] = json.dumps(start_pose)
+        print(f"  Each attempt starts at the demos' start pose: {data.describe_pose(start_pose)}", flush=True)
     else:
         print("  Each attempt starts at the pose the arm is in now.", flush=True)
     print(f"  {setup.steps_line(s)}", flush=True)
@@ -608,14 +608,15 @@ def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     if ns.policy not in s.remote:
         sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
     recipe = s.remote[ns.policy]
+    config = task.policy_config(ns.revision, ns.policy)
     remote.start_server(
         repo=task.policy_for(ns.policy),
         task=task.name,
         policy_type=ns.policy,
         revision=ns.revision or "main",
-        image_sizes=task.image_sizes(ns.revision, ns.policy),
+        image_sizes=tasks.image_sizes(config),
         fps=task.fps,
-        action_steps=resolve_action_steps(s, ns, task.policy_config(ns.revision, ns.policy)),
+        action_steps=resolve_action_steps(ns.action_steps, config),
         target=ns.target or recipe.job_target,
         timeout=ns.timeout or recipe.job_timeout,
     )

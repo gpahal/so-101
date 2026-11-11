@@ -128,18 +128,7 @@ def _open_bus(arm: Arm, port: str, degrees: bool = False) -> "SerialMotorsBus":
     """The arm's motor bus as LeRobot defines it, with the calibration file loaded, opened read-only."""
     from lerobot.motors import SerialMotorsBus
 
-    if arm.name == "follower":
-        from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-
-        device = SO101Follower(
-            SO101FollowerConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir, use_degrees=degrees)
-        )
-    else:
-        from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
-
-        device = SO101Leader(
-            SO101LeaderConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir, use_degrees=degrees)
-        )
+    device = arm.lerobot_device(port, use_degrees=degrees)
     # A separate bus, not device.bus: when `device` is garbage-collected its __del__ disconnects its
     # bus if open, which writes torque-off to every motor and closes the port.
     bus = SerialMotorsBus(port=port, motors=device.bus.motors, calibration=device.calibration)
@@ -612,10 +601,7 @@ REST_POSE_FIX = ("move the follower to its rest pose by hand, then run `uv run s
 
 def follower_motors(arm: Arm) -> list[str]:
     """The follower's motors as LeRobot defines them, without opening its port."""
-    from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-
-    device = SO101Follower(SO101FollowerConfig(port=arm.port, id=arm.id, calibration_dir=arm.calibration_dir))
-    return list(device.bus.motors)
+    return list(arm.lerobot_device(arm.port).bus.motors)
 
 
 def _number(value: object) -> bool:
@@ -791,9 +777,6 @@ def preflight(s: Settings, title: str, **kwargs) -> tuple[list[Camera], Report]:
 
 def live_test(report: Report, s: Settings, seconds: float = 10.0) -> None:
     """Teleoperate for `seconds` and check that every follower joint follows the leader."""
-    from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-    from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
-
     from lerobot.utils.robot_utils import precise_sleep
 
     from so_101.validate import tracking
@@ -811,13 +794,9 @@ def live_test(report: Report, s: Settings, seconds: float = 10.0) -> None:
         print()
         report.warn("live test", "skipped")
         return
-    follower = SO101Follower(SO101FollowerConfig(
-        port=s.follower.resolve_port(), id=s.follower.id, calibration_dir=s.follower.calibration_dir,
-        max_relative_target=s.teleop.max_relative_target or None,
-    ))
-    leader = SO101Leader(SO101LeaderConfig(
-        port=s.leader.resolve_port(), id=s.leader.id, calibration_dir=s.leader.calibration_dir,
-    ))
+    follower = s.follower.lerobot_device(s.follower.resolve_port(),
+                                         max_relative_target=s.teleop.max_relative_target or None)
+    leader = s.leader.lerobot_device(s.leader.resolve_port())
     group = "live test"
     names = list(follower.action_features)
     commanded, measured = [], []

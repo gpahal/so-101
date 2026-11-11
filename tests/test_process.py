@@ -1,6 +1,6 @@
 """Process supervision, through real processes and signals: `console.run_lerobot` turning SIGTERM
-and SIGHUP into the child's Ctrl+C, the control child quitting on a signal sent to `serve`'s whole
-process group, `so101-control`'s cleanups, and `remote.tunnel` restarting ssh when it exits.
+and SIGHUP into the child's Ctrl+C, `so101-control` quitting on a signal (`quit_on_signals`, in this
+process), its cleanups, and `remote.tunnel` restarting ssh when it exits.
 
 Only this virtualenv's python and a fake `ssh` run; nothing here reaches the network.
 """
@@ -18,6 +18,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -118,57 +119,35 @@ class RunLerobotSignals(unittest.TestCase):
                 self.assertEqual(code, 7)
 
 
-# The control child's signal handling, run with its log and `wanted`: each signal it should quit on
-# submits "quit" with source "signal", which is logged, and 0.5 s after the `wanted`-th quit, so a test
-# sees any quit that follows, it exits with code 2 plus the number of quits (a crash exits with 1).
-CONTROL = """\
-import sys, time
-from concurrent.futures import Future
-from pathlib import Path
-from types import SimpleNamespace
+class QuitOnSignals(unittest.TestCase):
+    """Closing the terminal sends SIGHUP to `serve`'s whole process group, and a service manager may
+    send SIGTERM to it: the control child gets one directly, and one from `serve`'s wrapper, which
+    passes its copy on as SIGINT (`RunLerobotSignals`). Here the process signals itself with each in
+    turn. Each reaches the controller as a Quit with source `signal`, which can't confirm an exit
+    away from rest (test_controller's QuitTest)."""
 
-from so_101.control.main import quit_on_signals
+    def setUp(self) -> None:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):  # `quit_on_signals` installs its own
+            self.addCleanup(signal.signal, signum, signal.getsignal(signum))
 
-log, wanted, quits = Path(sys.argv[1]), int(sys.argv[2]), []
+    def test_a_signal_and_the_wrappers_sigint_each_submit_a_quit_from_signal(self) -> None:
+        from so_101.control.commands import Result
+        from so_101.control.main import quit_on_signals
 
-def submit(command, source):
-    quits.append(command)
-    with log.open("a") as f:
-        f.write(f"{command}:{source}\\n")
-    future = Future()
-    future.set_result(SimpleNamespace(command=command, accepted=True, report=None))
-    return future
+        quits: list[tuple[str, str]] = []
 
-quit_on_signals(submit)
-log.write_text("ready\\n")
-deadline = time.monotonic() + 20
-while len(quits) < wanted and time.monotonic() < deadline:
-    time.sleep(0.01)
-time.sleep(0.5)
-sys.exit(2 + len(quits))
-"""
+        def submit(command: str, source: str) -> Future:
+            quits.append((command, source))
+            future: Future = Future()
+            future.set_result(Result(command, True))
+            return future
 
-
-class GroupSignals(unittest.TestCase):
-    """Closing the terminal sends SIGHUP to the whole process group, and a service manager may send
-    SIGTERM to it: both `serve`'s wrapper, which passes its copy on as SIGINT, and the control child
-    get one. Each reaches the child as a Quit with source `signal`; the state machine refuses the
-    second while the first is under way, and no signal can confirm an exit away from rest
-    (test_controller's QuitTest)."""
-
-    def test_a_signal_to_the_group_reaches_the_child_directly_and_through_the_wrapper(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            script, log = Path(tmp) / "control.py", Path(tmp) / "control.log"
-            script.write_text(CONTROL)
-            (Path(tmp) / "wrapper.py").write_text(WRAPPER)
-            wrapper = subprocess.Popen([sys.executable, str(Path(tmp) / "wrapper.py"), str(script), str(log), "2"],
-                                       stdout=subprocess.DEVNULL, start_new_session=True)
-            self.addCleanup(kill_group, wrapper)
-            wait_for(lambda: ready(log), 20, "the control child never started")
-
-            os.killpg(wrapper.pid, signal.SIGHUP)
-            self.assertEqual(wrapper.wait(timeout=10), 4, "the wrapper exits with the child's code")
-            self.assertEqual(log.read_text().split(), ["ready", "quit:signal", "quit:signal"])
+        quit_on_signals(submit)
+        with contextlib.redirect_stdout(io.StringIO()):
+            for n, signum in enumerate((signal.SIGHUP, signal.SIGINT), 1):
+                os.kill(os.getpid(), signum)
+                wait_for(lambda: len(quits) >= n, 5, f"signal {n} never submitted a quit")
+        self.assertEqual(quits, [("quit", "signal")] * 2)
 
 
 # A fake ssh: listens on the port its `-L` asks for. Its first run exits after 0.5 s, like a tunnel

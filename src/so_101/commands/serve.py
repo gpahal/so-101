@@ -12,7 +12,7 @@ from so_101.commands.policy import policy_setup, policy_task
 
 def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
     from so_101.control.main import RUN_ENV
-    from so_101.recording import policy_commit, run_manifest, task_cameras
+    from so_101.recording import policy_commit, run_manifest
 
     task = policy_task(ns)
     # The control center reads the fps from run.json, and LeRobot's own parts from --fps: one forwarded
@@ -45,7 +45,7 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     # bound and the policy has loaded, so a start that fails leaves nothing under data/.
     run = data.new_run(s, task)
     manifest = run_manifest(
-        s, task, task_cameras(s, task, setup.found), setup.report,
+        s, task, setup.found, setup.report,
         policy={**policy, "commit": policy_commit(setup.checkpoint) if setup.checkpoint else None},
         image_sizes=setup.sizes,
     )

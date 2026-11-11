@@ -32,8 +32,8 @@ from pathlib import Path
 
 # JSON: dir (the run's folder, <data_dir>/<task>/runs/<name>, not made yet) and manifest (run.json's
 # contents: `control.fps`, `operator`, and `policy` with its type, revision, inference ("local" or
-# "remote") and job; a remote run adds the checkpoint its server admitted it to: `with_checkpoint`). The
-# remote server itself is reached through `--inference.*` arguments; the manifest says what it serves.
+# "remote") and job; a remote run adds the checkpoint its server admitted it to, `artifact_identity`).
+# The remote server itself is reached through `--inference.*` arguments; the manifest says what it serves.
 RUN_ENV = "SO101_RUN"
 # Ctrl+C, `kill` and a closed terminal (SIGHUP, sent to the whole process group) all quit as Esc does:
 # the arm goes to rest before the motors turn off. Without a handler, SIGTERM and SIGHUP would end the
@@ -99,14 +99,7 @@ def check_settings(s) -> None:
 def leader_maker(arm):
     """Makes a new, unconnected SO-101 leader each call, on the port its board is on now, in degrees
     like the follower, LeRobot's default, so its pose can drive the follower."""
-    from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
-
-    def make():
-        return SO101Leader(SO101LeaderConfig(
-            port=arm.resolve_port(), id=arm.id, calibration_dir=arm.calibration_dir,
-        ))
-
-    return make
+    return lambda: arm.lerobot_device(arm.resolve_port())
 
 
 def checker(s, task_name: str):
@@ -114,8 +107,8 @@ def checker(s, task_name: str):
     device checks on the buses and cameras the control loop has open, never a second connection to a
     port, and the task's check, which reads only local files. The checks run on the control loop's
     thread, so nothing here touches the network: the Hugging Face login check, which asks the Hub with
-    no timeout, is left out, as are the loop timing test (the status shows the loop's own rate) and
-    the live test, which moves the arm."""
+    no timeout, is left out, as are the loop timing test (a slow loop is logged as `loop_rate`,
+    and the status names it in the previews' note or `warnings`) and the live test, which moves the arm."""
 
     def run(buses: dict, cameras: dict):
         from so_101 import tasks
@@ -165,16 +158,6 @@ def keep_awake() -> str | None:
     except OSError as error:
         return f"Couldn't keep the Mac awake ({error}): it may sleep during a long run."
     return "The Mac stays awake while so101 serve runs (caffeinate); a closed lid still sleeps it."
-
-
-def with_checkpoint(manifest: dict, client=None) -> dict:
-    """run.json's contents, with the checkpoint a cloud GPU's server admitted this run to as the
-    policy's `artifact_identity`: `so101 serve` can only name the revision it asked for, and a branch
-    such as main moves. `client` is LeRobot's admitted RemoteClient, or None for a local policy, whose
-    manifest already names the commit it downloaded and is returned unchanged."""
-    if client is None:
-        return manifest
-    return {**manifest, "policy": {**manifest.get("policy", {}), "artifact_identity": client.artifact_identity}}
 
 
 def remote_context(cfg):
@@ -229,7 +212,6 @@ def control(cfg) -> None:
     from lerobot.utils import init_logging
 
     from so_101 import data, devices, settings, tasks
-    from so_101.commands.policy import describe_pose
     from so_101.control import terminal
     from so_101.control.controller import Controller
     from so_101.control.follower import pose_from_steps
@@ -251,7 +233,7 @@ def control(cfg) -> None:
     # read stops this process with nothing connected.
     start_pose = data.demo_start_pose(s, task)
     if start_pose:
-        print(f"Each attempt starts at the demos' start pose: {describe_pose(start_pose)}", flush=True)
+        print(f"Each attempt starts at the demos' start pose: {data.describe_pose(start_pose)}", flush=True)
     else:
         print(f"{task.name} has no local demos, so each attempt starts from wherever the arm is.", flush=True)
     # The page's port is taken before the policy loads, so a port in use fails in seconds.
@@ -328,10 +310,12 @@ def control(cfg) -> None:
         # Now that the page's port is bound and the policy has loaded: a start that failed
         # before here made no folder, so `serve` never has to delete one.
         folder.path.mkdir(parents=True)
-        folder.write_manifest(with_checkpoint(manifest, ctx.policy.inference.client if remote else None))
+        if remote:  # `serve` named only the revision it asked for, and a branch such as main moves
+            manifest["policy"]["artifact_identity"] = ctx.policy.inference.client.artifact_identity
+        folder.write_manifest(manifest)
         print(f"Recording this run to {folder.path}: one episode per attempt, saved when the arm is back at "
               "rest.", flush=True)
-        recorder = Recorder(folder, robot, fps=fps, task=cfg.task, repo_id=folder.repo_id)
+        recorder = Recorder(folder, robot, fps=fps, task=cfg.task)
         controller = Controller(
             robot,
             driver,

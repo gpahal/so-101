@@ -167,9 +167,6 @@ class FakeMotors:
         self._settle()
         return self.registers[motor_id].get(name, 0), self.status.get(self.names[motor_id], 0)
 
-    def read_register(self, motor_id: int, name: str, retries: int = 0) -> int:
-        return self.read_register_with_error(motor_id, name, retries)[0]
-
     def sync_read_register_with_error(self, ids: list[int], name: str, retries: int = 0) -> list[tuple[int, int]]:
         self._answer(ids)
         self._settle()
@@ -182,9 +179,6 @@ class FakeMotors:
         self._settle()
         self._write(motor_id, name, value)
         return 0
-
-    def write_register(self, motor_id: int, name: str, value: int, retries: int = 0) -> None:
-        self.write_register_with_error(motor_id, name, value, retries)
 
     def sync_write_register(self, ids: list[int], name: str, values: list[int], retries: int = 0) -> None:
         """A sync write gets no reply, so it never fails: unpowered motors just miss it."""
@@ -212,9 +206,6 @@ class FakeMotors:
         self.torque.append((enabled, self.present()))
         self.writes.append(("torque_enable", enabled))
         return {}
-
-    def set_timeout(self, timeout: float) -> None:
-        pass
 
     def set_baudrate(self, baudrate: int) -> None:
         pass

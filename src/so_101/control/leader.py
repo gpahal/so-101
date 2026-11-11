@@ -46,17 +46,6 @@ class LeaderLost(Exception):
     """The leader stopped answering, or was never there, while it was needed. The message is the reason."""
 
 
-def torque_on(leader) -> dict[str, float]:
-    """Turn the leader's motors on where it is, so it stays put when let go. Returns that pose.
-
-    The motors are aimed where the leader is before they turn on: they'd otherwise jump to the last
-    goal they were sent, which may be from long ago."""
-    pose = {key: float(value) for key, value in leader.get_action().items()}
-    leader.send_feedback(pose)
-    leader.enable_torque()
-    return pose
-
-
 class Leader:
     """The leader's connection: the connected LeRobot leader (`arm`), or why there is none, and the
     handover or rewind mirror driving it, if one is.
@@ -95,8 +84,14 @@ class Leader:
         return {key: float(value) for key, value in pose.items()}
 
     def hold(self) -> dict[str, float]:
-        """Turn the leader's motors on where it is. Returns that pose."""
-        return self.call(lambda: torque_on(self.arm))
+        """Turn the leader's motors on where it is, so it stays put when let go. Returns that pose.
+
+        The motors are aimed where the leader is before they turn on: they'd otherwise jump to the last
+        goal they were sent, which may be from long ago."""
+        pose = self.read()
+        self.call(lambda: self.arm.send_feedback(pose))
+        self.call(lambda: self.arm.enable_torque())
+        return pose
 
     def free(self) -> None:
         """Turn the leader's motors off, so a human can move it."""
@@ -179,13 +174,6 @@ class Leader:
             self.drop(str(lost))
             return None
 
-    def start_handover(self, fps: float) -> None:
-        self.handover = Handover(self, fps, self.clock)
-
-    def step_handover(self, follower: dict[str, float]) -> bool | None:
-        """One tick of the handover, to `follower`, the follower's pose measured this tick. Raises LeaderLost."""
-        return self.handover.step(follower)
-
     def start_mirror(self, follower_goal: dict[str, float], fps: float) -> None:
         """At a rewind's start, turn the leader's motors on where it is, if it's connected."""
         if not self.connected:
@@ -199,16 +187,13 @@ class Leader:
         rewind carries on without it."""
         if not self.connected or self.mirror is None:
             return None
-        read: list[dict[str, float]] = []
-
-        def follow() -> None:
-            read.append(self.read())
-            self.mirror.follow(follower_goal, read[0])
-
-        if not self.ok(follow):
-            self.mirror = None
+        try:
+            pose = self.read()
+            self.mirror.follow(follower_goal, pose)
+        except LeaderLost as lost:
+            self.drop(str(lost))
             return None
-        return read[0]
+        return pose
 
     def drop(self, reason: str | None) -> None:
         """Forget the leader and close its port, ending any handover or mirror. Its motors turn off
@@ -236,14 +221,6 @@ class Leader:
         if not may_connect:
             return f"{LEADER_MISSING} It connects while the arm rests or is paused: pause first."
         return LEADER_MISSING
-
-
-class _Feedback:
-    """The leader as `rollout.Move` drives it: each goal goes out through `Leader.send`, capped
-    against `measured`, the leader's pose this tick."""
-
-    def __init__(self, leader: Leader, measured: dict[str, float]) -> None:
-        self.send_action = lambda action: leader.send(action, measured)
 
 
 class Handover:
@@ -277,7 +254,11 @@ class Handover:
             self.pose = pose = self.leader.read()
             if self.move.step_index >= self.move.steps:
                 self.move.target = dict(follower)  # the follower's pose now, not when the handover began
-        return self.move.step(_Feedback(self.leader, pose), pose)
+        return self.move.step(self, pose)
+
+    def send_action(self, action: dict[str, float]) -> dict[str, float]:
+        """`rollout.Move` sends each goal here: on to the leader, capped against its pose this tick."""
+        return self.leader.send(action, self.pose)
 
     def gap(self, follower: dict[str, float]) -> tuple[str, float]:
         """The joint farthest from the follower's pose, and how far."""

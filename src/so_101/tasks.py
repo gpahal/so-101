@@ -102,18 +102,27 @@ class Task:
             ) from e
         return json.loads(Path(config_file).read_text())
 
-    def image_sizes(self, revision: str | None, policy_type: str) -> dict[str, tuple[int, int]]:
-        """(width, height) of each camera the checkpoint was trained on, without its empty slots."""
-        prefix = "observation.images."
-        return {
-            key.removeprefix(prefix): (feature["shape"][2], feature["shape"][1])
-            for key, feature in self.policy_config(revision, policy_type)["input_features"].items()
-            if key.startswith(prefix) and not key.startswith(prefix + "empty_camera_")
-        }
+
+def image_sizes(config: dict) -> dict[str, tuple[int, int]]:
+    """(width, height) of each camera a checkpoint was trained on, from its config.json
+    (`Task.policy_config`), without its empty slots."""
+    prefix = "observation.images."
+    return {
+        key.removeprefix(prefix): (feature["shape"][2], feature["shape"][1])
+        for key, feature in config["input_features"].items()
+        if key.startswith(prefix) and not key.startswith(prefix + "empty_camera_")
+    }
 
 
 def read_file() -> dict:
-    return tomllib.loads(tasks_path().read_text())
+    path = tasks_path()
+    try:
+        return tomllib.loads(path.read_text())
+    except FileNotFoundError as e:
+        raise ConfigError(f"{path} doesn't exist: tasks.toml is read from the folder of so101.toml, "
+                          "which SO101_CONFIG chooses.") from e
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{path}: {e}") from e
 
 
 def default_name() -> str:
@@ -129,21 +138,26 @@ def default_name() -> str:
 
 def load() -> dict[str, Task]:
     """Every task in tasks.toml: its tables. Top-level keys, such as `default`, aren't tasks."""
-    return {
-        name: Task(
-            name=name,
-            prompt=t["prompt"],
-            cameras=tuple(t.get("cameras", ["front", "wrist"])),
-            fps=t.get("fps", 30),
-            episodes=t.get("episodes", 50),
-            episode_time_s=t.get("episode_time_s", 20),
-            reset_time_s=t.get("reset_time_s", 10),
-            props=t.get("props", []),
-            setup=t.get("setup", []),
-        )
-        for name, t in read_file().items()
-        if isinstance(t, dict)
-    }
+    catalog = {}
+    for name, t in read_file().items():
+        if not isinstance(t, dict):
+            continue
+        try:
+            catalog[name] = Task(
+                name=name,
+                prompt=t["prompt"],
+                cameras=tuple(t.get("cameras", ["front", "wrist"])),
+                fps=t.get("fps", 30),
+                episodes=t.get("episodes", 50),
+                episode_time_s=t.get("episode_time_s", 20),
+                reset_time_s=t.get("reset_time_s", 10),
+                props=t.get("props", []),
+                setup=t.get("setup", []),
+            )
+        except (KeyError, ValueError, TypeError) as e:
+            problem = f"the setting {e.args[0]!r} is missing" if isinstance(e, KeyError) else e
+            raise ConfigError(f"{tasks_path()}: task {name!r}: {problem}") from e
+    return catalog
 
 
 def get_task(name: str | None) -> Task:

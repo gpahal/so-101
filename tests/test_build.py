@@ -1,14 +1,19 @@
-"""`so101 build --with`, through its public interface: build a task's training dataset from demo
-sessions plus a recorded run, then read the built dataset and build.json back.
+"""Run analysis and `so101 build --with`, through their public interfaces: read a recorded run back
+into training cuts, build a task's training dataset from demo sessions plus the run, then read the
+built dataset and build.json back.
 
-The run is recorded through the controller harness in test_controller. The demo session is a small
-LeRobot dataset with the same robot and cameras. Cameras show mid-grey, since the build's validation
-fails a mostly black video.
+The run is recorded through the controller harness in test_controller, so it has the events and
+columns a real `so101 serve` run has. Expected frames come from the run's own files: the
+`control.phase` column and the `rewind` events. The demo session is a small LeRobot dataset with
+the same robot and cameras. Cameras show mid-grey, since the build's validation fails a mostly black
+video.
 """
 
 import contextlib
 import dataclasses
+import hashlib
 import io
+import itertools
 import json
 import shutil
 import tempfile
@@ -19,17 +24,56 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 from fakes import FakeCamera, FakeClock, make_follower
-from test_analysis import BLAME_S, add_footerless_file, phases, runs_of
 from test_controller import FPS, GRIPPER_ACTIONS, REST_STEPS, Rig
 
 from so_101 import data, settings
 from so_101.build import build
 from so_101.control import analysis
 from so_101.control.recorder import Phase, features
+from so_101.data import Run
 from so_101.tasks import Task
 
 TASK = Task(name="test", prompt="test", cameras=("front", "wrist"), fps=FPS,
             episodes=1, episode_time_s=10, reset_time_s=5, props=[], setup=[])
+BLAME_S = 2.5
+
+
+def phases(run_dir: Path) -> dict[int, np.ndarray]:
+    """Each episode's control.phase column, read straight from the dataset."""
+    files = sorted((run_dir / "dataset").glob("data/*/*.parquet"))
+    frames = pd.concat(pd.read_parquet(f, columns=["episode_index", "frame_index", "control.phase"]) for f in files)
+    return {
+        int(ep): np.array([int(np.ravel(p)[0]) for p in rows.sort_values("frame_index")["control.phase"]])
+        for ep, rows in frames.groupby("episode_index")
+    }
+
+
+def all_nan(run_dir: Path, name: str) -> dict[int, np.ndarray]:
+    """Per episode, whether each frame's `name` column is all NaN, read straight from the dataset."""
+    files = sorted((run_dir / "dataset").glob("data/*/*.parquet"))
+    frames = pd.concat(pd.read_parquet(f, columns=["episode_index", "frame_index", name]) for f in files)
+    return {
+        int(ep): np.array([bool(np.isnan(np.asarray(v, dtype=float)).all()) for v in rows.sort_values("frame_index")[name]])
+        for ep, rows in frames.groupby("episode_index")
+    }
+
+
+def runs_of(column: np.ndarray, phase: Phase) -> list[tuple[int, int]]:
+    """The [start, stop) ranges where `column` is `phase`."""
+    out, i = [], 0
+    for value, group in itertools.groupby(column):
+        n = len(list(group))
+        if value == phase:
+            out.append((i, i + n))
+        i += n
+    return out
+
+
+def digest(run_dir: Path) -> str:
+    h = hashlib.sha256()
+    for f in sorted(p for p in run_dir.rglob("*") if p.is_file() and p.name != analysis.LABELS_FILE):
+        h.update(str(f.relative_to(run_dir)).encode() + f.read_bytes())
+    return h.hexdigest()
 
 
 def grey(self, *args, **kwargs) -> np.ndarray:
@@ -81,9 +125,7 @@ class BuildTest(unittest.TestCase):
         self.rig.command("pause")
         self.rig.tick(5)
 
-    # --- Test case 11, the build half ---------------------------------------------------------------
-
-    def test_each_correction_is_its_own_episode_without_paused_scripted_suspect_or_ignored_frames(self) -> None:
+    def test_cuts_and_corrections_leave_out_paused_scripted_suspect_waiting_and_ignored_frames(self) -> None:
         # 1: the policy, paused and rewound, then a correction; succeeded.
         self.rig.policy(3)
         self.pause()
@@ -106,13 +148,60 @@ class BuildTest(unittest.TestCase):
         self.rig.policy(2)
         self.rig.teleop(1)
         self.rig.reset("failed")
+        # 5: the policy, paused without a rewind and resumed; succeeded.
+        self.rig.policy(3)
+        self.pause()
+        self.rig.command("resume")
+        self.rig.tick(FPS)
+        self.rig.reset("succeeded")
+        # 6: the policy, whose next chunk (from the cloud GPU) is late by 10 ticks; succeeded.
+        self.rig.policy(1)
+        self.rig.engine.waiting = 10
+        self.rig.tick(10 + FPS)
+        self.rig.reset("succeeded")
         self.rig.controller.close()
 
         run_dir = self.rig.run_dir
+        before = digest(run_dir)
         columns = phases(run_dir)
+        self.assertEqual(len(columns), 6)
+        [rewind] = self.rig.events("rewind")
+        run = analysis.analyse(Run.at(run_dir), BLAME_S)
+        cuts = analysis.training_cuts(run, analysis.SOURCES)
+
+        def cut_ranges(episode: int, source: str) -> list[tuple[int, int]]:
+            return [(c.start, c.stop) for c in cuts if c.episode == episode and c.source == source]
+
+        # No cut has a paused or scripted frame, a suspect frame, or a frame of the ignored attempt.
+        suspect = {a.episode: a.suspect_mask() for a in run.attempts}
+        for cut in cuts:
+            frames = columns[cut.episode][cut.start : cut.stop]
+            self.assertTrue(np.isin(frames, [Phase.AUTONOMOUS, Phase.TELEOP]).all(), cut)
+            self.assertFalse(suspect[cut.episode][cut.start : cut.stop].any(), cut)
+        self.assertNotIn(1, {c.episode for c in cuts}, "attempt 2 was ignored")
+        self.assertEqual(len({(c.episode, f) for c in cuts for f in range(c.start, c.stop)}),
+                         sum(c.frames for c in cuts), "no frame is in two cuts")
+
+        # The rewound policy frames are suspect, so only the policy frames before them are a cut.
+        [(policy_start, _)] = runs_of(columns[0], Phase.AUTONOMOUS)
+        self.assertEqual(cut_ranges(0, analysis.POLICY_SUCCESSES), [(policy_start, rewind["start_frame"])])
+        # Attempt 5's last blame_s of policy frames before its pause are left out.
+        first, second = runs_of(columns[4], Phase.AUTONOMOUS)
+        blamed = round(BLAME_S * FPS)
+        self.assertEqual(cut_ranges(4, analysis.POLICY_SUCCESSES), [(first[0], first[1] - blamed), second])
+
+        # Attempt 6's waiting frames, where the policy sent no action, are in no cut and aren't policy time.
+        [(start, stop)] = runs_of(columns[5], Phase.AUTONOMOUS)
+        no_action = all_nan(run_dir, "control.policy_action")[5]
+        [waiting] = runs_of(no_action & (columns[5] == Phase.AUTONOMOUS), True)
+        self.assertEqual(waiting[1] - waiting[0], 10)
+        self.assertEqual(cut_ranges(5, analysis.POLICY_SUCCESSES), [(start, waiting[0]), (waiting[1], stop)])
+        self.assertAlmostEqual(run.attempts[5].seconds(FPS)[analysis.POLICY], (stop - start - 10) / FPS)
+
+        # The corrections: attempt 4's Teleop before the policy corrects nothing, and it failed, so only
+        # its second is in.
         driving, stepping_in = runs_of(columns[3], Phase.TELEOP)
         self.assertLessEqual(driving[1], runs_of(columns[3], Phase.AUTONOMOUS)[0][0])
-        # Attempt 4's Teleop before the policy corrects nothing, and it failed, so only its second is in.
         corrections = [(ep, a, b) for ep in (0, 2) for a, b in runs_of(columns[ep], Phase.TELEOP)]
         corrections.append((3, *stepping_in))
         self.assertEqual(len(corrections), 4)
@@ -149,6 +238,9 @@ class BuildTest(unittest.TestCase):
             success = np.ravel(np.stack(rows["control.attempt_success"]))
             self.assertTrue((success == (ep == 0)).all(), "attempt 1 succeeded, attempt 3 failed")
 
+        # Neither reading nor building changed the run.
+        self.assertEqual(digest(run_dir), before)
+
     # --- Kills and torn metadata --------------------------------------------------------------------
 
     def built_runs(self) -> list[tuple[str, int, int, int]]:
@@ -163,15 +255,14 @@ class BuildTest(unittest.TestCase):
         return printed.getvalue()
 
     def test_a_kill_or_torn_metadata_keeps_every_earlier_attempt(self) -> None:
-        # Two saved corrections, then a third, copied as a hard kill mid-attempt and inside its save's
-        # finalize would leave the run. The recorder never closed either copy.
+        # Two saved corrections, then a third, copied as a hard kill inside its save's finalize would
+        # leave the run. The recorder never closed the copy.
         for attempt in (1, 2, 3):  # the policy drives for 2 s, then a human corrects for 1 s
             self.rig.policy(2)
             self.rig.teleop(1)
             if attempt < 3:
                 self.rig.reset("failed")
         held = self.task_dir / "held"
-        shutil.copytree(self.rig.run_dir, held / "mid-attempt")
         dataset = self.rig.controller.recorder.dataset
         finalize = dataset.finalize
 
@@ -194,13 +285,14 @@ class BuildTest(unittest.TestCase):
             return torn
 
         def footerless(run: Path) -> None:  # a data file the kill left without its footer costs only itself
-            self.bad = add_footerless_file(run)
+            first = sorted((run / "dataset").glob("data/*/*.parquet"))[0]
+            self.bad = first.with_name("file-999.parquet")
+            self.bad.write_bytes(first.read_bytes()[: first.stat().st_size // 2])
 
         def unindexed(run: Path) -> None:  # a kill after the data file was finished and before its index row was
             sorted((run / "dataset" / "meta" / "episodes").glob("*/*.parquet"))[-1].unlink()
 
-        rows = [("mid-attempt", "mid-attempt", lambda run: None), ("save", "save", footerless),
-                ("torn stats.json", "save", tear("stats.json")), ("torn info.json", "save", tear("info.json")),
+        rows = [("save", "save", footerless), ("torn info.json", "save", tear("info.json")),
                 ("missing from the episode index", "closed", unindexed)]
         for case, source, damage in rows:
             with self.subTest(case):

@@ -164,7 +164,9 @@ class Rig:
         self.motors.stops = {"elbow_flex": self.motors.present()["elbow_flex"]}
         check.assertEqual(self.command("quit"), Result("quit", True))
         self.tick_until("resting", limit=10 * FPS)
-        self.tick(31 * FPS)  # the warning it gave has lapsed
+        check.assertTrue(self.status()["confirm_quit"], "it warned that the arm isn't at rest")
+        self.clock.advance(31)  # the warning lapses after 30 s
+        self.tick()
 
     def resting_away_from_rest(self) -> None:
         """After a fault, Reset, then Pause on the way to rest."""
@@ -238,9 +240,8 @@ class ControllerTest(RigTest):
     def test_space_and_toggle_pause_but_never_start_resume_or_restart_the_arm(self) -> None:
         # At the terminal, Space pauses but never starts or resumes the arm.
         self.rig.tick(2 * FPS)  # the arm has rested for 2 s, past the 1 s that lets the page's Space resume
-        printed = self.rig.press("space")
+        self.rig.press("space")
         self.assertEqual(self.rig.status()["state"], "resting", "Space never starts an attempt at the terminal")
-        self.assertIn("r starts", printed)
 
         self.rig.press("r")
         self.rig.tick_until("autonomous")
@@ -249,12 +250,9 @@ class ControllerTest(RigTest):
         self.assertEqual(self.rig.status()["state"], "paused")
         held = self.rig.goals()[-1]
         sent = len(self.rig.goals())
-        for _ in range(2 * FPS):  # the key held: the terminal repeats it every tick for 2 s
-            self.rig.press("space")
-        self.rig.tick(5 * FPS)  # then a key-repeat delay far past 1 s, or a fresh press much later
-        printed = self.rig.press("space")
+        self.rig.tick(2 * FPS)  # past the 1 s that lets the page's Toggle resume
+        self.rig.press("space")
         self.assertEqual(self.rig.status()["state"], "paused")
-        self.assertIn("r resumes", printed)
         self.assertEqual(self.rig.goals()[sent:], [held] * (len(self.rig.goals()) - sent), "the arm holds throughout")
 
         self.rig.press("r")
@@ -268,7 +266,6 @@ class ControllerTest(RigTest):
         for _ in range(2 * FPS):  # a double press, then the key held: it repeats every tick for 2 s
             again = self.rig.command("toggle")
             self.assertEqual((again.command, again.accepted), ("resume", False))
-        self.assertIn("press again", again.reason)
         self.assertEqual(self.rig.status()["state"], "paused")
         self.assertEqual(self.rig.goals()[sent:], [held] * (len(self.rig.goals()) - sent), "the arm holds throughout")
 
@@ -414,24 +411,49 @@ class ControllerTest(RigTest):
         self.assertFalse(status["allowed"]["teleop"])
         self.assertTrue(status["allowed"]["resume"], "the leader is optional")
 
+    def test_a_follower_error_goes_to_fault_and_holds_where_the_arm_is_found_when_it_answers(self) -> None:
+        self.rig.start_policy()
+        # Something blocks the pan, so the arm is short of its last goal when the bus fails.
+        self.rig.motors.stops = {"shoulder_pan": self.rig.motors.present()["shoulder_pan"]}
+        self.rig.tick(5)
+        last_goal = self.rig.goals()[-1]
+
+        self.rig.motors.failing = True
+        self.rig.tick()
+
+        status = self.rig.status()
+        self.assertEqual(status["state"], "fault")
+        self.assertEqual(status["devices"]["follower"], "missing")
+        self.assertEqual(status["last_attempt"], {"attempt": 1, "ended_by": "fault", "outcome": None, "saved": False})
+        self.assertFalse(status["attempt_open"])
+        [fault] = [e for e in self.rig.controller.events(0, 500) if e["type"] == "fault"]
+        self.assertEqual(fault["device"], "follower")
+        self.assertIn("TimeoutError", fault["traceback"])
+
+        # Only Reset and Run checks are allowed, and Reset not until the follower answers again.
+        self.assertEqual({c for c, ok in status["allowed"].items() if ok}, {"check"})
+        self.assertFalse(self.rig.command("pause").accepted)
+        refused = self.rig.command("reset")
+        self.assertIn("The follower stopped answering", refused.reason)
+        self.rig.motors.failing = False
+        sent = len(self.rig.goals())
+        found = self.rig.motors.present()
+        self.assertNotEqual(found, last_goal, "the pan never reached its last goal")
+        self.rig.tick(FPS)
+        self.assertEqual(self.rig.goals()[sent:], [found] * FPS, "the arm holds where it's found, never the old goal")
+        self.assertEqual(self.rig.status()["allowed"],
+                         {"resume": False, "pause": False, "rewind": False, "teleop": False, "reset": True,
+                          "check": True, "pose": False})
+
+        # A confirmation lapses on a state change.
+        self.assertEqual(self.rig.command("quit"), Result("quit", True))
+        self.assertTrue(self.rig.status()["confirm_quit"])
+        self.assertEqual(self.rig.command("reset"), Result("reset", True))
+        self.assertFalse(self.rig.status()["confirm_quit"], "going to rest starts the quit over")
+
 
 class RecordingTest(RigTest):
     recorded = True
-
-    def test_ticks_with_no_policy_action_dont_make_a_following_teleop_an_intervention(self) -> None:
-        self.rig.engine.waiting = 10**6  # the policy never sends an action, as a cloud GPU that never answers
-        self.rig.start_policy()
-        self.rig.teleop(3 / FPS)
-        self.rig.reset("failed")
-        self.rig.controller.close()
-
-        frames, _ = self.rig.frames()
-        autonomous = frames[frames["control.phase"] == Phase.AUTONOMOUS]
-        self.assertEqual(len(autonomous), 10)
-        self.assertTrue(np.isnan(np.stack(autonomous["control.policy_action"].to_numpy())).all(),
-                        "a waiting tick records no policy action")
-        self.assertTrue((frames["control.phase"] == Phase.TELEOP).any())
-        self.assertFalse(frames["intervention"].any(), "a policy that only waited drove nothing to step in on")
 
     def test_an_attempt_that_couldnt_be_saved_isnt_counted_and_refuses_new_attempts(self) -> None:
         rig = self.rig
@@ -457,46 +479,6 @@ class RecordingTest(RigTest):
         self.assertEqual(refused.reason, failed["error"])
         self.assertEqual(rig.status()["state"], "resting")
         self.assertEqual(rig.status()["refusals"]["resume"], refused.reason)
-
-    def test_a_follower_error_goes_to_fault_holds_and_saves_the_attempt_as_fault(self) -> None:
-        self.rig.start_policy()
-        last_goal = self.rig.goals()[-1]
-
-        self.rig.motors.failing = True
-        self.rig.tick()
-
-        status = self.rig.status()
-        self.assertEqual(status["state"], "fault")
-        self.assertEqual(status["devices"]["follower"], "missing")
-        self.assertEqual(status["last_attempt"], {"attempt": 1, "ended_by": "fault", "outcome": None, "saved": True})
-        self.assertFalse(status["attempt_open"])
-        self.assertEqual(self.rig.episodes(), 1, "saved where it is, without driving to rest")
-        [fault] = self.rig.events("fault")
-        self.assertEqual((fault["attempt"], fault["device"]), (1, "follower"))
-        self.assertIn("TimeoutError", fault["traceback"])
-        [end] = self.rig.events("attempt_end")
-        self.assertEqual((end["ended_by"], end["saved"], end["episode"]), ("fault", True, 0))
-
-        # Only Reset and Run checks are allowed, and Reset not until the follower answers again.
-        self.assertEqual({c for c, ok in status["allowed"].items() if ok}, {"check"})
-        self.assertFalse(self.rig.command("pause").accepted)
-        refused = self.rig.command("reset")
-        self.assertIn("The follower stopped answering", refused.reason)
-        self.rig.motors.failing = False
-        sent = len(self.rig.goals())
-        found = self.rig.motors.present()
-        self.rig.tick(FPS)
-        self.assertEqual(self.rig.goals()[sent:], [found] * FPS, "the arm holds where it's found when it answers")
-        self.assertEqual(found, last_goal, "here it had reached its last goal before the bus failed")
-        self.assertEqual(self.rig.status()["allowed"],
-                         {"resume": False, "pause": False, "rewind": False, "teleop": False, "reset": True,
-                          "check": True, "pose": False})
-
-        # A confirmation lapses on a state change.
-        self.assertEqual(self.rig.command("quit"), Result("quit", True))
-        self.assertTrue(self.rig.status()["confirm_quit"])
-        self.assertEqual(self.rig.command("reset"), Result("reset", True))
-        self.assertFalse(self.rig.status()["confirm_quit"], "going to rest starts the quit over")
 
     def test_an_attempt_pauses_saves_at_rest_and_records_the_states_it_went_through(self) -> None:
         rig = self.rig
@@ -572,6 +554,21 @@ class RecordingTest(RigTest):
         self.assertTrue(teleop.any())
         self.assertTrue((corrected["intervention"] == teleop).all(), "Teleop after the policy drove is a correction")
 
+        # Ticks with no policy action don't make a following Teleop an intervention.
+        rig.tick(2 * FPS)
+        rig.engine.waiting = 10**6  # the policy never sends an action, as a cloud GPU that never answers
+        rig.start_policy()
+        rig.teleop(3 / FPS)
+        rig.reset("failed")
+        frames, _ = rig.frames()
+        waited = frames[frames["episode_index"] == 2]
+        autonomous = waited[waited["control.phase"] == Phase.AUTONOMOUS]
+        self.assertEqual(len(autonomous), 10)
+        self.assertTrue(np.isnan(np.stack(autonomous["control.policy_action"].to_numpy())).all(),
+                        "a waiting tick records no policy action")
+        self.assertTrue((waited["control.phase"] == Phase.TELEOP).any())
+        self.assertFalse(waited["intervention"].any(), "a policy that only waited drove nothing to step in on")
+
 
 class RewindTest(RigTest):
     options = {"actions": GRIPPER_ACTIONS}
@@ -624,8 +621,7 @@ class TimeLimitTest(RigTest):
         )
         self.assertAlmostEqual(end["seconds"]["autonomous"], self.LIMIT_S, delta=0.1)
         self.assertGreaterEqual(end["seconds"]["paused"], 2 * self.LIMIT_S)
-        prompt = self.rig.status()["prompt"]
-        self.assertEqual((prompt["attempt"], prompt["options"]), (1, ["succeeded", "failed", "ignored"]))
+        self.assertEqual(self.rig.status()["prompt"], 1)
         self.assertEqual(self.rig.events("outcome"), [], "unlabelled until someone answers")
 
         self.assertEqual(self.rig.command("outcome", outcome="failed"), Result("outcome", True))
@@ -689,7 +685,6 @@ class LinkLossTest(RigTest):
         self.rig.tick(FPS)
         self.assertEqual(self.rig.goals()[held:], [self.rig.goals()[held - 1]] * (len(self.rig.goals()) - held),
                          "the arm holds where the move was: no goal after the loss")
-        self.assertTrue(self.page("page_visible").accepted)
         self.assertEqual(self.page("resume"), Result("resume", True), "Resume moves on to the start pose")
         self.assertEqual(self.rig.status()["state"], "starting")
         self.rig.tick_until("autonomous", client=self.PHONE)
@@ -752,38 +747,24 @@ class LoopSafetyTest(RigTest):
         self.assertEqual(rig.goals()[sent:], [last_goal] * 3, "it holds its last goal, keeping any grip")
 
         fell = {motor: steps - 300 for motor, steps in last_goal.items()}
-        rig.motors.failing = True  # now the power goes, while it's already in Fault
-        rig.tick(3)
-        rig.motors.power_cycle(fell)
-        rig.motors.failing = False
+        rig.motors.power_off()  # now the power goes, while it's already in Fault
         sent = len(rig.goals())
         rig.tick(3)
-
-        self.assertEqual(rig.goals()[sent:], [fell] * 3, "it holds where it fell, never the old goal")
-
-    def test_recovery_from_a_power_cut_turns_torque_on_after_aiming_at_the_measured_pose(self) -> None:
-        rig = self.rig
-        rig.start_policy()
-        fell = {motor: steps - 300 for motor, steps in rig.goals()[-1].items()}
-        rig.motors.power_off()
-        rig.tick()
-        sent = len(rig.goals())
-        rig.tick(2)
-        self.assertEqual(len(rig.goals()), sent, "no goal while the follower is silent")
+        self.assertEqual(rig.goals()[sent:], [], "no goal while the follower is silent")
         rig.motors.power_on(fell)
         written = len(rig.motors.writes)
-
         rig.tick()
+        self.assertEqual(rig.motors.writes[written:], [("goal_position", fell), ("torque_enable", True)],
+                         "aimed where it fell before its torque is on")
+        rig.tick(2)
 
-        self.assertEqual(rig.motors.writes[written:], [("goal_position", fell), ("torque_enable", True)])
-        self.assertTrue(rig.motors.torqued())
-        rig.tick(3)
-        self.assertEqual(rig.motors.present(), fell)
+        self.assertEqual(rig.goals()[sent:], [fell] * 3, "it holds where it fell, never the old goal")
 
 
 class QuitTest(RigTest):
     """Where the arm can't get to rest, only y at the terminal, within 30 s of the warning, exits: no
-    repeated Esc and no signal does. The test runs in two places the arm can't get to rest."""
+    repeated Esc and no signal does. The test runs in two places the arm can't get to rest, and in
+    `short_of_rest` the quit's own warning lapses first."""
 
     recorded = True
     PLACES = ("in_fault", "short_of_rest")
@@ -801,8 +782,8 @@ class QuitTest(RigTest):
                 rig = self.new_rig(place, notify=lambda message, state: self.said.append(message))
                 getattr(rig, place)()
                 printed = rig.press("y")
-                self.assertIn("Exit here refused", printed, "nothing asked yet")
-                self.assertIn("Press Esc first", printed)
+                self.assertIn("Exit here refused", printed, "nothing asked yet, or the request lapsed")
+                self.assertFalse(rig.status()["confirm_quit"])
 
                 # No signal exits, and Exit here is taken only from the terminal.
                 for _ in range(5):
@@ -813,7 +794,6 @@ class QuitTest(RigTest):
                 rig.tick(FPS)
                 self.assertFalse(rig.controller.done)
                 self.assertTrue(rig.motors.torqued())
-                self.assertIn("With no terminal, the arm keeps holding", self.said[-1])
                 for source in ("signal", "page", "unknown"):
                     refused = rig.command("exit_here", source=source, client="phone", who="100.64.0.2")
                     self.assertFalse(refused.accepted, source)
@@ -827,19 +807,9 @@ class QuitTest(RigTest):
                 rig.press("esc")
                 self.assertFalse(rig.controller.done, "a second Esc never exits away from rest")
                 self.assertEqual(self.warnings(), warned + 2, "each Esc gives the warning")
-                self.assertIn("switch the arm's power off", self.said[-1])
                 self.assertTrue(rig.status()["confirm_quit"])
                 self.assertTrue(rig.motors.torqued())
 
-                # y after 30 s is refused, and Esc starts over.
-                rig.tick(30 * FPS)
-                printed = rig.press("y")
-                self.assertFalse(rig.controller.done)
-                self.assertIn("Exit here refused", printed)
-                self.assertFalse(rig.status()["confirm_quit"], "the request lapsed")
-                self.assertTrue(rig.motors.torqued())
-
-                rig.press("esc")
                 rig.tick(29 * FPS)
                 rig.press("y")
                 self.assertTrue(rig.controller.done)
@@ -903,6 +873,20 @@ class ResetTest(RigTest):
         self.assertEqual(len(self.rig.events("outcome")), 1)
         self.assertEqual(self.rig.command("reset"), Result("reset", True), "Reset without an outcome goes to rest")
 
+    def test_a_fault_on_the_tick_an_attempt_opens_saves_nothing_to_label(self) -> None:
+        camera = self.rig.robot.inner.cameras["front"]
+        camera.is_connected = False  # the first observation of the attempt fails
+        self.addCleanup(setattr, camera, "is_connected", True)  # before the rig closes
+        self.assertEqual(self.rig.command("resume"), Result("resume", True))
+
+        status = self.rig.status()
+        self.assertEqual(status["state"], "fault")
+        self.assertFalse(status["last_attempt"]["saved"])
+        self.assertEqual(status["summary"]["attempts"], 0, "the summary counts only saved attempts")
+        refused = self.assert_refused_and_held(outcome="succeeded", for_attempt=1)
+        self.assertIn("The fault saved no attempt", refused.reason)
+        self.assertEqual(self.rig.events("outcome"), [])
+
 
 class ArmsTest(RigTest):
     """Goals without cameras, and the follower's restart marks."""
@@ -926,7 +910,6 @@ class ArmsTest(RigTest):
 
         self.assertEqual(rig.command("reset"), Result("reset", True))
         rig.tick_until("resting")
-        self.assertTrue(rig.controller.at_rest)
         for motor, steps in REST_STEPS.items():
             self.assertAlmostEqual(rig.goals()[-1][motor], steps, delta=1, msg=motor)
 

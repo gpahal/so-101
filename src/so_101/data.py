@@ -34,7 +34,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
-from so_101.settings import ConfigError, Settings
+from so_101.settings import ConfigError, Settings, replace_file
 
 if TYPE_CHECKING:
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
@@ -313,9 +313,7 @@ def save_edits(s: Settings, task: "Task", edits: dict[tuple[str, int], Edit]) ->
             lines.append(f"delete = {json.dumps(edit.delete, ensure_ascii=False)}\n")
     path = edits_path(s, task)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".toml.tmp")
-    tmp.write_text("".join(lines))
-    tmp.replace(path)
+    replace_file(path, "".join(lines))
 
 
 def kept_episodes(s: Settings, task: "Task") -> int:
@@ -352,6 +350,11 @@ def demo_start_pose(s: Settings, task: "Task") -> dict[str, float] | None:
         return None
     starts = np.stack(frames["observation.state"])
     return dict(zip(names, np.median(starts, axis=0).round(1).tolist(), strict=True))
+
+
+def describe_pose(pose: dict[str, float]) -> str:
+    """Each joint's position, in order, comma-separated."""
+    return ", ".join(f"{v:g}" for v in pose.values())
 
 
 # --- Builds ---------------------------------------------------------------------------------------

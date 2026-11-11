@@ -381,7 +381,7 @@ function render(st, ms) {
   $("state-sentence").textContent = sentence(st);
 
   $("prompt").hidden = !st.prompt;
-  if (st.prompt) $("prompt-title").textContent = `Attempt ${st.prompt.attempt} reached its time limit. How did it go?`;
+  if (st.prompt) $("prompt-title").textContent = `Attempt ${st.prompt} reached its time limit. How did it go?`;
 
   renderTimeline(st);
   renderReasons(st);
@@ -814,20 +814,21 @@ document.addEventListener("keydown", onKey);
 
 // Out of sight (the screen locked, another app or tab in front), a phone's browser slows or stops
 // this page's polls, so it tells serve at once: a running policy pauses, as on a lost link. Only the
-// page in control reports it, and the server ignores any other page.
-function reportSight(visible) {
+// page in control reports it, and the server ignores any other page. Its first poll back in sight
+// brings the link back.
+function reportHidden() {
   if (!status || status.you_have_control !== true) return;
   fetch("/command", {
     method: "POST", keepalive: true, headers: { ...HEADERS, "Content-Type": "application/json" },
-    body: JSON.stringify({ command: visible ? "page_visible" : "page_hidden" }),
+    body: JSON.stringify({ command: "page_hidden" }),
   }).catch(() => {});
 }
 document.addEventListener("visibilitychange", () => {
-  reportSight(document.visibilityState === "visible");
+  if (document.visibilityState !== "visible") reportHidden();
   keepAwake();
   resumePreviews();
 });
-window.addEventListener("pagehide", () => reportSight(false));
+window.addEventListener("pagehide", reportHidden);
 
 // Keep the screen on while this page has control, so a phone doesn't dim, lock and pause the policy.
 // The Screen Wake Lock API needs HTTPS (tailscale serve); on plain HTTP this does nothing. The browser

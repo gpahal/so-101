@@ -29,7 +29,7 @@ from so_101.control import analysis
 from so_101.control.recorder import Phase
 from so_101.dataset_io import column, episode_frames, episode_table
 from so_101.report import Report
-from so_101.settings import ConfigError, Settings
+from so_101.settings import ConfigError, Settings, replace_file
 from so_101.tasks import Task
 from so_101.validate import validate_dataset
 
@@ -322,7 +322,5 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
         "frames": total,
         "notes": notes,
     }
-    manifest_tmp = manifest_path.with_suffix(".json.tmp")
-    manifest_tmp.write_text(json.dumps(manifest, indent=2) + "\n")
-    manifest_tmp.replace(manifest_path)
+    replace_file(manifest_path, json.dumps(manifest, indent=2) + "\n")
     return report

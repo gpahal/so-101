@@ -61,7 +61,6 @@ class EngineDriver:
         self.action_processor = action_processor
         self.interpolator = ActionInterpolator(multiplier=interpolation_multiplier)
         self._processed: dict | None = None
-        self.proposed: dict | None = None  # the policy's raw action this tick, before the step cap
         self._reconnect = reconnect
         self._reconnecting: threading.Thread | None = None
         self._stopping = threading.Event()
@@ -176,12 +175,12 @@ class EngineDriver:
         return (self.engine.failure_traceback or "the policy failed") if self.engine.failed else None
 
     def step(self, robot, observation: dict[str, Any]) -> dict | None:
-        """Send the policy's next action. Returns what reached the arm, or None on a tick with none."""
+        """Send the policy's next action. Returns it as the policy gave it, before the step cap, when it
+        reached the arm, or None on a tick with none."""
         from lerobot.inference import commit_action, next_interpolated_action
         from lerobot.utils import OBS_STR
         from lerobot.utils.feature_utils import build_dataset_frame
 
-        self.proposed = None
         if self._processed is None or self.interpolator.needs_new_action():
             self._processed = self.observation_processor(observation)
             self.engine.notify_observation(self._processed)
@@ -203,11 +202,8 @@ class EngineDriver:
         if target is None:
             return None
         action = {key: target[i].item() for i, key in enumerate(self.action_keys)}
-        self.proposed = action
         goal = self.action_processor((action, observation))
-        sent: list[dict] = []
-        if not commit_action(self.engine, self.interpolator, lambda: sent.append(robot.send_action(goal)),
-                             hold=hold):
+        if not commit_action(self.engine, self.interpolator, lambda: robot.send_action(goal), hold=hold):
             return None
         self.engine.pump_query(processed)
-        return sent[0]
+        return action

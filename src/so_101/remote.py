@@ -63,7 +63,7 @@ def server_config(
     repo: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int, fps: int
 ) -> dict:
     """The policy server's config, describing the model's inputs and outputs. `image_sizes` is each
-    camera's (width, height), from `Task.image_sizes`."""
+    camera's (width, height), from `tasks.image_sizes`."""
     vector = {"dtype": "float32", "names": JOINTS, "semantics": SEMANTICS, "shape": [len(JOINTS)]}
     cameras = [
         {
@@ -141,6 +141,12 @@ def describe(job) -> str:
     )
 
 
+def _labels(task: str, policy_type: str, revision: str, action_steps: int) -> dict[str, str]:
+    """The job labels that say which model a server serves: `start_server` sets them, and
+    `require_server` matches them."""
+    return {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps)}
+
+
 def start_server(
     *, repo: str, task: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int,
     fps: int, target: str, timeout: str,
@@ -160,13 +166,7 @@ def start_server(
         secrets={"HF_TOKEN": get_token()},
         flavor=target,
         timeout=timeout,
-        labels={
-            "so101": SERVER_LABEL,
-            "task": task,
-            "policy": policy_type,
-            "revision": revision,
-            "action_steps": str(action_steps),
-        },
+        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps)},
         ssh=True,
     )
     print(f"Started job {job.id} on {target}. It bills until `uv run so101 server stop`, or {timeout} at most.")
@@ -229,7 +229,7 @@ def require_server(task: str, policy_type: str, revision: str, action_steps: int
     if server is None:
         sys.exit(f"No policy server is running. Start one first:\n  {start}")
     labels = server.labels or {}
-    wanted = {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps)}
+    wanted = _labels(task, policy_type, revision, action_steps)
     if {key: labels.get(key) for key in wanted} != wanted or server.status.stage != "RUNNING":
         sys.exit(f"The policy server isn't serving this model: {describe(server)}.\nStop it, then: {start}")
     return server

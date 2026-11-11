@@ -10,7 +10,7 @@ A phone's browser slows or stops a hidden page's timers, so the page also says w
 (the screen locked, or another app or tab in front): the link is lost at once, logged as
 `page_hidden`, and the polls heard before the report are dropped. Each poll says whether the page is
 visible, and only a visible page's polls count, so the link comes back with the first poll after the
-page is back in sight, even if the page's own "visible" report was lost on the way. A visible poll
+page is back in sight. A visible poll
 that reaches the server after the hide report can bring the link back early; the pause has already
 happened, and the next timeout loses the link again.
 """

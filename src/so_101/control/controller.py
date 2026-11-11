@@ -4,8 +4,6 @@ Other threads (the terminal reader and the control page's web server) only
 `submit` commands, report page polls with `heartbeat`, and read `status`. Each `tick` first applies
 the commands waiting since the last tick, then reads the arm and sends exactly one goal: the
 policy's action, the leader's pose in Teleop, the next step of a scripted move, or the hold target.
-It publishes the status once, at its end, and only then answers the commands it took, so a page's
-reply sees its command's effect.
 
 The controller keeps the loop, the commands and how the state machine's transitions are carried
 out. The parts it drives sit beside it, and are used only through it:
@@ -14,7 +12,7 @@ out. The parts it drives sit beside it, and are used only through it:
 - `leader`: the optional leader, connected while the arm rests or is paused, with Handover and the
   rewind's mirror.
 - `rewind`: the open attempt's history of follower poses, played backwards.
-- `attempt`: the open attempt, made when it opens and dropped when it closes.
+- `attempt`: one attempt, from when it opens until it closes, and the run's summary.
 - `commands`: taking commands in: what each takes, page control, dispatch and Space's toggle.
 - `tools`: Run checks and Check pose.
 - `status`: the status the page and the terminal read, built from the controller's state.
@@ -24,29 +22,10 @@ The follower, the policy driver and the clock are passed in, so tests run the co
 LeRobot's motor code over a fake bus, with a scripted engine. The recorder is passed in too, so
 tests write a run to a temporary directory, and so is `presence`, the device watch's latest answer.
 
-One page controls at a time (`link`). A page's first command, when no page controls, takes control;
-after that, other pages' commands are refused until one of them sends `take_control`. The terminal
-is never refused for lack of control: whoever is at the robot can always act. The
-controlling page's polls are the link's heartbeat. The loop, not the web server, judges the gap with
-its own clock: after `link_timeout_s` without one, it logs `link_lost` and, with
-`on_link_loss = "pause"`, pauses a running policy, or a move to the start pose that would start it.
-The next poll logs `link_restored`.
-
-The loop measures its own rate, and sheds camera previews when it falls behind (`shedding`). A step
-known to hold up the loop (saving an attempt, connecting the leader, Run checks) starts a new window,
-so it isn't reported as a slow loop and sheds no previews.
-
-Any error in a tick, whether reading or driving the arm, carrying out a command or the loop's own
-housekeeping, is a fault: the arm holds where it is, the attempt is saved there, and only Reset and
-Run checks are allowed. The loop never exits on an error. Reset waits until the follower answers
-again. Writing the event log is best-effort (`recorder`), so a full disk never stops the loop. With
-no attempt open, cameras aren't required: one that fails then is listed as missing, which refuses
-Resume, Rewind and Teleop, so the arm can still go to rest after a camera fault. A local policy that
-failed refuses Resume until the server restarts; a remote one reconnects in the background, and
-Resume works again once it has (`policy.EngineDriver.maintain`).
-
-Quitting never drops the arm mid-air: the rules are in `states`, which alone decides what is allowed.
-The controller keeps only the facts it needs: `quitting`, and when a pending confirmation lapses.
+Page control and the link are `link`'s; the loop judges the controlling page's polls with its own
+clock. The terminal is never refused for lack of control. The loop's rate and the previews it sheds
+are `shedding`'s. Faults and quitting follow AGENTS.md's invariants: `states` alone decides what is
+allowed, from the facts the controller gives it (`_facts`).
 """
 
 import contextlib
@@ -66,7 +45,7 @@ from so_101.control import rewind, status, wording
 from so_101.control.attempt import COUNTS, LIMITED, Attempt
 from so_101.control.commands import LABELS, Result, Toggle, intake
 from so_101.control.follower import Failure, Follower
-from so_101.control.leader import Leader, LeaderLost
+from so_101.control.leader import Handover, Leader, LeaderLost
 from so_101.control.link import Link
 from so_101.control.previews import Previews
 from so_101.control.recorder import OUTCOMES, Phase, Recorder
@@ -136,19 +115,8 @@ class Controller:
         `[control]` rest pose, already converted from raw steps with `pose_from_steps`. Without
         `start_pose` (no local demos), attempts start from wherever the arm is. `notify(message,
         state)` hears every message, with the new state when it announces one. `recorder` records the
-        run.
-
-        `control` is so101.toml's `[control]` section, as `settings.load()` gives it. After
-        `attempt_limit_s` seconds of policy driving in one attempt, the attempt ends with
-        `time_limit` and asks for its outcome at rest; likewise after `human_limit_s` seconds of
-        Teleop. `teleop_from_rest` is "start-pose" to drive to the start pose before handing over
-        from rest, or "rest" to hand over where the arm rests. Each Rewind plays back `rewind_s`
-        seconds of the follower's measured motion, newest first. When the controlling page hasn't
-        polled (`heartbeat`) for `link_timeout_s` seconds, the link is lost: with `on_link_loss`
-        "pause" a running policy pauses, and so does a move to the start pose that would start it;
-        with "continue" it is only logged. With a `preview_fps`
-        above 0, the loop hands its camera frames to `previews` at that rate for the control page,
-        and sheds them when it falls behind: half the rate, then none.
+        run. `control` is so101.toml's `[control]` section, as `settings.load()` gives it; so101.toml
+        says what each setting does.
 
         `leader()` makes a new, unconnected LeRobot leader (SO101Leader) in the follower's units. It
         is called whenever the leader is to be connected: while the arm rests or is paused, the watch
@@ -167,7 +135,6 @@ class Controller:
 
         `rest_pose` must name exactly the follower's motors, or `at_rest` would never check a joint
         it left out: `check.check_control` refuses any other before `so101-control` connects."""
-        self.robot = robot
         self.recorder = recorder
         self.operator = operator
         self.policy = policy
@@ -195,7 +162,7 @@ class Controller:
         self._open: Attempt | None = None  # the open attempt: from OPEN_ATTEMPT until it is saved or discarded
         # The attempt closed last, kept so the page still shows how it went and a later outcome can label it.
         self._closed: Attempt | None = None
-        self._attempts: list[dict] = []  # each closed attempt's record, for the run's summary
+        self._attempts: list[Attempt] = []  # the closed attempts that were saved, for the run's summary
         self._move: rollout.Move | None = None
         self._rewind: Rewind | None = None
         self._fault_error: str | None = None
@@ -203,7 +170,7 @@ class Controller:
         self._disk: str | None = None  # why a new attempt can't be recorded, as last read
         self._disk_read_at: float | None = None
         self._disk_warned = False
-        self._prompt: dict | None = None
+        self._prompt: int | None = None  # the attempt a time limit ended, while it waits for its outcome
         self._told_dropped = False  # the operator has been told the video encoder dropped frames
         # The last fault saved an attempt (`_closed`), until Reset leaves Fault: an outcome given with
         # that Reset labels it.
@@ -227,21 +194,8 @@ class Controller:
         """Queue a command for the next tick. The future resolves to its Result once applied.
         `source` (terminal, page or signal) is recorded with it. A page's command needs `client`, the
         id the page made for itself, and `who`, how the status and events name its caller (a
-        Tailscale login, "this Mac" or an IP address): one that doesn't control the robot
-        is refused, unless no page does. `take_control` makes the page the one in control. Quit and
-        `exit_here` follow the rules in `states`; a page's Quit is refused.
-
-        Reset takes `outcome`: succeeded, failed or ignored. Without one the attempt is unlabelled.
-        The page's Reset sheet and the terminal's prompt also send `for_attempt`, the attempt they asked
-        about: a Reset meant for any attempt but the open one, or the one a fault just ended, is refused.
-        In Fault, an outcome labels the attempt the fault saved; where there is no attempt to label (the
-        fault saved none, or none is open), a Reset with an outcome is refused.
-        `outcome` takes it too, and answers the status's `prompt` after a time limit. `label` takes
-        `label`, one of LABELS: why the operator stepped in last. A command with any other option
-        is refused, and the option isn't logged.
-
-        `toggle` (the page's Space) becomes Pause or Resume when the loop applies it, and the
-        Result names which.
+        Tailscale login, "this Mac" or an IP address). The commands, their options, page control and
+        `toggle` are in `commands`; when a Reset's outcome is refused is `states._reset`'s.
         """
         future: Future = Future()
         self._commands.put((command, source, client, who, options, future))
@@ -407,16 +361,10 @@ class Controller:
 
     def _check_link(self) -> None:
         """Hear the controlling page's polls since the last tick, or lose the link after
-        `link_timeout_s` without one. With on_link_loss "pause", a running policy pauses, and so does
-        a move to the start pose that would start it."""
-        if self.link.check(self._driving):
+        `link_timeout_s` without one. With on_link_loss "pause", what the state machine pauses on a
+        lost link (`states._link_lost`) pauses."""
+        if self.link.check(step(self._state, Event.LINK_LOST, self._facts()).accepted):
             self._apply(Event.LINK_LOST)
-
-    @property
-    def _driving(self) -> bool:
-        """The policy drives, or the arm moves to the start pose to start it: what a lost link pauses."""
-        return self._state is State.AUTONOMOUS or (
-            self._state is State.STARTING and self._open is not None and not self._open.teleop_next)
 
     def _drive_tick(self, seconds: float) -> None:
         observation = self._follower.observe(self._open is not None)
@@ -460,12 +408,11 @@ class Controller:
         arm, present = self._follower.arm, self._follower.present
         if self._state is State.AUTONOMOUS:
             try:
-                sent = self.policy.step(arm, observation)
+                return Driven(policy_action=self.policy.step(arm, observation))
             except Exception as error:
                 if self._follower.blame(error) is None:  # the policy's side failed, not a goal to the arm
                     self.policy.raised = traceback.format_exc()  # Resume is refused from now on
                 raise
-            return Driven(policy_action=self.policy.proposed if sent is not None else None)
         if self._state is State.TELEOP:
             pose = self.leader.read()
             arm.send_action(pose)  # through max_relative_target, like every goal
@@ -477,7 +424,7 @@ class Controller:
             return Driven(leader_pose=self.leader.follow_mirror(arm.goal), event=_move_event(arrived))
         self.policy.hold(arm)
         if self._state is State.HANDOVER:
-            arrived = self.leader.step_handover(present)
+            arrived = self.leader.handover.step(present)
             return Driven(leader_pose=self.leader.handover.pose, event=_move_event(arrived))
         return Driven()
 
@@ -622,9 +569,6 @@ class Controller:
         closed.outcome = outcome
         self.recorder.event("outcome", attempt=closed.number, outcome=outcome, episode=closed.episode,
                             operator=self.operator)
-        for record in self._attempts:
-            if record["attempt"] == closed.number:
-                record["outcome"] = outcome
         self._say(f"Attempt {closed.number} labelled {outcome}.")
 
     def _answer(self, options: dict) -> Result:
@@ -690,7 +634,7 @@ class Controller:
         if self._state is not before:
             self._say(wording.announcement(self, ended_by, no_attempt), self._state.value)
         if self._prompt is not None and Action.CLOSE_ATTEMPT in transition.actions:
-            self._say(self._prompt["question"])
+            self._say(wording.ASK_OUTCOME.format(attempt=self._prompt))
         if Action.CONFIRM_QUIT in transition.actions:
             self._say(wording.confirm_message(self, announced=self._state is not before))
         if failure is not None:
@@ -728,7 +672,7 @@ class Controller:
                 self.leader.handover = None  # the leader holds where it was last sent, motors on
             case Action.START_HANDOVER:
                 self._move = None
-                self.leader.start_handover(self.fps)
+                self.leader.handover = Handover(self.leader, self.fps, self.clock)
             case Action.FREE_LEADER:
                 self._log_handover()
                 self.leader.handover = None
@@ -796,15 +740,16 @@ class Controller:
         finally:
             if attempt is not None:
                 self._open, self._closed = None, attempt
+                attempt.history = None  # nothing rewinds a closed attempt
             self._held_up()
 
     def _save_attempt(self, attempt: Attempt) -> None:
         """A save that fails sets the recorder's `failure`, which refuses new attempts: say why. An
-        attempt whose save failed is lost: the status shows it as not saved, the run's summary leaves
-        it out, and no outcome is asked for it."""
+        attempt with no episode, because its save failed or it had no frames, is lost: the status shows
+        it as not saved, the run's summary leaves it out, and no outcome is asked or taken for it."""
         failure = self.recorder.failure
         limit = {"limit": attempt.limit_hit, "limit_s": getattr(self.control, attempt.limit_hit)} \
-            if attempt.ended_by == "time_limit" and attempt.limit_hit is not None else {}
+            if attempt.ended_by == "time_limit" else {}
         attempt.episode = episode = self.recorder.save_attempt(attempt.ended_by, attempt.outcome,
                                                                operator=self.operator, **limit)
         if episode is not None and (dropped := self.recorder.dropped) and not self._told_dropped:
@@ -814,18 +759,15 @@ class Controller:
                       "its video doesn't line up with the arm's data. It's saved, but builds leave it out, and any "
                       "later attempt that drops frames too. Lighten the Mac's load: close other apps, or lower "
                       "preview_fps under [control] in so101.toml. This is said once per run.")
-        lost = False
         if (now_failing := self.recorder.failure) and now_failing != failure:
-            self._say(now_failing)
-            lost = episode is None  # else the episode was saved, and only reopening the dataset failed
-        if lost:
+            self._say(now_failing)  # with an episode, it was saved, and only reopening the dataset failed
+        if episode is None:
             return
-        self._attempts.append(attempt.record())
+        self._attempts.append(attempt)
         if attempt.ended_by == "fault":
             self._faulted = True
         if attempt.ended_by == "time_limit" and attempt.outcome is None:
-            self._prompt = {"attempt": attempt.number, "question": wording.ASK_OUTCOME.format(attempt=attempt.number),
-                            "options": list(OUTCOMES)}
+            self._prompt = attempt.number
 
     def _end_rewind(self, cause: str) -> None:
         """Log what a rewind undid, and leave the history's newest moment as where it ended."""

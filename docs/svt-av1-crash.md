@@ -39,7 +39,7 @@ LeRobot encodes each camera's video with SVT-AV1, through PyAV, on one encoder t
 
 ## The fix
 
-`svtsem.c` replaces `dispatch_semaphore_create` through dyld's `__interpose` section.
+`svtsem.c` replaces `dispatch_semaphore_create` through dyld's `__interpose` section. It's this repo's own code, written from commit 049193fc; SVT-AV1 publishes no such shim.
 
 - **What it changes.** For a creation with a count above 0 whose caller is in `libSvtAv1Enc`, it creates the semaphore at 0 and signals it up to the count, as commit 049193fc does. Every other call passes straight through. Calls made from the shim itself are never interposed, so its inner `dispatch_semaphore_create` is the real one.
 - **What it touches.** SVT-AV1 3.0.0 imports only `dispatch_semaphore_create`, `_signal`, `_wait` and `dispatch_release`. Only one of its semaphores starts above 0, so the shim rewrites one semaphore per encoder. The tests check exactly that, through a counter the shim exports.
@@ -53,7 +53,7 @@ LeRobot encodes each camera's video with SVT-AV1, through PyAV, on one encoder t
   - The preflight checks of `record`, its dry run, `run` and `serve` fail unless it's loaded, through `check.check_video`.
   - `tests/fakes.py` calls `ensure()`, so the recorder and build tests run with it.
 - **Why it can load at all.** uv's Python (`cpython-3.13.14`) is ad-hoc signed without the hardened runtime (`codesign -dv`: `flags=0x20002(adhoc,linker-signed)`), so dyld honours `DYLD_INSERT_LIBRARIES`. A hardened-runtime Python would ignore it, and the checks would then fail rather than run unprotected.
-- **Child processes.** This venv's Python processes inherit the variable, so the LeRobot commands `so101` starts, and their worker processes, load the shim too. Every other program is started with `svtshim.other_env()`, which leaves the shim out. Three cases matter:
+- **Child processes.** This venv's Python processes inherit the variable, so the LeRobot commands `so101` starts, and their worker processes, load the shim too. Every other program `so101` starts (`git`, `ssh`, `caffeinate`, `tailscale`, `uvc-util`, `cc`) is started with `svtshim.other_env()`, which leaves the shim out. Three cases matter:
   - **SIP off.** macOS's own programs (`git`, `ssh`, `caffeinate`, `cc`, `/bin/sh`) are arm64e. With System Integrity Protection off, as on GitHub's macOS runners, dyld refuses to start one with the arm64 shim inserted ("incompatible architecture (have 'arm64', need 'arm64e')"). The first CI run failed this way, when `cc` was started from a test process with the shim loaded.
   - **SIP on, the default.** macOS strips `DYLD_*` variables from its own programs anyway, so a Python started through `/bin/sh` runs without the shim, and its checks fail.
   - **The guard.** `tests/test_svtshim.py` checks that every subprocess call in `src/` passes `env=` unless it starts this venv's Python. A program that LeRobot or a library starts from inside a shim-loaded process isn't covered: with SIP off, an arm64e one would fail to start.

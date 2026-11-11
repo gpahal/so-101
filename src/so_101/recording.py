@@ -24,8 +24,8 @@ def record_args(
     display: bool,
 ) -> list[str]:
     """Arguments for lerobot-record. `cameras` are the task's cameras, with their current indices."""
-    args = [
-        *s.follower.lerobot_args(),
+    return [
+        *s.follower_args(),
         cameras_arg([cam.lerobot_spec() for cam in cameras]),
         *s.leader.lerobot_args(),
         f"--dataset.repo_id={repo_id}",
@@ -42,15 +42,6 @@ def record_args(
         "--dataset.rgb_encoder.preset=10",  # SVT-AV1 has no preset above 10; the default of 12 warns per episode
         f"--display_data={str(display).lower()}",
     ]
-    if s.teleop.max_relative_target:
-        args.append(f"--robot.max_relative_target={s.teleop.max_relative_target}")
-    return args
-
-
-def task_cameras(s: Settings, task: Task, found: list[Camera]) -> list[Camera]:
-    """The task's cameras, as found by the checks."""
-    by_name = {cam.name: cam for cam in found}
-    return [by_name.get(name, s.camera(name)) for name in task.cameras]
 
 
 def _git(s: Settings, *args: str) -> str:
@@ -117,7 +108,7 @@ def run_manifest(
 ) -> dict:
     """Everything a `so101 serve` run ran with: a session's record, plus how the arm was driven and
     `policy`: its type, repo, revision, commit, action steps, and whether it ran here or remotely. For a
-    remote run, `so101-control` adds the checkpoint the server admitted it to (`main.with_checkpoint`)."""
+    remote run, `so101-control` adds the checkpoint the server admitted it to (`artifact_identity`)."""
     manifest = session_manifest(s, task, cameras, report, note="")
     # run.json is never changed after the start, so it holds no finish time or attempt count: the
     # `run_end` event at the end of events.jsonl has them.

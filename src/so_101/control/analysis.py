@@ -75,7 +75,7 @@ import numpy as np
 from so_101.control.recorder import OUTCOMES, Phase
 from so_101.control.states import STEP_INS
 from so_101.data import LABELS_FILE, Run, whole
-from so_101.settings import ConfigError
+from so_101.settings import ConfigError, replace_file
 UNLABELLED = "unlabelled"
 
 POLICY, HUMAN, SCRIPT = "policy", "human", "script"
@@ -252,12 +252,10 @@ class Attempt:
 
 @dataclass(frozen=True)
 class RunAnalysis:
-    run: str  # the run's folder name, YYYYmmdd-HHMMSS
-    folder: Run  # where the run's files are
+    folder: Run  # where the run's files are; its name is YYYYmmdd-HHMMSS
     fps: float
     attempts: tuple[Attempt, ...]
     notes: tuple[str, ...]  # what couldn't be read, one line each
-    skipped: tuple[Path, ...] = ()  # data files that couldn't be read, whose episodes are left out
 
     @property
     def counted(self) -> tuple[Attempt, ...]:
@@ -392,10 +390,7 @@ def save_labels(run: Run, labels: Labels) -> None:
     for (attempt, frame), suspect in sorted(labels.suspects.items()):
         frames = f"[{suspect[0]}, {suspect[1]}]" if suspect else "[]"
         lines.append(f"\n[[interruption]]\nattempt = {attempt}\nframe = {frame}\nsuspect = {frames}\n")
-    path = run.labels_path
-    tmp = path.with_suffix(".toml.tmp")
-    tmp.write_text("".join(lines))
-    tmp.replace(path)
+    replace_file(run.labels_path, "".join(lines))
 
 
 # --- Reading a run --------------------------------------------------------------------------------
@@ -442,36 +437,10 @@ class Frames:
     waiting: np.ndarray  # an Autonomous frame whose control.policy_action is all NaN
     leaderless: np.ndarray  # a Teleop frame whose control.leader is all NaN
 
-    @classmethod
-    def empty(cls) -> "Frames":
-        return cls(np.zeros(0, dtype=np.int8), np.zeros(0, dtype=bool), np.zeros(0, dtype=bool))
-
 
 def _no_values(column) -> np.ndarray:
     """Per row, whether the vector is all NaN: nothing was recorded there."""
     return np.array([bool(np.isnan(np.asarray(v, dtype=float)).all()) for v in column], dtype=bool)
-
-
-def read_frames(run: Run) -> tuple[float | None, dict[int, Frames], list[tuple[Path, str]]]:
-    """The dataset's fps, each episode's frames, and the data files that couldn't be read, each with
-    why."""
-    if (info := run.info()) is None:
-        return None, {}, []
-    fps = float(info["fps"])
-    table, skipped = read_data(run.dataset_root, ["episode_index", "frame_index", "control.phase",
-                                                  "control.policy_action", "control.leader"])
-    if table is None:
-        return fps, {}, skipped
-    episodes = {}
-    for episode, rows in table.groupby("episode_index"):
-        rows = rows.sort_values("frame_index")
-        phases = np.array([int(np.ravel(p)[0]) for p in rows["control.phase"]], dtype=np.int8)
-        episodes[int(episode)] = Frames(
-            phases,
-            (phases == Phase.AUTONOMOUS) & _no_values(rows["control.policy_action"]),
-            (phases == Phase.TELEOP) & _no_values(rows["control.leader"]),
-        )
-    return fps, episodes, skipped
 
 
 @dataclass(frozen=True)
@@ -488,9 +457,21 @@ class RunRecord:
 
 def read_run(run: Run) -> RunRecord:
     """Read a run's events and its dataset's frames, once."""
-    events = read_events(run)
-    fps, episodes, skipped = read_frames(run)
-    return RunRecord(run, tuple(events), fps, episodes, tuple(skipped))
+    events = tuple(read_events(run))
+    if (info := run.info()) is None:
+        return RunRecord(run, events, None, {}, ())
+    table, skipped = read_data(run.dataset_root, ["episode_index", "frame_index", "control.phase",
+                                                  "control.policy_action", "control.leader"])
+    episodes = {}
+    for episode, rows in () if table is None else table.groupby("episode_index"):
+        rows = rows.sort_values("frame_index")
+        phases = np.array([int(np.ravel(p)[0]) for p in rows["control.phase"]], dtype=np.int8)
+        episodes[int(episode)] = Frames(
+            phases,
+            (phases == Phase.AUTONOMOUS) & _no_values(rows["control.policy_action"]),
+            (phases == Phase.TELEOP) & _no_values(rows["control.leader"]),
+        )
+    return RunRecord(run, events, float(info["fps"]), episodes, tuple(skipped))
 
 
 def segments_of(phases: np.ndarray) -> tuple[Segment, ...]:
@@ -547,7 +528,7 @@ def analyse_record(record: RunRecord, labels: Labels, blame_s: float) -> RunAnal
             notes.append(f"attempt {number}'s episode {episode} isn't in the dataset")
             episode = None
         if frames is None:
-            frames = Frames.empty()
+            frames = Frames(np.zeros(0, dtype=np.int8), np.zeros(0, dtype=bool), np.zeros(0, dtype=bool))
         if episode is not None and (dropped := (end or {}).get("dropped_frames")):
             counts = ", ".join(f"{camera} {n}" for camera, n in dropped.items())
             notes.append(f"attempt {number} dropped video frames when it was recorded ({counts}), so its video and "
@@ -562,8 +543,7 @@ def analyse_record(record: RunRecord, labels: Labels, blame_s: float) -> RunAnal
               if n not in numbers]
     notes += [f"{LABELS_FILE} names an interruption at attempt {a} frame {f}, which this run doesn't have"
               for a, f in sorted(labels.suspects) if (a, f) not in interruptions]
-    return RunAnalysis(run.name, run, fps, tuple(attempts), tuple(notes),
-                       tuple(path for path, _ in skipped))
+    return RunAnalysis(run, fps, tuple(attempts), tuple(notes))
 
 
 def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame_s, labels) -> Attempt:
@@ -760,7 +740,7 @@ def export_failure_fixes(analyses: list[RunAnalysis], path: Path) -> int:
                     return {"frames": [start, stop], "seconds": round((stop - start) / analysis.fps, 2),
                             "observation.state": state[start:stop].tolist(), "action": action[start:stop].tolist()}
 
-                record = {"run": analysis.run, "attempt": pair.attempt, "episode": pair.episode,
+                record = {"run": analysis.folder.name, "attempt": pair.attempt, "episode": pair.episode,
                           "dataset": str(root), "fps": analysis.fps,
                           "failure": part(*pair.failure), "fix": part(*pair.fix.range)}
                 out.write(json.dumps(record) + "\n")

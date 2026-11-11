@@ -169,11 +169,7 @@ def _tailscale(*args: str) -> str | None:
 
 def tailscale_ip() -> str | None:
     """This computer's Tailscale IPv4 address, or None when Tailscale isn't running or no CLI exists."""
-    return _first_tailscale((_tailscale("ip", "-4") or "").split())
-
-
-def _first_tailscale(words: list[str]) -> str | None:
-    for word in words:
+    for word in (_tailscale("ip", "-4") or "").split():
         try:
             if ipaddress.ip_address(word) in TAILSCALE_NET:
                 return word
@@ -247,7 +243,7 @@ def resolve_bind(control) -> Bind:
     # A CLI that's absent means no route can exist. A status that can't be read (a stopped tailscaled,
     # a timeout) is read as no routes here too, but not for long: `ControlServer.start` checks again,
     # and on 127.0.0.1 refuses every request until a check reads it.
-    found, routes = serve_routes(_tailscale("serve", "status", "--json") or "", control.port)
+    found, routes = serve_routes(_tailscale("serve", "status", "--json") or "", control.port) or (None, [])
     warnings: list[str] = []
     if control.bind == "tailscale":
         unsafe = [route for route in routes if route.tcp or route.funnel]
@@ -275,25 +271,26 @@ def route_warning(bind: Bind, port: int) -> str | None:
     tailscaled didn't answer): "no routes" then would lift a refusal while the route may still be there."""
     if bind.address != LOOPBACK:
         return None
-    out = _tailscale("serve", "status", "--json") or ""
-    if not _is_status(out):
+    if (status := serve_routes(_tailscale("serve", "status", "--json") or "", port)) is None:
         raise RuntimeError("Tailscale gave no `tailscale serve status --json` to read.")
-    risky = [route for route in serve_routes(out, port)[1] if route.tcp or (bind.https and route.funnel)]
+    risky = [route for route in status[1] if route.tcp or (bind.https and route.funnel)]
     return " ".join(ROUTE_APPEARED.format(route=route, fix=route.fix) for route in risky) or None
 
 
-def serve_routes(out: str, port: int) -> tuple[str | None, list[Route]]:
+def serve_routes(out: str, port: int) -> tuple[str | None, list[Route]] | None:
     """From `tailscale serve status --json` output: the HTTPS host and port whose root proxies to
     localhost:`port` or 127.0.0.1:`port`, with port 443 left off, as a browser leaves it off, or None;
     and every route to the port. Background and foreground (`Foreground`) sessions count alike. A
-    route whose port Serve offers over plain HTTP isn't HTTPS. Output that isn't the status Tailscale
-    prints gives (None, [])."""
+    route whose port Serve offers over plain HTTP isn't HTTPS. None for output that isn't a JSON
+    object, as Tailscale's status always is (`{}` with no routes): the status couldn't be read."""
     try:
         status = json.loads(out)
     except ValueError:
-        return None, []
+        return None
+    if not isinstance(status, dict):
+        return None
     # `tailscale serve` run in the foreground keeps its routes under Foreground, one config per session.
-    configs = [status, *_dict(_dict(status).get("Foreground")).values()]
+    configs = [status, *_dict(status.get("Foreground")).values()]
     found, routes = None, []
     for config in map(_dict, configs):
         public = _dict(config.get("AllowFunnel"))
@@ -318,14 +315,6 @@ def serve_routes(out: str, port: int) -> tuple[str | None, list[Route]]:
                     and _dict(tcp.get(hostport.rsplit(":", 1)[-1])).get("HTTPS") is True):
                 found = hostport.lower().removesuffix(":443")
     return found, routes
-
-
-def _is_status(out: str) -> bool:
-    """Whether `out` reads as `tailscale serve status --json` output: a JSON object, `{}` with no routes."""
-    try:
-        return isinstance(json.loads(out), dict)
-    except ValueError:
-        return False
 
 
 def _dict(value) -> dict:
@@ -362,11 +351,12 @@ class ControlServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, bind: Bind, port: int, *, task: str,
-                 routes: Callable[[], str | None] | None = None) -> None:
+                 routes: Callable[[], str | None]) -> None:
         """Binds now, so a port in use fails before the arm and policy load. Set `controller` before
         `start`. `bind` is where to listen, from `resolve_bind`: the page's status shows its
-        warnings. `routes()`, when given, is asked every ROUTES_EVERY_S on a thread of its own, never
-        the control loop's, what makes a request without a login unsafe (`route_warning`)."""
+        warnings. `routes()` is asked before the first request and every ROUTES_EVERY_S on a thread
+        of its own, never the control loop's, what makes a request without a login unsafe
+        (`route_warning`)."""
         super().__init__((bind.address, port), Handler)
         self.controller = None
         self.task = task
@@ -404,8 +394,7 @@ class ControlServer(ThreadingHTTPServer):
         self._first_route_check()
         self._thread = threading.Thread(target=self.serve_forever, name="control-page", daemon=True)
         self._thread.start()
-        if self.routes is not None:
-            threading.Thread(target=self._watch_routes, name="control-page-routes", daemon=True).start()
+        threading.Thread(target=self._watch_routes, name="control-page-routes", daemon=True).start()
 
     def stop(self) -> None:
         self._stopping.set()
@@ -417,8 +406,6 @@ class ControlServer(ThreadingHTTPServer):
         """Check the routes once before the first request is served. `resolve_bind` read an unreadable
         status as no routes, so with a CLI installed the page refuses every request until a check
         reads it. With no CLI there's no Tailscale, and no route can exist."""
-        if self.routes is None:
-            return
         try:
             warning = self.routes()
         except Exception:

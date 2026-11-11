@@ -164,7 +164,6 @@ class Recorder:
         *,
         fps: int,
         task: str,
-        repo_id: str = "local/so101_run",
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Create `dataset/` and `events.jsonl` in the run's `folder`. `robot` gives the columns; `task` is
@@ -180,14 +179,13 @@ class Recorder:
         self.clock = clock
         self.started = clock()
         self.joints = list(robot.action_features)
-        self._repo_id = repo_id
         self._writing = {
             "streaming_encoding": True,
             "encoder_threads": 2,
             "rgb_encoder": RGBEncoderConfig(preset=10),  # SVT-AV1 has no preset above 10; the default of 12 warns
         }
         self.dataset = LeRobotDataset.create(
-            repo_id, fps, features(robot), root=folder.dataset_root, robot_type=robot.robot_type,
+            folder.repo_id, fps, features(robot), root=folder.dataset_root, robot_type=robot.robot_type,
             **self._writing,
         )
         self._events = folder.events_path.open("a", encoding="utf-8")
@@ -334,7 +332,7 @@ class Recorder:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
         try:
-            self.dataset = LeRobotDataset.resume(self._repo_id, root=self.folder.dataset_root, **self._writing)
+            self.dataset = LeRobotDataset.resume(self.folder.repo_id, root=self.folder.dataset_root, **self._writing)
         except Exception as error:  # the episode was saved; only the next attempt can't be recorded
             self.failure = (f"The run's dataset couldn't be reopened after episode {self.saved - 1} "
                             f"({type(error).__name__}: {error}), so no new attempt can be recorded. Restart "

@@ -17,7 +17,7 @@ from so_101.control import analysis
 from so_101.control.analysis import Attempt, Interruption, Labels, RunAnalysis, RunRecord
 from so_101.control.recorder import Phase
 from so_101.review import ask, view
-from so_101.settings import Settings
+from so_101.settings import ConfigError, Settings
 from so_101.tasks import Task
 
 HELP = """\
@@ -150,10 +150,21 @@ def show_interruption(attempt: Attempt, i: Interruption, n: int, fps: float) -> 
     print(*timeline(attempt, i, fps), sep="\n")
 
 
+def refuse_unknown(run: data.Run, labels: Labels) -> Labels:
+    """A save rewrites the whole labels.toml, so refuse a file with a top-level key review --runs
+    doesn't know, rather than drop it. Returns `labels`."""
+    if labels.unknown:
+        keys = ", ".join(repr(key) for key in labels.unknown)
+        raise ConfigError(f"{run.labels_path} has keys review --runs doesn't know: {keys}. A save rewrites the "
+                          "whole file and would drop them, so review --runs saves nothing to it: fix or remove "
+                          "them, then run review --runs again.")
+    return labels
+
+
 def apply(run: data.Run, decision: Suspect | str, attempt: Attempt, i: Interruption | None) -> Labels:
     """Write one decision, a `Suspect` or an outcome, to the run's labels.toml, keeping every other
     one, and return the labels as written."""
-    labels = analysis.load_labels(run)
+    labels = refuse_unknown(run, analysis.load_labels(run))  # again: the file may have changed since
     outcomes, suspects = dict(labels.outcomes), dict(labels.suspects)
     if isinstance(decision, str):
         outcomes[attempt.number] = None if decision == analysis.UNLABELLED else decision
@@ -185,13 +196,13 @@ def review_runs(s: Settings, task: Task, only: str | None, everything: bool, vie
     unviewable: set[str] = set()
     for run in runs:
         record = records[run.name] = analysis.read_run(run)
-        labels = analysis.load_labels(run)
+        labels = refuse_unknown(run, analysis.load_labels(run))  # before any review, not at its first save
         a = analysis.analyse_record(record, labels, blame_s)
         for note in a.notes:
             print(f"{run.name}: note: {note}")
-        if a.skipped:
+        if record.skipped:
             unviewable.add(run.name)
-            files = ", ".join(str(path.relative_to(run.path)) for path in a.skipped)
+            files = ", ".join(str(path.relative_to(run.path)) for path, _ in record.skipped)
             print(f"{run.name}: note: the viewer loads every data file of a run, so it can't open this run's attempts "
                   f"until {files} is removed or repaired; they're reviewed here without it.")
         for attempt in a.attempts:

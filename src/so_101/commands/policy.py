@@ -1,8 +1,6 @@
 """The checks and LeRobot arguments `so101 run` and `so101 serve` share."""
 
 import argparse
-import json
-import os
 import sys
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -10,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from so_101 import data, remote, rollout, settings, tasks
+from so_101 import remote, settings, tasks
 from so_101.check import preflight
 from so_101.console import run_lerobot
 from so_101.report import Report
@@ -28,14 +26,15 @@ class PolicySetup:
     server: object | None  # the running policy server's job, with --remote
     sizes: dict[str, tuple[int, int]]  # each camera's (width, height), as the checkpoint was trained
     arms: tuple[settings.ArmName, ...]  # the arms the checks covered
-    found: list  # the cameras the checks found, with their current indices
+    found: list  # the task's cameras, in order, as the checks found them, with their current indices
     report: Report
     checkpoint: Path | None  # the local checkpoint; None with a remote server
     args: list[str]  # the strategy, policy, robot and camera arguments, and the step cap
 
     def steps_line(self, s: settings.Settings) -> str:
-        n = self.action_steps
-        return f"Predicts every {n} steps ({n / self.task.fps:.1f} s), limit {s.teleop.max_relative_target:g} per step."
+        n, cap = self.action_steps, s.teleop.max_relative_target
+        limit = f"limit {cap:g} per step" if cap else "no per-step limit"
+        return f"Predicts every {n} steps ({n / self.task.fps:.1f} s), {limit}."
 
     def run(self, command: str, args: list[str], log_path: Path | None, summary: Callable[[], None]) -> NoReturn:
         """Run `command` through the SSH tunnel to the remote server, if any, then call `summary`, say
@@ -68,11 +67,12 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
     stop`, so it's never done here. With `serving`, for `serve`, the leader is checked too when it's
     plugged in, and its failures are only warnings, since only Teleop needs it, and the checks also
     fail on a bad rest pose or `[control]` setting."""
-    action_steps = resolve_action_steps(s, ns, task.policy_config(ns.revision, ns.policy))
+    config = task.policy_config(ns.revision, ns.policy)
+    action_steps = resolve_action_steps(ns.action_steps, config)
     server = remote.require_server(task.name, ns.policy, ns.revision or "main", action_steps) if ns.remote else None
 
     # Capture each camera at the size the checkpoint was trained on.
-    sizes = task.image_sizes(ns.revision, ns.policy)
+    sizes = tasks.image_sizes(config)
     if set(sizes) != set(task.cameras):
         repo = task.policy_for(ns.policy)
         sys.exit(f"{repo} expects cameras {sorted(sizes)}, but the task records {sorted(task.cameras)}.")
@@ -87,8 +87,7 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
                               cameras=[s.camera(name) for name in task.cameras],
                               control="FAIL" if serving else None, teleop_only=("leader",) if serving else (),
                               video=True)
-    by_name = {cam.name: cam for cam in found}
-    specs = [by_name[name].lerobot_spec(width=sizes[name][0], height=sizes[name][1]) for name in task.cameras]
+    specs = [cam.lerobot_spec(width=sizes[cam.name][0], height=sizes[cam.name][1]) for cam in found]
     checkpoint = None if server else task.download_policy(ns.revision)
     args = [
         f"--strategy.type={'base' if serving else 'episodic'}",
@@ -98,34 +97,20 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
             if server
             else [f"--policy.path={checkpoint}", f"--policy.n_action_steps={action_steps}"]
         ),
-        *s.follower.lerobot_args(),
+        *s.follower_args(),
         cameras_arg(specs),
         f"--fps={task.fps}",
         *([] if server else [f"--device={s.run.device}"]),
-        *([f"--robot.max_relative_target={s.teleop.max_relative_target}"] if s.teleop.max_relative_target else []),
     ]
     return PolicySetup(task, action_steps, server, sizes, arms, found, report, checkpoint, args)
 
 
-def describe_pose(pose: dict[str, float]) -> str:
-    """Each joint's position, in order, comma-separated."""
-    return ", ".join(f"{v:g}" for v in pose.values())
-
-
-def set_start_pose(s: settings.Settings, task: tasks.Task) -> str | None:
-    """Pass the demos' start pose to `so101-rollout`, if there are local demos, and describe it."""
-    if start_pose := data.demo_start_pose(s, task):
-        os.environ[rollout.START_POSE_ENV] = json.dumps(start_pose)
-        return describe_pose(start_pose)
-    return None
-
-
-def resolve_action_steps(s: settings.Settings, ns: argparse.Namespace, config: dict) -> int:
+def resolve_action_steps(requested: int | None, config: dict) -> int:
     """How many actions to carry out per prediction: at least 1, and no more than the model predicts.
 
-    Without --action-steps, uses the value the model was trained with.
+    Without a `requested` number (--action-steps), uses the value the model in `config` was trained with.
     """
-    steps = ns.action_steps
+    steps = requested
     if steps is None:
         steps = config.get("n_action_steps", config.get("chunk_size"))
     if steps is None:
