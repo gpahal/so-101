@@ -1,0 +1,967 @@
+"""The controller, driven through its public interface: submit a command, advance a tick, read the status.
+
+Assertions are on the goals the fake follower and leader receive, the torque the fake leader's bus
+sees, the status, command results and the files a run writes.
+"""
+
+import contextlib
+import errno
+import io
+import itertools
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+import pandas as pd
+from fakes import (MOTORS, DeadStream, FakeClock, FullDisk, NoRecorder, control, make_engine, make_follower,
+                   make_leader)
+
+from so_101 import rollout
+from so_101.control.commands import Result
+from so_101.control.controller import Controller
+from so_101.control.follower import pose_from_steps
+from so_101.control.policy import EngineDriver
+from so_101.control.recorder import Phase, Recorder
+from so_101.control.terminal import KeyReader
+from so_101.data import Run
+from so_101.report import Report
+
+FPS = 30
+# The arm starts at rest, folded: raw motor steps, as `so101 pose --save-rest` saves them.
+REST_STEPS = {
+    "shoulder_pan": 2048, "shoulder_lift": 900, "elbow_flex": 3100,
+    "wrist_flex": 2600, "wrist_roll": 2048, "gripper": 1000,
+}
+# The demos' start pose, in degrees (gripper 0-100), as `data.demo_start_pose` gives it.
+START_POSE = {
+    "shoulder_pan.pos": 0.0, "shoulder_lift.pos": -40.0, "elbow_flex.pos": 40.0,
+    "wrist_flex.pos": 30.0, "wrist_roll.pos": 0.0, "gripper.pos": 10.0,
+}
+# The policy sweeps the pan and wrist from the start pose, half a degree per action.
+POLICY_ACTIONS = [
+    [START_POSE[k] + (0.5 * i if k in ("shoulder_pan.pos", "wrist_flex.pos") else 0.0) for k in START_POSE]
+    for i in range(1, 300)
+]
+# For rewinding: the policy sweeps the pan and wrist 0.3 degrees per action, and opens the gripper
+# 0.15 units per action, so a rewind has the gripper to retrace too.
+SWEEP = {"shoulder_pan.pos": 0.3, "wrist_flex.pos": 0.3, "gripper.pos": 0.15}
+GRIPPER_ACTIONS = [[START_POSE[k] + SWEEP.get(k, 0.0) * i for k in START_POSE] for i in range(1, 300)]
+
+
+check = unittest.TestCase()  # its assertions, for the rig's own steps
+
+
+class Rig:
+    def __init__(self, run_dir: Path | None = None, actions: list[list[float]] = POLICY_ACTIONS, **options) -> None:
+        """With `run_dir`, the run is recorded there, and `disk.full` makes every write to its event log fail
+        as on a full disk; without, nothing is recorded (`fakes.NoRecorder`). The policy sends `actions` in
+        order. `options` go to the Controller. A leader is plugged in, folded at rest like the follower; it
+        connects on the first tick. The `[control]` settings are
+        so101.toml's defaults, without camera previews, unless `options` has `control`. While `presence_error` is
+        set, the device watch raises it."""
+        self.clock = FakeClock()
+        self.robot, self.motors = make_follower(self.clock, REST_STEPS)
+        make, self.leader_motors = make_leader(self.clock, REST_STEPS)
+        self.engine = make_engine(actions)
+        driver = EngineDriver(self.engine, list(self.robot.action_features))
+        self.run_dir = run_dir
+        self.missing: dict[str, str] = {}  # what the device watch reports missing, with its reason
+        self.presence_error: Exception | None = None
+        self.reader: KeyReader | None = None
+        recorder = NoRecorder(self.clock)
+        if run_dir:
+            open_file = Path.open
+
+            def open_events(path, *args, **kwargs):  # the Recorder's one way to its event log
+                file = open_file(path, *args, **kwargs)
+                if path.name == "events.jsonl":
+                    file = self.disk = FullDisk(file)
+                return file
+
+            with mock.patch.object(Path, "open", open_events):
+                recorder = Recorder(Run.at(run_dir), self.robot, fps=FPS, task="test", clock=self.clock)
+        self.controller = Controller(
+            self.robot, driver, fps=FPS, rest_pose=pose_from_steps(self.robot.inner.bus, REST_STEPS),
+            start_pose=START_POSE, clock=self.clock, recorder=recorder, presence=self.presence,
+            leader=make, checks=lambda buses, cameras: Report(), **{"control": control(preview_fps=0), **options},
+        )
+
+    def presence(self) -> dict[str, str]:
+        if self.presence_error is not None:
+            raise self.presence_error
+        return dict(self.missing)
+
+    def tick(self, n: int = 1) -> None:
+        for _ in range(n):
+            self.clock.advance(1 / FPS)
+            self.controller.tick()
+
+    def command(self, name: str, source: str = "terminal", **options) -> Result:
+        """Submit a command and advance one tick, which applies it."""
+        future = self.controller.submit(name, source, **options)
+        self.tick()
+        return future.result(timeout=0)
+
+    def status(self) -> dict:
+        return self.controller.status()
+
+    def tick_until(self, state: str, limit: int = 20 * FPS, client: str | None = None) -> None:
+        """Tick until the state is `state`, with the page `client`, if any, polling before each tick."""
+        for _ in range(limit):
+            if self.status()["state"] == state:
+                return
+            if client is not None:
+                self.controller.heartbeat(client)
+            self.tick()
+        raise AssertionError(f"still {self.status()['state']} after {limit} ticks, not {state}")
+
+    def press(self, key: str) -> str:
+        """Press `key` at the robot's terminal and advance one tick, which applies it. Returns what it printed."""
+        self.reader = self.reader or KeyReader(self.controller.submit, self.status)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.reader.on_key(key)
+            self.tick()
+        return out.getvalue()
+
+    def start_policy(self, ticks: int = 10) -> None:
+        """Start an attempt, and let the policy drive for `ticks`."""
+        check.assertEqual(self.command("resume"), Result("resume", True))
+        self.tick_until("autonomous")
+        self.tick(ticks)
+
+    def policy(self, seconds: float) -> None:
+        self.start_policy(round(seconds * FPS))
+
+    def teleop(self, seconds: float) -> None:
+        self.command("teleop")
+        self.tick_until("teleop")
+        self.tick(round(seconds * FPS))
+
+    def reset(self, outcome: str) -> None:
+        self.command("reset", outcome=outcome)
+        self.tick_until("resting")
+
+    def fault(self) -> None:
+        """The follower stops answering for a tick, and answers again a second later, still in Fault."""
+        self.motors.failing = True
+        self.tick()
+        self.motors.failing = False
+        self.tick(FPS)
+        check.assertEqual(self.status()["state"], "fault")
+
+    def in_fault(self) -> None:
+        self.start_policy()
+        self.fault()
+
+    def short_of_rest(self) -> None:
+        """A quit's drive to rest stopped short: something blocks the elbow."""
+        self.start_policy()
+        self.motors.stops = {"elbow_flex": self.motors.present()["elbow_flex"]}
+        check.assertEqual(self.command("quit"), Result("quit", True))
+        self.tick_until("resting", limit=10 * FPS)
+        self.tick(31 * FPS)  # the warning it gave has lapsed
+
+    def resting_away_from_rest(self) -> None:
+        """After a fault, Reset, then Pause on the way to rest."""
+        self.in_fault()
+        check.assertEqual(self.command("reset"), Result("reset", True))
+        self.tick(5)
+        check.assertEqual(self.command("pause"), Result("pause", True))
+        check.assertEqual(self.status()["state"], "resting")
+        check.assertFalse(self.controller.at_rest)
+
+    def goals(self) -> list[dict[str, int]]:
+        return self.motors.goals
+
+    def holds(self, ticks: int = FPS, message: str = "the arm holds") -> None:
+        """Advance `ticks` and check that each sent the follower its last goal again, and nothing else."""
+        held, sent = self.goals()[-1], len(self.goals())
+        self.tick(ticks)
+        check.assertEqual(self.goals()[sent:], [held] * ticks, message)
+
+    def units(self, steps: dict[str, int]) -> dict[str, float]:
+        """Raw motor steps in the arm's units (degrees, gripper 0-100). Both arms share a calibration."""
+        return pose_from_steps(self.robot.inner.bus, steps)
+
+    def events(self, type_: str | None = None) -> list[dict]:
+        lines = (self.run_dir / "events.jsonl").read_text().splitlines()
+        return [e for e in map(json.loads, lines) if type_ is None or e["type"] == type_]
+
+    def episodes(self) -> int:
+        info = self.run_dir / "dataset" / "meta" / "info.json"
+        return json.loads(info.read_text())["total_episodes"] if info.is_file() else 0
+
+    def frames(self):
+        """The recorded frames, and the action's joint names, read straight from the dataset."""
+        root = self.run_dir / "dataset"
+        names = json.loads((root / "meta" / "info.json").read_text())["features"]["action"]["names"]
+        return pd.concat(pd.read_parquet(f) for f in sorted(root.glob("data/*/*.parquet"))), names
+
+    def close(self) -> None:
+        self.motors.failing, self.motors.powered = False, True  # so the motors turn off on disconnect
+        if self.run_dir is not None:
+            self.disk.full = False
+        if self.robot.inner.is_connected:
+            self.controller.close()
+            self.robot.inner.disconnect()
+
+
+class RigTest(unittest.TestCase):
+    """A test on `self.rig`: recorded in a temporary folder when `recorded`, with `options` for the Rig."""
+
+    recorded = False
+    options: dict = {}
+
+    def setUp(self) -> None:
+        self.rig = self.new_rig(**self.options)
+
+    def new_rig(self, name: str = "run", recorded: bool | None = None, **options) -> Rig:
+        """Another rig, recorded as `name` when `recorded`, which defaults to the test's."""
+        run_dir = None
+        if self.recorded if recorded is None else recorded:
+            if not hasattr(self, "temp"):
+                temp = tempfile.TemporaryDirectory(prefix="so101-run-")
+                self.addCleanup(temp.cleanup)
+                self.temp = Path(temp.name)
+            run_dir = self.temp / name
+        rig = Rig(run_dir, **options)
+        self.addCleanup(rig.close)
+        return rig
+
+
+class ControllerTest(RigTest):
+    def test_space_and_toggle_pause_but_never_start_resume_or_restart_the_arm(self) -> None:
+        # At the terminal, Space pauses but never starts or resumes the arm.
+        self.rig.tick(2 * FPS)  # the arm has rested for 2 s, past the 1 s that lets the page's Space resume
+        printed = self.rig.press("space")
+        self.assertEqual(self.rig.status()["state"], "resting", "Space never starts an attempt at the terminal")
+        self.assertIn("r starts", printed)
+
+        self.rig.press("r")
+        self.rig.tick_until("autonomous")
+        self.rig.tick(10)
+        self.rig.press("space")
+        self.assertEqual(self.rig.status()["state"], "paused")
+        held = self.rig.goals()[-1]
+        sent = len(self.rig.goals())
+        for _ in range(2 * FPS):  # the key held: the terminal repeats it every tick for 2 s
+            self.rig.press("space")
+        self.rig.tick(5 * FPS)  # then a key-repeat delay far past 1 s, or a fresh press much later
+        printed = self.rig.press("space")
+        self.assertEqual(self.rig.status()["state"], "paused")
+        self.assertIn("r resumes", printed)
+        self.assertEqual(self.rig.goals()[sent:], [held] * (len(self.rig.goals()) - sent), "the arm holds throughout")
+
+        self.rig.press("r")
+        self.assertEqual(self.rig.status()["state"], "autonomous")
+        self.rig.tick(10)
+
+        # The page's Toggle: a double or held press pauses and never restarts the arm.
+        self.assertEqual(self.rig.command("toggle"), Result("pause", True))
+        held = self.rig.goals()[-1]
+        sent = len(self.rig.goals())
+        for _ in range(2 * FPS):  # a double press, then the key held: it repeats every tick for 2 s
+            again = self.rig.command("toggle")
+            self.assertEqual((again.command, again.accepted), ("resume", False))
+        self.assertIn("press again", again.reason)
+        self.assertEqual(self.rig.status()["state"], "paused")
+        self.assertEqual(self.rig.goals()[sent:], [held] * (len(self.rig.goals()) - sent), "the arm holds throughout")
+
+        self.rig.tick(FPS + 1)  # let go for a second
+        self.assertEqual(self.rig.command("toggle"), Result("resume", True))
+        self.assertEqual(self.rig.status()["state"], "autonomous")
+
+    def test_a_late_answer_to_the_terminals_prompt_never_ends_a_newer_attempt(self) -> None:
+        self.rig.start_policy()
+        self.assertIn("How did it go?", self.rig.press("right"))
+        page = {"source": "page", "client": "phone", "who": "100.64.0.2"}
+        self.assertEqual(self.rig.command("reset", outcome="succeeded", for_attempt=1, **page), Result("reset", True))
+        self.rig.tick_until("resting")
+        self.rig.tick(2 * FPS)
+        self.assertEqual(self.rig.command("resume", **page), Result("resume", True))
+        self.rig.tick_until("autonomous")
+
+        printed = self.rig.press("f")  # the answer meant for attempt 1
+
+        self.assertIn("Reset refused", printed)
+        self.assertIn("attempt 1", printed)
+        status = self.rig.status()
+        self.assertEqual((status["state"], status["attempt"], status["attempt_open"]), ("autonomous", 2, True))
+        self.assertIsNone(status["ending"])
+
+        self.rig.press("right")
+        self.rig.press("f")
+        self.assertEqual((self.rig.status()["state"], self.rig.status()["ending"]), ("returning", "reset"))
+
+    def test_pause_during_returning_cancels_the_reset(self) -> None:
+        self.rig.start_policy()
+        self.rig.command("reset")
+        self.rig.tick(5)
+        self.assertEqual(self.rig.status()["state"], "returning")
+
+        self.assertEqual(self.rig.command("pause"), Result("pause", True))
+
+        status = self.rig.status()
+        self.assertEqual(status["state"], "paused")
+        self.assertTrue(status["attempt_open"])
+        self.assertIsNone(status["ending"])
+        self.assertIsNone(status["last_attempt"])
+        held = self.rig.goals()[-1]
+        self.rig.tick(3 * FPS)
+        self.assertTrue(all(goal == held for goal in self.rig.goals()[-3 * FPS:]), "the arm holds where it stopped")
+        self.assertNotEqual(held, REST_STEPS)
+
+        self.assertEqual(self.rig.command("resume"), Result("resume", True))
+        self.assertEqual(self.rig.status()["state"], "autonomous")
+        self.assertEqual(self.rig.status()["attempt"], 1, "the same attempt continues")
+
+    def test_a_missing_follower_or_camera_refuses_resume_rewind_and_teleop(self) -> None:
+        self.rig.tick()
+        self.assertEqual(self.rig.status()["devices"]["leader"], "ok", "the leader is there, so only the device refuses")
+        reason = "The follower isn't connected. Plug it in."
+        self.rig.missing = {"follower": reason}
+        sent = len(self.rig.goals())
+        leader_sent = len(self.rig.leader_motors.goals)
+
+        self.assertEqual(self.rig.command("resume"), Result("resume", False, reason))
+
+        status = self.rig.status()
+        self.assertEqual(status["state"], "resting")
+        self.assertEqual(status["devices"]["follower"], "missing")
+        self.assertFalse(status["allowed"]["resume"])
+        self.assertEqual(status["refusals"]["resume"], reason)
+        self.assertEqual(self.rig.goals()[sent:], [self.rig.goals()[sent - 1]], "the arm holds")
+        self.assertEqual(self.rig.leader_motors.goals[leader_sent:], [], "the leader isn't driven")
+        self.assertFalse(self.rig.leader_motors.torqued())
+
+        # From a paused attempt too, where Rewind has motion to undo, and Resume, Rewind and Teleop
+        # work again once the device is back.
+        self.rig.missing = {}
+        self.rig.start_policy()
+        self.rig.command("pause")
+        self.assertGreater(self.rig.status()["rewind_available_s"], 0)
+        reason = "The front isn't connected. Plug it in."
+        self.rig.missing = {"front": reason}
+        sent = len(self.rig.goals())
+
+        self.assertEqual(self.rig.command("rewind"), Result("rewind", False, reason))
+
+        status = self.rig.status()
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(status["refusals"]["rewind"], reason)
+        self.assertEqual(self.rig.goals()[sent:], [self.rig.goals()[sent - 1]], "the arm holds")
+        self.rig.missing = {}
+        self.assertEqual(self.rig.command("rewind"), Result("rewind", True))
+        self.rig.tick_until("paused")
+        self.assertEqual(self.rig.command("teleop"), Result("teleop", True))
+        self.assertEqual(self.rig.status()["state"], "handover")
+        self.rig.command("pause")
+        self.assertEqual(self.rig.command("resume"), Result("resume", True))
+        self.assertEqual(self.rig.status()["devices"], {"follower": "ok", "front": "ok", "wrist": "ok", "leader": "ok"})
+
+    def test_teleop_hands_over_at_the_measured_pose_without_jumping(self) -> None:
+        self.rig.start_policy()
+        # Something blocks the pan, so the follower lags the policy's goal by more than the tolerance.
+        self.rig.motors.stops = {"shoulder_pan": self.rig.motors.present()["shoulder_pan"]}
+        self.rig.tick(FPS)
+        commanded = self.rig.units(self.rig.goals()[-1])
+        self.assertGreater(rollout.farthest(self.rig.units(self.rig.motors.present()), commanded)[1], rollout.TOLERANCE)
+        self.assertFalse(self.rig.leader_motors.torqued(), "the leader hangs free until a handover")
+        torque_changes = len(self.rig.leader_motors.torque)
+
+        self.assertEqual(self.rig.command("teleop"), Result("teleop", True))
+        self.assertEqual(self.rig.status()["state"], "handover")
+        self.rig.tick_until("teleop", limit=10 * FPS)
+
+        # Motors on, then off once: and only when every joint was within the tolerance of the
+        # follower's measured pose, not of the goal it was last sent.
+        on, off = self.rig.leader_motors.torque[torque_changes:]
+        self.assertEqual((on[0], off[0]), (True, False))
+        leader_at_release = self.rig.units(off[1])
+        follower = self.rig.units(self.rig.motors.present())
+        self.assertLessEqual(rollout.farthest(leader_at_release, follower)[1], rollout.TOLERANCE)
+        self.assertGreater(rollout.farthest(leader_at_release, commanded)[1], rollout.TOLERANCE)
+        self.assertGreater(len(self.rig.leader_motors.goals), 1, "the leader was driven there step by step")
+
+        # The first Teleop goal is where the follower is, so it doesn't jump.
+        sent = len(self.rig.goals())
+        self.rig.tick()
+        first = self.rig.units(self.rig.goals()[sent])
+        self.assertLessEqual(rollout.farthest(first, follower)[1], rollout.TOLERANCE)
+
+        # From then on the follower follows the leader, wherever a hand puts it.
+        moved = {**self.rig.leader_motors.present(), "shoulder_pan": self.rig.leader_motors.present()["shoulder_pan"] - 40}
+        self.rig.leader_motors.move_by_hand(moved)
+        self.rig.tick()
+        self.assertEqual(self.rig.goals()[-1], moved)
+        self.assertFalse(self.rig.leader_motors.torqued())
+
+        # Without a leader, Teleop is refused and says why.
+        self.rig.command("pause")
+        self.assertTrue(self.rig.leader_motors.torqued(), "Pause holds the leader with its motors on")
+        self.rig.missing = {"leader": "The leader's board isn't connected."}
+        self.rig.tick()
+        refused = self.rig.command("teleop")
+        self.assertFalse(refused.accepted)
+        self.assertTrue(refused.reason.startswith("Leader arm not connected."), refused.reason)
+        status = self.rig.status()
+        self.assertEqual((status["state"], status["devices"]["leader"]), ("paused", "missing"))
+        self.assertFalse(status["allowed"]["teleop"])
+        self.assertTrue(status["allowed"]["resume"], "the leader is optional")
+
+
+class RecordingTest(RigTest):
+    recorded = True
+
+    def test_ticks_with_no_policy_action_dont_make_a_following_teleop_an_intervention(self) -> None:
+        self.rig.engine.waiting = 10**6  # the policy never sends an action, as a cloud GPU that never answers
+        self.rig.start_policy()
+        self.rig.teleop(3 / FPS)
+        self.rig.reset("failed")
+        self.rig.controller.close()
+
+        frames, _ = self.rig.frames()
+        autonomous = frames[frames["control.phase"] == Phase.AUTONOMOUS]
+        self.assertEqual(len(autonomous), 10)
+        self.assertTrue(np.isnan(np.stack(autonomous["control.policy_action"].to_numpy())).all(),
+                        "a waiting tick records no policy action")
+        self.assertTrue((frames["control.phase"] == Phase.TELEOP).any())
+        self.assertFalse(frames["intervention"].any(), "a policy that only waited drove nothing to step in on")
+
+    def test_an_attempt_that_couldnt_be_saved_isnt_counted_and_refuses_new_attempts(self) -> None:
+        rig = self.rig
+        rig.start_policy()
+        disk_error = OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch.object(rig.controller.recorder.dataset, "finalize", side_effect=disk_error):
+            rig.command("reset", outcome="succeeded")
+            rig.tick_until("resting")
+
+        status = rig.status()
+        self.assertIsNone(status["prompt"], "no outcome is asked for an attempt that wasn't saved")
+        self.assertEqual(status["last_attempt"], {"attempt": 1, "ended_by": "reset", "saved": False,
+                                                  "outcome": "succeeded"})
+        self.assertEqual(status["summary"]["attempts"], 0, "the summary counts only saved attempts")
+        self.assertFalse(rig.command("outcome", outcome="failed").accepted)
+        self.assertEqual(rig.events("outcome"), [])
+        [end] = rig.events("attempt_end")
+        self.assertEqual((end["attempt"], end["ended_by"], end["saved"], end["episode"]), (1, "reset", False, None))
+        [failed] = rig.events("recording_failed")
+        self.assertIn("No space left on device", failed["error"])
+        refused = rig.command("resume")
+        self.assertFalse(refused.accepted)
+        self.assertEqual(refused.reason, failed["error"])
+        self.assertEqual(rig.status()["state"], "resting")
+        self.assertEqual(rig.status()["refusals"]["resume"], refused.reason)
+
+    def test_a_follower_error_goes_to_fault_holds_and_saves_the_attempt_as_fault(self) -> None:
+        self.rig.start_policy()
+        last_goal = self.rig.goals()[-1]
+
+        self.rig.motors.failing = True
+        self.rig.tick()
+
+        status = self.rig.status()
+        self.assertEqual(status["state"], "fault")
+        self.assertEqual(status["devices"]["follower"], "missing")
+        self.assertEqual(status["last_attempt"], {"attempt": 1, "ended_by": "fault", "outcome": None, "saved": True})
+        self.assertFalse(status["attempt_open"])
+        self.assertEqual(self.rig.episodes(), 1, "saved where it is, without driving to rest")
+        [fault] = self.rig.events("fault")
+        self.assertEqual((fault["attempt"], fault["device"]), (1, "follower"))
+        self.assertIn("TimeoutError", fault["traceback"])
+        [end] = self.rig.events("attempt_end")
+        self.assertEqual((end["ended_by"], end["saved"], end["episode"]), ("fault", True, 0))
+
+        # Only Reset and Run checks are allowed, and Reset not until the follower answers again.
+        self.assertEqual({c for c, ok in status["allowed"].items() if ok}, {"check"})
+        self.assertFalse(self.rig.command("pause").accepted)
+        refused = self.rig.command("reset")
+        self.assertIn("The follower stopped answering", refused.reason)
+        self.rig.motors.failing = False
+        sent = len(self.rig.goals())
+        found = self.rig.motors.present()
+        self.rig.tick(FPS)
+        self.assertEqual(self.rig.goals()[sent:], [found] * FPS, "the arm holds where it's found when it answers")
+        self.assertEqual(found, last_goal, "here it had reached its last goal before the bus failed")
+        self.assertEqual(self.rig.status()["allowed"],
+                         {"resume": False, "pause": False, "rewind": False, "teleop": False, "reset": True,
+                          "check": True, "pose": False})
+
+        # A confirmation lapses on a state change.
+        self.assertEqual(self.rig.command("quit"), Result("quit", True))
+        self.assertTrue(self.rig.status()["confirm_quit"])
+        self.assertEqual(self.rig.command("reset"), Result("reset", True))
+        self.assertFalse(self.rig.status()["confirm_quit"], "going to rest starts the quit over")
+
+    def test_an_attempt_pauses_saves_at_rest_and_records_the_states_it_went_through(self) -> None:
+        rig = self.rig
+        rig.start_policy()
+        driving = rig.goals()[-10:]
+        self.assertGreater(len({tuple(g.values()) for g in driving}), 1, "the policy should be moving the arm")
+        last_policy_goal = rig.goals()[-1]
+        sent = len(rig.goals())
+
+        # Pause holds and sends no policy action.
+        self.assertEqual(rig.command("pause"), Result("pause", True))
+        self.assertEqual(rig.status()["state"], "paused")
+        self.assertEqual(rig.goals()[sent], last_policy_goal, "the next tick sends the hold target")
+        rig.holds(FPS)
+        rig.command("resume")
+        rig.tick(5)
+
+        # Reset saves the attempt only at rest, with how it ended and its outcome.
+        self.assertEqual(rig.command("reset", outcome="failed"), Result("reset", True))
+        rig.tick(3)
+        self.assertEqual(rig.status()["state"], "returning")
+        self.assertEqual(rig.status()["ending"], "reset")
+        self.assertEqual(rig.episodes(), 0, "not saved before the arm is at rest")
+        self.assertEqual(rig.events("attempt_end"), [])
+        rig.tick_until("resting")
+
+        self.assertEqual(rig.episodes(), 1)
+        [end] = rig.events("attempt_end")
+        self.assertEqual((end["attempt"], end["ended_by"], end["saved"], end["episode"]), (1, "reset", True, 0))
+        [outcome] = rig.events("outcome")
+        self.assertEqual((outcome["attempt"], outcome["outcome"], outcome["episode"]), (1, "failed", 0))
+        for motor, steps in REST_STEPS.items():
+            self.assertAlmostEqual(rig.goals()[-1][motor], steps, delta=1, msg=motor)
+        status = rig.status()
+        self.assertFalse(status["attempt_open"])
+        self.assertEqual(status["last_attempt"], {"attempt": 1, "ended_by": "reset", "outcome": "failed", "saved": True})
+        refused = rig.command("reset")
+        self.assertFalse(refused.accepted)
+        self.assertIn("already at rest", refused.reason)
+
+        # The columns match the states the attempt went through. The recorder finalizes the dataset
+        # after every saved attempt, so it reads while the run is still open.
+        features = json.loads((rig.run_dir / "dataset" / "meta" / "info.json").read_text())["features"]
+        self.assertEqual(
+            sorted(key for key in features if key.startswith("observation.")),
+            ["observation.images.front", "observation.images.wrist", "observation.state"],
+        )
+        frames, _ = rig.frames()
+        runs = [(phase, len(list(group))) for phase, group in itertools.groupby(frames["control.phase"])]
+        self.assertEqual(
+            [phase for phase, _ in runs],
+            [Phase.STARTING, Phase.AUTONOMOUS, Phase.PAUSED, Phase.AUTONOMOUS, Phase.RETURNING],
+        )
+        self.assertEqual(runs[2][1], FPS + 1, "the pause tick and every tick after it, until Resume")
+        self.assertEqual(runs[3][1], 6, "the resume tick and the next 5, until Reset")
+        self.assertFalse(frames["intervention"].any(), "no Teleop, so no intervention frames")
+        self.assertFalse(np.isnan(np.stack(frames["control.leader"].to_numpy())).any(),
+                         "the leader is connected, so its pose is in every frame")
+        # The state events start each run of phases at the frame they say.
+        starts = [e["frame"] for e in rig.events("state") if e["state"] != "resting"]
+        self.assertEqual(starts, [sum(n for _, n in runs[:i]) for i in range(len(runs))])
+        self.assertEqual(end["frames"], len(frames))
+        self.assertEqual(end["seconds"]["paused"], round((FPS + 1) / FPS, 2))
+
+        # Teleop after the policy drove is recorded as an intervention.
+        rig.tick(2 * FPS)  # past the toggle's rule, so a new attempt may start
+        rig.start_policy()
+        rig.teleop(3 / FPS)
+        rig.reset("succeeded")
+        frames, _ = rig.frames()
+        corrected = frames[frames["episode_index"] == 1]
+        teleop = corrected["control.phase"] == Phase.TELEOP
+        self.assertTrue(teleop.any())
+        self.assertTrue((corrected["intervention"] == teleop).all(), "Teleop after the policy drove is a correction")
+
+
+class RewindTest(RigTest):
+    options = {"actions": GRIPPER_ACTIONS}
+
+    def test_rewind_retraces_the_follower_and_the_leader_never_past_the_attempt_start(self) -> None:
+        rig = self.rig
+        rig.policy(9)
+
+        self.assertEqual(rig.command("rewind"), Result("rewind", True))
+        self.assertEqual(rig.status()["state"], "rewinding")
+        rig.tick_until("paused", limit=4 * FPS)
+        self.assertTrue(rig.leader_motors.torqued(), "the leader's motors are on, following the follower")
+        while rig.command("rewind").accepted:
+            rig.tick_until("paused", limit=10 * FPS)
+
+        refused = rig.command("rewind")
+        self.assertEqual(refused, Result("rewind", False, "Nothing left to rewind: the arm is back where attempt 1 started."))
+        status = rig.status()
+        self.assertEqual((status["state"], status["rewind_available_s"]), ("paused", 0.0))
+        self.assertFalse(status["allowed"]["rewind"])
+        for motor, steps in REST_STEPS.items():  # the attempt started at rest
+            self.assertAlmostEqual(rig.goals()[-1][motor], steps, delta=2, msg=motor)
+            self.assertAlmostEqual(rig.leader_motors.goals[-1][motor], steps, delta=2, msg=f"leader {motor}")
+
+
+class TimeLimitTest(RigTest):
+    LIMIT_S = 2  # attempt_limit_s, short so the test records few frames; the fake clock takes no real time
+    recorded = True
+    options = {"control": control(preview_fps=0, attempt_limit_s=float(LIMIT_S))}
+
+    def test_only_policy_time_counts_and_the_limit_ends_the_attempt_like_reset(self) -> None:
+        self.rig.policy(self.LIMIT_S / 2)
+        self.rig.command("pause")
+        self.rig.tick(2 * self.LIMIT_S * FPS)
+
+        status = self.rig.status()
+        self.assertEqual(status["state"], "paused", "a long pause doesn't end the attempt")
+        self.assertAlmostEqual(status["policy_s"], self.LIMIT_S / 2, delta=0.1)
+        self.assertEqual(status["limit_s"], self.LIMIT_S)
+
+        self.rig.command("resume")
+        self.rig.tick_until("returning", limit=self.LIMIT_S * FPS)
+        self.assertEqual(self.rig.status()["ending"], "time_limit")
+        self.rig.tick_until("resting")
+
+        [end] = self.rig.events("attempt_end")
+        self.assertEqual(
+            (end["ended_by"], end["limit"], end["limit_s"], end["saved"], end["episode"]),
+            ("time_limit", "attempt_limit_s", self.LIMIT_S, True, 0),
+        )
+        self.assertAlmostEqual(end["seconds"]["autonomous"], self.LIMIT_S, delta=0.1)
+        self.assertGreaterEqual(end["seconds"]["paused"], 2 * self.LIMIT_S)
+        prompt = self.rig.status()["prompt"]
+        self.assertEqual((prompt["attempt"], prompt["options"]), (1, ["succeeded", "failed", "ignored"]))
+        self.assertEqual(self.rig.events("outcome"), [], "unlabelled until someone answers")
+
+        self.assertEqual(self.rig.command("outcome", outcome="failed"), Result("outcome", True))
+        [outcome] = self.rig.events("outcome")
+        self.assertEqual((outcome["attempt"], outcome["outcome"], outcome["episode"]), (1, "failed", 0))
+        self.assertIsNone(self.rig.status()["prompt"])
+
+
+class LinkLossTest(RigTest):
+    PHONE = "phone-page"  # the client id the controlling page made for itself
+    TIMEOUT_S = 3  # the default link_timeout_s
+
+    def page(self, name: str, client: str = PHONE) -> Result:
+        return self.rig.command(name, source="page", client=client, who="100.64.0.2")
+
+    def polled_ticks(self, n: int) -> None:
+        """Ticks with the phone polling /status before each, as it does 4 times a second."""
+        for _ in range(n):
+            self.rig.controller.heartbeat(self.PHONE)
+            self.rig.tick()
+
+    def events(self, type_: str) -> list[dict]:
+        return [e for e in self.rig.controller.events(0, 500) if e["type"] == type_]
+
+    def test_link_loss_or_a_hidden_page_pauses_a_running_policy_or_the_move_to_the_start_pose(self) -> None:
+        self.assertEqual(self.page("resume"), Result("resume", True), "the first page to act takes control")
+        self.assertEqual(self.rig.controller.status(self.PHONE)["you_have_control"], True)
+        self.rig.tick_until("autonomous", client=self.PHONE)
+        self.polled_ticks(2 * self.TIMEOUT_S * FPS)
+        self.assertEqual(self.rig.status()["state"], "autonomous", "polls keep the policy running")
+        self.assertEqual(self.events("link_lost"), [])
+
+        self.rig.tick(int((self.TIMEOUT_S - 0.5) * FPS))  # the phone stops polling
+        self.assertEqual(self.rig.status()["state"], "autonomous", "a gap under link_timeout_s is no loss")
+        self.rig.tick(FPS)
+
+        self.assertEqual(self.rig.status()["state"], "paused")
+        [lost] = self.events("link_lost")
+        self.assertGreaterEqual(lost["seconds"], self.TIMEOUT_S)
+        self.assertEqual(lost["on_link_loss"], "pause")
+        paused = [e for e in self.events("state") if e["state"] == "paused"]
+        self.assertEqual([e["cause"] for e in paused], ["link_lost"])
+        held = len(self.rig.goals())
+        self.rig.tick(2 * FPS)
+        self.assertEqual(self.rig.goals()[held:], [self.rig.goals()[held - 1]] * (len(self.rig.goals()) - held),
+                         "the arm holds: no policy action after the pause")
+
+        self.assertFalse(self.page("resume", client="laptop-page").accepted, "another page only views")
+        self.polled_ticks(1)
+        self.assertEqual(len(self.events("link_restored")), 1, "the next poll restores the link")
+        self.assertEqual(self.rig.status()["state"], "paused", "it stays paused until someone resumes")
+
+        # Hidden on the way to the start pose: the policy would start unwatched there, so the move stops.
+        self.page("reset")
+        self.rig.tick_until("resting", client=self.PHONE)
+        self.page("resume")
+        self.assertEqual(self.rig.status()["state"], "starting")
+        held = len(self.rig.goals())
+        self.assertEqual(self.page("page_hidden"), Result("page_hidden", True))
+        self.assertEqual(self.rig.status()["state"], "paused", "paused on the tick the page was hidden")
+        self.rig.tick(FPS)
+        self.assertEqual(self.rig.goals()[held:], [self.rig.goals()[held - 1]] * (len(self.rig.goals()) - held),
+                         "the arm holds where the move was: no goal after the loss")
+        self.assertTrue(self.page("page_visible").accepted)
+        self.assertEqual(self.page("resume"), Result("resume", True), "Resume moves on to the start pose")
+        self.assertEqual(self.rig.status()["state"], "starting")
+        self.rig.tick_until("autonomous", client=self.PHONE)
+
+
+class LoopSafetyTest(RigTest):
+    """No error in a tick drops the arm, and no restarted motor is sent toward its old goal."""
+
+    def test_a_dead_terminal_and_a_full_disk_during_a_fault_never_escape_the_tick(self) -> None:
+        rig = self.new_rig(recorded=True)
+        rig.start_policy()
+        rig.disk.full = True
+        with mock.patch.object(sys, "stderr", DeadStream()):
+            rig.presence_error = RuntimeError("injected")
+            rig.tick()  # raises out of the loop if a warning or a traceback can't be printed
+            rig.presence_error = None
+            self.assertEqual(rig.status()["state"], "fault")
+            rig.holds(FPS)
+        self.assertTrue(rig.motors.torqued())
+
+    def test_a_persistent_motor_alarm_gets_a_hold_on_every_fault_tick(self) -> None:
+        rig = self.rig
+        rig.start_policy()
+        rig.motors.status["elbow_flex"] = 32  # overload: every read of the motors, once a second, reports it
+        rig.tick(FPS + 1)
+        self.assertEqual(rig.status()["state"], "fault")
+
+        rig.holds(3 * FPS, "one hold a tick, the ticks that read the alarm too")
+
+        self.assertTrue(rig.motors.torqued())
+
+    def test_a_motor_restart_or_a_power_cut_never_sends_the_arm_toward_its_old_goal(self) -> None:
+        rig = self.rig
+        rig.start_policy()
+        last_goal = rig.goals()[-1]
+        fell = {motor: steps - 300 for motor, steps in last_goal.items()}
+        rig.motors.power_cycle(fell)  # a brownout: back before any read failed
+        sent = len(rig.goals())
+
+        rig.tick()
+        status = rig.status()
+        self.assertEqual(status["state"], "fault")
+        self.assertIn("lost power or restarted", status["fault"])
+        self.assertEqual(rig.goals()[sent:], [], "no goal on the tick that found the restart")
+        rig.tick(3)
+        self.assertEqual(rig.goals()[sent:], [fell] * 3, "it holds where it fell")
+        self.assertEqual(rig.motors.present(), fell, "the arm never moved toward the old goal")
+        rig.tick(FPS)
+        self.assertEqual(rig.status()["state"], "fault", "the new mark doesn't clear the fault: Reset does")
+
+        # A power cut while already in Fault for something else.
+        rig = self.new_rig("another-fault")
+        rig.start_policy()
+        rig.engine.error = "the policy failed"  # a fault the follower isn't to blame for
+        rig.tick()
+        self.assertEqual(rig.status()["state"], "fault")
+        last_goal = rig.goals()[-1]
+        sent = len(rig.goals())
+        rig.tick(3)
+        self.assertEqual(rig.goals()[sent:], [last_goal] * 3, "it holds its last goal, keeping any grip")
+
+        fell = {motor: steps - 300 for motor, steps in last_goal.items()}
+        rig.motors.failing = True  # now the power goes, while it's already in Fault
+        rig.tick(3)
+        rig.motors.power_cycle(fell)
+        rig.motors.failing = False
+        sent = len(rig.goals())
+        rig.tick(3)
+
+        self.assertEqual(rig.goals()[sent:], [fell] * 3, "it holds where it fell, never the old goal")
+
+    def test_recovery_from_a_power_cut_turns_torque_on_after_aiming_at_the_measured_pose(self) -> None:
+        rig = self.rig
+        rig.start_policy()
+        fell = {motor: steps - 300 for motor, steps in rig.goals()[-1].items()}
+        rig.motors.power_off()
+        rig.tick()
+        sent = len(rig.goals())
+        rig.tick(2)
+        self.assertEqual(len(rig.goals()), sent, "no goal while the follower is silent")
+        rig.motors.power_on(fell)
+        written = len(rig.motors.writes)
+
+        rig.tick()
+
+        self.assertEqual(rig.motors.writes[written:], [("goal_position", fell), ("torque_enable", True)])
+        self.assertTrue(rig.motors.torqued())
+        rig.tick(3)
+        self.assertEqual(rig.motors.present(), fell)
+
+
+class QuitTest(RigTest):
+    """Where the arm can't get to rest, only y at the terminal, within 30 s of the warning, exits: no
+    repeated Esc and no signal does. The test runs in two places the arm can't get to rest."""
+
+    recorded = True
+    PLACES = ("in_fault", "short_of_rest")
+
+    def setUp(self) -> None:
+        pass  # each place gets its own rig
+
+    def warnings(self) -> int:
+        return sum("press y" in message for message in self.said)
+
+    def test_only_y_at_the_terminal_within_30_s_of_the_warning_exits_away_from_rest(self) -> None:
+        for place in self.PLACES:
+            with self.subTest(place):
+                self.said: list[str] = []
+                rig = self.new_rig(place, notify=lambda message, state: self.said.append(message))
+                getattr(rig, place)()
+                printed = rig.press("y")
+                self.assertIn("Exit here refused", printed, "nothing asked yet")
+                self.assertIn("Press Esc first", printed)
+
+                # No signal exits, and Exit here is taken only from the terminal.
+                for _ in range(5):
+                    quit = rig.controller.submit("quit", "signal")
+                    rig.tick()
+                    self.assertTrue(quit.result(timeout=0).accepted)
+                    rig.clock.advance(0.5)
+                rig.tick(FPS)
+                self.assertFalse(rig.controller.done)
+                self.assertTrue(rig.motors.torqued())
+                self.assertIn("With no terminal, the arm keeps holding", self.said[-1])
+                for source in ("signal", "page", "unknown"):
+                    refused = rig.command("exit_here", source=source, client="phone", who="100.64.0.2")
+                    self.assertFalse(refused.accepted, source)
+                    self.assertFalse(rig.controller.done, source)
+
+                # A repeated Esc only repeats the warning.
+                warned = self.warnings()
+                rig.press("esc")
+                self.assertFalse(rig.controller.done)
+                rig.clock.advance(0.5)  # the held key's first repeat
+                rig.press("esc")
+                self.assertFalse(rig.controller.done, "a second Esc never exits away from rest")
+                self.assertEqual(self.warnings(), warned + 2, "each Esc gives the warning")
+                self.assertIn("switch the arm's power off", self.said[-1])
+                self.assertTrue(rig.status()["confirm_quit"])
+                self.assertTrue(rig.motors.torqued())
+
+                # y after 30 s is refused, and Esc starts over.
+                rig.tick(30 * FPS)
+                printed = rig.press("y")
+                self.assertFalse(rig.controller.done)
+                self.assertIn("Exit here refused", printed)
+                self.assertFalse(rig.status()["confirm_quit"], "the request lapsed")
+                self.assertTrue(rig.motors.torqued())
+
+                rig.press("esc")
+                rig.tick(29 * FPS)
+                rig.press("y")
+                self.assertTrue(rig.controller.done)
+                self.assertEqual(rig.episodes(), 1, "the attempt is saved where the arm stopped")
+                self.assertEqual(rig.events("attempt_end")[-1]["ended_by"],
+                                 "quit" if place == "short_of_rest" else "fault")
+                rig.controller.close()
+                self.assertEqual(rig.events()[-1]["type"], "run_end")
+
+
+class ResetTest(RigTest):
+    """Reset always has a way to send the arm to rest, and an outcome given with it is recorded or refused."""
+
+    recorded = True
+
+    def test_reset_after_a_paused_return_from_a_fault_drives_to_rest_without_an_attempt(self) -> None:
+        self.rig.resting_away_from_rest()
+        self.assertTrue(self.rig.status()["allowed"]["reset"])
+
+        self.assertEqual(self.rig.command("reset"), Result("reset", True))
+        self.assertEqual(self.rig.status()["state"], "returning")
+        self.rig.tick_until("resting")
+
+        for motor, steps in REST_STEPS.items():
+            self.assertAlmostEqual(self.rig.goals()[-1][motor], steps, delta=1, msg=motor)
+        status = self.rig.status()
+        self.assertEqual((status["attempt"], status["attempt_open"]), (1, False), "no attempt opened")
+        self.assertEqual(len(self.rig.events("attempt_start")), 1)
+        refused = self.rig.command("reset")
+        self.assertFalse(refused.accepted)
+        self.assertIn("already at rest", refused.reason)
+
+    def assert_refused_and_held(self, **options) -> Result:
+        """Reset with `options` in Fault is refused, and the arm holds where it is."""
+        held = self.rig.goals()[-1]
+        sent = len(self.rig.goals())
+        refused = self.rig.command("reset", **options)
+        self.assertFalse(refused.accepted, options)
+        self.rig.tick(FPS)
+        self.assertEqual(self.rig.status()["state"], "fault")
+        self.assertEqual(self.rig.goals()[sent:], [held] * (FPS + 1), "no goal changes")
+        return refused
+
+    def test_an_outcome_given_with_reset_in_fault_labels_the_attempt_the_fault_saved(self) -> None:
+        self.rig.start_policy()
+        self.rig.fault()
+        self.assert_refused_and_held(outcome="succeeded", for_attempt=2)  # a sheet for another attempt
+        self.assertEqual(self.rig.events("outcome"), [])
+
+        self.assertEqual(self.rig.command("reset", outcome="succeeded", for_attempt=1), Result("reset", True))
+        [outcome] = self.rig.events("outcome")
+        self.assertEqual((outcome["attempt"], outcome["outcome"], outcome["episode"]), (1, "succeeded", 0))
+        self.assertEqual(self.rig.status()["last_attempt"],
+                         {"attempt": 1, "ended_by": "fault", "outcome": "succeeded", "saved": True})
+        self.rig.tick_until("resting")
+
+        # A fault with no attempt open saves none, so there is nothing to label.
+        self.rig.fault()
+        refused = self.assert_refused_and_held(outcome="ignored")
+        self.assertIn("no attempt", refused.reason)
+        self.assertEqual(len(self.rig.events("outcome")), 1)
+        self.assertEqual(self.rig.command("reset"), Result("reset", True), "Reset without an outcome goes to rest")
+
+
+class ArmsTest(RigTest):
+    """Goals without cameras, and the follower's restart marks."""
+
+    def test_a_camera_that_reports_itself_disconnected_faults_naming_it_and_reset_reaches_rest(self) -> None:
+        rig = self.rig
+        rig.start_policy()
+        camera = rig.robot.inner.cameras["front"]
+        camera.is_connected = False
+        self.addCleanup(setattr, camera, "is_connected", True)  # before the rig closes
+        sent = len(rig.goals())
+
+        rig.tick()
+        status = rig.status()
+        self.assertEqual(status["state"], "fault")
+        self.assertIn("front camera", status["fault"])
+        self.assertEqual(status["devices"]["front"], "missing")
+        rig.tick(FPS)
+        self.assertGreaterEqual(len(rig.goals()) - sent, FPS, "the arm keeps getting its hold every tick")
+        self.assertEqual(len({tuple(g.values()) for g in rig.goals()[sent:]}), 1, "and holds where it was")
+
+        self.assertEqual(rig.command("reset"), Result("reset", True))
+        rig.tick_until("resting")
+        self.assertTrue(rig.controller.at_rest)
+        for motor, steps in REST_STEPS.items():
+            self.assertAlmostEqual(rig.goals()[-1][motor], steps, delta=1, msg=motor)
+
+    def test_a_torque_limit_changed_to_another_value_is_its_own_fault_and_left_as_found(self) -> None:
+        rig = self.rig
+        rig.start_policy()
+        gripper = rig.motors.registers[MOTORS.index("gripper") + 1]
+        gripper["torque_limit"] = 250  # something other than a restart lowered it, such as the servo's protection
+        last_goal = rig.goals()[-1]
+        sent = len(rig.goals())
+
+        rig.tick()
+        status = rig.status()
+        self.assertEqual(status["state"], "fault")
+        self.assertIn("gripper", status["fault"])
+        self.assertIn("250", status["fault"])
+        self.assertNotIn("lost power", status["fault"])
+        rig.tick(FPS)
+        self.assertEqual(rig.goals()[sent:], [last_goal] * (FPS + 1), "it holds the last goal every tick")
+        self.assertEqual(gripper["torque_limit"], 250, "never marked again")
+        self.assertEqual([e["type"] for e in rig.controller.events(0, 500) if e["type"] == "fault"], ["fault"])
+
+        # Another value, found while already in Fault, is reported too, and the arm keeps holding.
+        gripper["torque_limit"] = 300
+        sent = len(rig.goals())
+        rig.tick(FPS)
+        self.assertIn("gripper reads 300", rig.status()["fault"])
+        self.assertEqual(rig.goals()[sent:], [last_goal] * FPS)
+        self.assertEqual(len([e for e in rig.controller.events(0, 500) if e["type"] == "fault"]), 2)
+        self.assertEqual(gripper["torque_limit"], 300)
+
+        self.assertEqual(rig.command("reset"), Result("reset", True))
+        rig.tick_until("resting")
+        self.assertEqual(gripper["torque_limit"], 300, "still as found")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,11 +1,11 @@
-"""Load `tasks.toml`: policies to run on the follower, with the scene each one expects.
+"""Load `tasks.toml`: the tasks you record demos for and train a policy on, with the scene each one expects.
 
-A task with `policy` and `dataset` set is someone else's pretrained policy. A task without them is
-your own: demos are recorded under the data directory (see `so_101.data`), uploaded for training to
-<your Hub user>/so101_<task>, and trained into <your Hub user>/act_so101_<task>.
+A task's demos are recorded under the data directory (see `so_101.data`), in degrees, uploaded for
+training to <your Hub user>/so101_<task>, and trained into <your Hub user>/<policy type>_so101_<task>.
 """
 
 import json
+import sys
 import tomllib
 from dataclasses import dataclass
 from functools import cache
@@ -31,44 +31,29 @@ def hf_user() -> str:
 class Task:
     name: str
     prompt: str
-    cameras: dict[str, str]
-    use_degrees: bool
+    cameras: tuple[str, ...]
     fps: int
     episodes: int
     episode_time_s: float
     reset_time_s: float
     props: list[str]
     setup: list[str]
-    policy_repo: str = ""
-    dataset_repo: str = ""
-
-    @property
-    def own(self) -> bool:
-        """True for a task you record and train yourself."""
-        return not self.policy_repo
-
-    @property
-    def policy(self) -> str:
-        return self.policy_for("act")
 
     def policy_for(self, policy_type: str) -> str:
-        return self.policy_repo or self.trained_policy(policy_type)
-
-    def trained_policy(self, policy_type: str) -> str:
         """Hub repo that training this task with `policy_type` pushes to."""
         return f"{hf_user()}/{policy_type}_so101_{self.name}"
 
     @property
     def dataset(self) -> str:
-        """Hub dataset: the one a pretrained policy was trained on, or where your built demos are uploaded."""
-        return self.dataset_repo or f"{hf_user()}/so101_{self.name}"
+        """Hub dataset your built demos are uploaded to."""
+        return f"{hf_user()}/so101_{self.name}"
 
-    def local_policy_dir(self, revision: str | None = None) -> Path:
+    def local_policy_dir(self, revision: str | None) -> Path:
         """Where a checkpoint is downloaded. Each revision gets its own folder, so they can't mix."""
-        folder = config_path().parent / "outputs" / "policies" / self.policy
+        folder = config_path().parent / "outputs" / "policies" / self.policy_for("act")
         return folder.with_name(f"{folder.name}@{revision.replace('/', '_')}") if revision else folder
 
-    def download_policy(self, revision: str | None = None) -> Path:
+    def download_policy(self, revision: str | None) -> Path:
         """Download the checkpoint and make its config loadable by the installed LeRobot.
 
         Checkpoints saved by newer LeRobot versions can carry config fields this version doesn't
@@ -83,7 +68,7 @@ class Task:
         # Training checkpoints are several times the size of the final model, and running doesn't use them.
         path = Path(
             snapshot_download(
-                self.policy, revision=revision, local_dir=self.local_policy_dir(revision),
+                self.policy_for("act"), revision=revision, local_dir=self.local_policy_dir(revision),
                 ignore_patterns=["checkpoints/**"],
             )
         )
@@ -93,18 +78,14 @@ class Task:
         unknown = {k: v for k, v in config.items() if k not in known}
         if set_fields := {k: v for k, v in unknown.items() if v is not None}:
             raise ConfigError(
-                f"{self.policy} sets config fields this LeRobot version doesn't support: {set_fields}. "
+                f"{self.policy_for("act")} sets config fields this LeRobot version doesn't support: {set_fields}. "
                 "It needs a newer LeRobot."
             )
         if unknown:
             config_file.write_text(json.dumps({k: v for k, v in config.items() if k in known}, indent=4))
         return path
 
-    @property
-    def viewer_url(self) -> str:
-        return f"https://huggingface.co/spaces/lerobot/visualize_dataset?path=/{self.dataset}/episode_0"
-
-    def policy_config(self, revision: str | None = None, policy_type: str = "act") -> dict:
+    def policy_config(self, revision: str | None, policy_type: str) -> dict:
         """The checkpoint's config.json."""
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import EntryNotFoundError, RevisionNotFoundError
@@ -121,7 +102,7 @@ class Task:
             ) from e
         return json.loads(Path(config_file).read_text())
 
-    def image_sizes(self, revision: str | None = None, policy_type: str = "act") -> dict[str, tuple[int, int]]:
+    def image_sizes(self, revision: str | None, policy_type: str) -> dict[str, tuple[int, int]]:
         """(width, height) of each camera the checkpoint was trained on, without its empty slots."""
         prefix = "observation.images."
         return {
@@ -131,9 +112,13 @@ class Task:
         }
 
 
+def read_file() -> dict:
+    return tomllib.loads(tasks_path().read_text())
+
+
 def default_name() -> str:
     """The task commands use when none is named: `default` at the top of tasks.toml."""
-    data = tomllib.loads(tasks_path().read_text())
+    data = read_file()
     name = data.get("default", "")
     if not isinstance(name, str) or not name:
         raise ConfigError(f"Name a task, or set `default = \"<task>\"` at the top of {tasks_path()}.")
@@ -144,21 +129,29 @@ def default_name() -> str:
 
 def load() -> dict[str, Task]:
     """Every task in tasks.toml: its tables. Top-level keys, such as `default`, aren't tasks."""
-    data = {name: t for name, t in tomllib.loads(tasks_path().read_text()).items() if isinstance(t, dict)}
     return {
         name: Task(
             name=name,
             prompt=t["prompt"],
-            cameras=t.get("cameras", {"front": "front", "wrist": "wrist"}),
-            use_degrees=t.get("use_degrees", True),
+            cameras=tuple(t.get("cameras", ["front", "wrist"])),
             fps=t.get("fps", 30),
             episodes=t.get("episodes", 50),
             episode_time_s=t.get("episode_time_s", 20),
             reset_time_s=t.get("reset_time_s", 10),
             props=t.get("props", []),
             setup=t.get("setup", []),
-            policy_repo=t.get("policy", ""),
-            dataset_repo=t.get("dataset", ""),
         )
-        for name, t in data.items()
+        for name, t in read_file().items()
+        if isinstance(t, dict)
     }
+
+
+def get_task(name: str | None) -> Task:
+    """The named task, or the default from tasks.toml when no name is given."""
+    if name is None:
+        name = default_name()
+        print(f"Task: {name} (the default in tasks.toml)", file=sys.stderr)
+    catalog = load()
+    if name not in catalog:
+        sys.exit(f"Unknown task {name!r}. Tasks: {', '.join(catalog)}. See `uv run so101 tasks`.")
+    return catalog[name]

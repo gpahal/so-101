@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SO-101 control</title>
+<style>
+  :root {
+    --fg: #e7e9ee; --mut: #8b919c; --bg: #0b0d10; --panel: #14171c; --line: #262a31; --r: 12px;
+    /* One color per state, shared by the badge, the buttons and the timeline. */
+    --s-auto: #22c55e; --s-pause: #f59e0b; --s-rewind: #3b82f6; --s-teleop: #a78bfa; --s-move: #8b919c; --s-fault: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+  .app { max-width: 480px; margin: 0 auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  /* On a laptop the cameras move to a left column, stacked, beside everything else. */
+  @media (min-width: 900px) {
+    .app { max-width: 1100px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; align-items: start; column-gap: 16px; row-gap: 12px; }
+    .app > * { grid-column: 2; }
+    .app > .cams { grid-column: 1; grid-row: 1 / span 30; grid-template-columns: 1fr; position: sticky; top: 12px; }
+  }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .between { justify-content: space-between; }
+  .title { font-weight: 650; font-size: 15px; }
+  .small { font-size: 12px; color: var(--mut); }
+  .tiny { font-size: 11px; color: var(--mut); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--s-auto); }
+  .dot.lost { background: var(--s-fault); }
+  .banner { border-radius: 10px; padding: 10px 12px; font-size: 13px; border: 1px solid; }
+  .banner.bad { background: color-mix(in srgb, var(--s-fault) 14%, transparent); border-color: color-mix(in srgb, var(--s-fault) 60%, transparent); }
+  .banner.warn { background: color-mix(in srgb, var(--s-pause) 12%, transparent); border-color: color-mix(in srgb, var(--s-pause) 55%, transparent); }
+  .control { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .take { flex: none; min-height: 44px; padding: 0 14px; border-radius: 10px; font-weight: 650; border: 1px solid var(--s-pause); background: color-mix(in srgb, var(--s-pause) 22%, transparent); }
+  .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .chip { border: 1px solid var(--line); border-radius: 10px; padding: 7px 6px; font-size: 11px; line-height: 1.25; }
+  .chip b { display: block; font-size: 12px; font-weight: 600; color: var(--fg); }
+  .chip.ok { border-color: color-mix(in srgb, var(--s-auto) 45%, var(--line)); }
+  .chip.ok span { color: var(--s-auto); }
+  .chip.bad { border-color: var(--s-fault); background: color-mix(in srgb, var(--s-fault) 14%, transparent); }
+  .chip.bad span { color: var(--s-fault); }
+  .chip.opt { border-style: dashed; color: var(--mut); }
+  .chip.opt b { color: var(--mut); }
+  .state { border-radius: var(--r); padding: 14px 16px; border: 1px solid; --c: var(--s-move);
+    background: color-mix(in srgb, var(--c) 13%, transparent); border-color: color-mix(in srgb, var(--c) 55%, transparent); }
+  .state .name { font-size: 22px; font-weight: 750; letter-spacing: .04em; color: var(--c); text-transform: uppercase; }
+  .state p { margin: 4px 0 0; font-size: 13px; }
+  .autonomous { --c: var(--s-auto); } .paused { --c: var(--s-pause); } .rewinding { --c: var(--s-rewind); }
+  .teleop { --c: var(--s-teleop); } .fault { --c: var(--s-fault); }
+  .cams { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .cam { position: relative; border-radius: 10px; overflow: hidden; aspect-ratio: 4 / 3; background: var(--panel); border: 1px solid var(--line); }
+  .cam img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cam .none { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: var(--mut); }
+  .cams .note { grid-column: 1 / -1; font-size: 11px; color: var(--s-pause); }
+  .cam .lbl { position: absolute; top: 6px; left: 6px; font-size: 10px; padding: 2px 6px; border-radius: 6px; background: rgba(0,0,0,.55); color: #fff; letter-spacing: .05em; text-transform: uppercase; }
+  .sect { font-size: 11px; color: var(--mut); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+  .sect span { text-transform: none; letter-spacing: 0; }
+  .tl { display: flex; height: 14px; border-radius: 7px; overflow: hidden; gap: 2px; margin-top: 6px; background: var(--panel); }
+  .tl i { display: block; height: 100%; min-width: 2px; }
+  .tl-marks { position: relative; height: 10px; }
+  .tl-marks span { position: absolute; top: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 7px solid var(--fg); transform: translateX(-5px); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; color: var(--mut); }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .reasons { display: flex; flex-wrap: wrap; gap: 6px; }
+  .reason { font-size: 13px; min-height: 40px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: transparent; }
+  .reason.on { border-color: var(--s-pause); background: color-mix(in srgb, var(--s-pause) 18%, transparent); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .btn { min-height: 64px; border-radius: var(--r); border: 1px solid; padding: 10px 12px; text-align: left; display: flex; flex-direction: column; justify-content: center; gap: 2px; --c: var(--s-move);
+    background: color-mix(in srgb, var(--c) 22%, transparent); border-color: color-mix(in srgb, var(--c) 70%, transparent); }
+  .btn .k { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; color: var(--c); }
+  .btn .h { font-size: 11px; opacity: .85; }
+  .btn svg, .reset svg { width: 16px; height: 16px; }
+  .btn.resume { --c: var(--s-auto); } .btn.pause { --c: var(--s-pause); } .btn.rewind { --c: var(--s-rewind); } .btn.teleop { --c: var(--s-teleop); }
+  .btn:disabled, .reset:disabled { background: transparent; border: 1px dashed var(--line); color: var(--mut); }
+  .btn:disabled .k, .reset:disabled .k { color: var(--mut); }
+  .reset { width: 100%; min-height: 56px; border-radius: var(--r); border: 1px solid var(--line); background: color-mix(in srgb, var(--fg) 7%, transparent); display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; text-align: right; }
+  .reset .k { font-size: 16px; font-weight: 700; display: flex; gap: 8px; align-items: center; }
+  .warnline { font-size: 11px; color: var(--mut); margin: 6px 0 0 2px; }
+  .warnline b { color: var(--s-fault); font-weight: 600; }
+  .card { border: 1px solid var(--line); border-radius: var(--r); padding: 12px; }
+  .opts { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 8px; }
+  .ob { border-radius: 10px; min-height: 56px; font-weight: 650; font-size: 14px; border: 1px solid var(--line); background: transparent; padding: 0 12px; }
+  .ob.s { border-color: color-mix(in srgb, var(--s-auto) 70%, transparent); color: var(--s-auto); }
+  .ob.f { border-color: color-mix(in srgb, var(--s-fault) 70%, transparent); color: var(--s-fault); }
+  .ob.k { color: var(--mut); }
+  .ob.p { border-color: color-mix(in srgb, var(--s-pause) 70%, transparent); color: var(--s-pause); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; text-align: center; padding: 10px 6px; }
+  .stats b { display: block; font-size: 16px; }
+  .events { font-size: 12px; display: grid; gap: 5px; }
+  .ev { display: grid; grid-template-columns: 58px 1fr; gap: 6px; }
+  .ev time { color: var(--mut); font-family: ui-monospace, monospace; font-size: 11px; padding-top: 1px; }
+  .toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: min(440px, calc(100% - 24px)); padding: 10px 14px; border-radius: 10px; font-size: 14px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+  .toast.ok { border-color: var(--s-auto); } .toast.no { border-color: var(--s-fault); }
+  .sheet { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: flex-end; justify-content: center; }
+  .sheet .card { background: var(--panel); width: min(480px, 100%); border-radius: 16px 16px 0 0; padding: 16px; }
+  .sheet .opts { grid-template-columns: 1fr; }
+  /* Read-only tools: plain text, never highlighted like the arm's commands. */
+  .tools { display: flex; gap: 18px; padding: 0 2px; }
+  .tool { background: none; border: none; padding: 8px 0; min-height: 40px; font-size: 14px; color: var(--mut); text-decoration: underline; text-underline-offset: 3px; }
+  .tool:disabled { text-decoration: none; opacity: .6; }
+  .sheet .results { max-height: 60vh; overflow-y: auto; margin-top: 10px; display: grid; gap: 10px; }
+  .results ul { margin: 4px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 13px; }
+  .results .fix { font-size: 12px; color: var(--mut); }
+  .results .FAIL { color: var(--s-fault); } .results .WARN { color: var(--s-pause); } .results .PASS { color: var(--s-auto); }
+  /* Keyboard shortcuts: listed only where there's a keyboard and a mouse, not on a phone. */
+  .keys { display: none; }
+  @media (hover: hover) and (pointer: fine) { .keys { display: block; } }
+  .keys kbd { font: inherit; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+    <div class="row between">
+      <div class="row"><span class="title" id="task">so101</span><span class="small" id="operator"></span></div>
+      <div class="row small"><span class="dot lost" id="dot"></span><span id="link">Connecting...</span></div>
+    </div>
+
+    <div class="banner warn" id="server-warning" hidden></div>
+    <div class="banner bad" id="device-banner" hidden></div>
+    <div class="banner warn" id="warnings" hidden></div>
+    <div class="banner warn control" id="control-box" hidden>
+      <span id="control-text"></span>
+      <button class="take" id="take-control">Take control</button>
+    </div>
+
+    <div class="chips" id="chips"></div>
+
+    <div class="state resting" id="badge">
+      <div class="row between"><div class="name" id="state-name">...</div><div class="small" id="state-attempt"></div></div>
+      <p id="state-sentence"></p>
+    </div>
+
+    <div class="cams" id="cams"></div>
+
+    <div class="card" id="prompt" hidden>
+      <div class="title" style="font-size:14px" id="prompt-title"></div>
+      <div class="small">Nobody ended the attempt before its time limit. Your answer picks what's used for training; you can change it in review.</div>
+      <div class="opts">
+        <button class="ob s" data-outcome="succeeded">Succeeded</button>
+        <button class="ob f" data-outcome="failed">Failed</button>
+        <button class="ob k" data-outcome="ignored">Ignore</button>
+      </div>
+    </div>
+
+    <div id="timeline-box" hidden>
+      <div class="row between"><span class="sect" style="margin:0" id="timeline-title">This attempt</span><span class="tiny" id="timeline-span"></span></div>
+      <div class="tl" id="timeline"></div>
+      <div class="tl-marks" id="marks"></div>
+      <div class="legend">
+        <span><i style="background:var(--s-auto)"></i>Policy</span>
+        <span><i style="background:var(--s-teleop)"></i>Human</span>
+        <span><i style="background:var(--s-rewind)"></i>Rewind</span>
+        <span><i style="background:var(--s-pause)"></i>Paused</span>
+        <span><i style="background:var(--s-move)"></i>Moving</span>
+        <span>&#9650; Stepped in</span>
+      </div>
+    </div>
+
+    <div id="reasons-box" hidden>
+      <div class="sect">Why did you step in? <span>(optional, labels the data)</span></div>
+      <div class="reasons" id="reasons"></div>
+    </div>
+
+    <div class="grid">
+      <button class="btn resume" data-command="resume">
+        <span class="k"><svg viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>Resume</span>
+        <span class="h"></span>
+      </button>
+      <button class="btn pause" data-command="pause">
+        <span class="k"><svg viewBox="0 0 16 16"><path d="M4 2.5h3v11H4zM9 2.5h3v11H9z" fill="currentColor"/></svg>Pause</span>
+        <span class="h"></span>
+      </button>
+      <button class="btn rewind" data-command="rewind">
+        <span class="k"><svg viewBox="0 0 16 16"><path d="M8 3V1L4 4l4 3V5a4 4 0 1 1-4 4H2a6 6 0 1 0 6-6z" fill="currentColor"/></svg><span id="rewind-label">Rewind</span></span>
+        <span class="h"></span>
+      </button>
+      <button class="btn teleop" data-command="teleop">
+        <span class="k"><svg viewBox="0 0 16 16"><path d="M3 13l3-3m0 0l2-6 4 1-2 6zm0 0l4 1" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg>Teleop</span>
+        <span class="h"></span>
+      </button>
+    </div>
+
+    <div>
+      <button class="reset" data-command="reset">
+        <span class="k"><svg viewBox="0 0 16 16"><path d="M2 8.5L8 3l6 5.5M4 7.5V13h8V7.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg>Reset</span>
+        <span class="small h"></span>
+      </button>
+      <div class="warnline"><b>Not an emergency stop.</b> For emergencies, use the power switch on the arm.</div>
+    </div>
+
+    <div>
+      <div class="tools">
+        <button class="tool" data-tool="check">Run checks</button>
+        <button class="tool" data-tool="pose">Check pose</button>
+      </div>
+      <div class="tiny" id="tools-hint" hidden></div>
+      <div class="tiny keys">Keys: <kbd>Space</kbd> pause, or start and resume on a fresh press after 1 s stopped &middot; <kbd>P</kbd> pause &middot;
+        <kbd>R</kbd> resume &middot; <kbd>B</kbd> rewind &middot; <kbd>T</kbd> teleop &middot; <kbd>&rarr;</kbd> reset &middot;
+        <kbd>&larr;</kbd> end as ignored &middot; <kbd>S</kbd> <kbd>F</kbd> <kbd>I</kbd> answer how it went &middot;
+        <kbd>1</kbd>&ndash;<kbd>6</kbd> why you stepped in &middot; <kbd>C</kbd> run checks &middot; <kbd>O</kbd> check pose &middot;
+        <kbd>Esc</kbd> close</div>
+    </div>
+
+    <div>
+      <div class="sect">This run</div>
+      <div class="stats card">
+        <div><b id="sum-attempts">0</b><span class="tiny">attempts</span></div>
+        <div><b id="sum-succeeded">0</b><span class="tiny">succeeded</span></div>
+        <div><b id="sum-share">-</b><span class="tiny">policy drove</span></div>
+        <div><b id="sum-steps">-</b><span class="tiny">step-ins per attempt</span></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="sect">Recent</div>
+      <div class="events" id="events"><div class="small">No events yet.</div></div>
+    </div>
+</div>
+
+<div class="sheet" id="reset-sheet" hidden>
+  <div class="card">
+    <div class="title">End attempt <span id="sheet-attempt"></span>: how did it go?</div>
+    <div class="small">The arm then drives back to rest, and the attempt is saved when it gets there.</div>
+    <div class="opts">
+      <!-- Shown while the status allows Pause: the policy keeps driving while this sheet is open. -->
+      <button class="ob p" id="sheet-pause" hidden>Pause</button>
+      <button class="ob s" data-reset="succeeded">Succeeded</button>
+      <button class="ob f" data-reset="failed">Failed</button>
+      <button class="ob k" data-reset="ignored">Ignore this attempt</button>
+      <button class="ob k" data-reset="">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="results-sheet" hidden>
+  <div class="card">
+    <div class="title" id="results-title"></div>
+    <div class="small" id="results-summary"></div>
+    <div class="results" id="results"></div>
+    <div class="opts"><button class="ob k" id="results-close">Close</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+"use strict";
+// The page decides nothing: every button follows `allowed` and `refusals` from /status.
+const POLL_MS = 250;
+// A command or an events read that takes longer has hung: the server answers a command within 2 s,
+// or says the control loop didn't. Without a limit a hung request would freeze the events, or leave
+// a tap with no answer.
+const FETCH_TIMEOUT_MS = 5000;
+// Run checks and Check pose: the server answers within 30 s, or says the control loop didn't.
+const TOOL_TIMEOUT_MS = 35000;
+const NO_PREVIEW_RETRY_MS = 3000;
+const PHASE_COLOR = {
+  autonomous: "var(--s-auto)", paused: "var(--s-pause)", rewinding: "var(--s-rewind)", teleop: "var(--s-teleop)",
+  fault: "var(--s-fault)",
+};
+const DEVICE_NAMES = { follower: "Follower", leader: "Leader" };
+const LABEL_TEXT = {
+  missed_grasp: "Missed grasp", about_to_collide: "About to collide", wrong_object: "Wrong object",
+  dropped_it: "Dropped it", stuck: "Stuck", other: "Other",
+};
+const $ = (id) => document.getElementById(id);
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+// This page load's own id, so the server knows which page has control. It lives only in memory:
+// a reload, a duplicated tab, another browser or another device is a new page, which views until
+// someone taps Take control on it.
+const CLIENT = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+const HEADERS = { "X-SO101-Client": CLIENT };
+let status = null;
+let serverId = null;  // the server's id from /status: a new one means `so101 serve` restarted
+let lastSeen = 0;
+let events = [];
+let fetchingEvents = false;
+let toastTimer = null;
+let camsBuilt = false;
+let previewsOn = true;
+let sheetAttempt = null;  // the attempt the Reset sheet was opened for
+
+function deviceName(device) {
+  return DEVICE_NAMES[device] || device.charAt(0).toUpperCase() + device.slice(1) + " cam";
+}
+
+function clock(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function wallTime(wall) {
+  return new Date(wall * 1000).toLocaleTimeString([], { hour12: false });
+}
+
+function sentence(st) {
+  const policy = st.policy ? `Policy ${st.policy}` : "The policy";
+  const policyTime = st.policy_s != null ? ` ${Math.round(st.policy_s)} of ${st.limit_s} s policy time used.` : "";
+  switch (st.state) {
+    case "resting": return `At the rest pose. Ready to start attempt ${st.attempt + 1}.`;
+    case "starting": return "Moving to the demos' start pose.";
+    case "autonomous": return `${policy} is driving.${policyTime}`;
+    case "paused": return `Holding position, motors on. ${policy} is paused.${policyTime}`;
+    case "handover": return "Moving the leader to the follower's pose. Let go of the leader until it stops.";
+    case "teleop": return `A human drives with the leader. ${Math.round(st.teleop_s || 0)} of ${st.human_limit_s} s Teleop time used.`;
+    case "rewinding": return "Playing the arm's last moves backwards. It pauses when done.";
+    case "returning": return st.ending ? `Attempt ended (${st.ending.replace("_", " ")}): returning to rest.` : "Returning to rest.";
+    case "fault": return `${st.fault || "A fault."} Only Reset and Run checks are allowed.`;
+    default: return "";
+  }
+}
+
+function hint(command, st) {
+  switch (command) {
+    case "resume": return st.state === "resting" ? `Start attempt ${st.attempt + 1} from the start pose` : "Policy continues from here";
+    case "pause": return "Stop and hold, motors on";
+    case "rewind": return st.state === "rewinding" ? `Go back another ${st.rewind_s} s` : `${st.rewind_available_s ?? 0} s of motion to undo`;
+    case "teleop": return st.state === "resting" ? "Start a human demo with the leader" : "Leader moves to match first";
+    case "reset": return st.state === "fault" ? "Back to rest, no attempt open" : "Asks how it went, then back to rest";
+  }
+  return "";
+}
+
+// A JSON request that gives up after `ms`: a hung one throws an AbortError.
+async function fetchJson(url, options, ms) {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), ms);
+  try {
+    const response = await fetch(url, { ...options, signal: abort.signal });
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function render(st, ms) {
+  $("dot").className = "dot";
+  $("link").textContent = `Connected · ${ms} ms`;
+  $("task").textContent = st.task;
+  document.title = `${st.task} · ${st.state}`;
+  $("operator").textContent = st.operator ? `· ${st.operator}` : "";
+
+  $("server-warning").hidden = !st.server_warning;
+  $("server-warning").textContent = st.server_warning || "";
+  const problems = Object.entries(st.device_problems || {}).filter(([device]) => device !== "leader");
+  $("device-banner").hidden = problems.length === 0;
+  $("device-banner").textContent = problems.map(([device, reason]) => `${deviceName(device)}: ${reason}`).join(" ");
+  $("warnings").hidden = !(st.warnings || []).length;
+  $("warnings").textContent = (st.warnings || []).join(" ");
+  renderControl(st);
+  keepAwake();
+
+  const chips = $("chips");
+  chips.replaceChildren(...Object.entries(st.devices).map(([device, state]) => {
+    const ok = state === "ok";
+    const chip = el("div", "chip " + (ok ? "ok" : device === "leader" ? "opt" : "bad"));
+    if (!ok) chip.title = st.device_problems[device] || "";
+    chip.append(el("b", "", deviceName(device)),
+      el("span", "", ok ? "Connected" : device === "leader" ? "Not connected" : "Missing"));
+    return chip;
+  }));
+  if (!camsBuilt) buildCams(Object.keys(st.devices).filter((d) => d !== "follower" && d !== "leader"));
+  renderPreviews(st);
+
+  $("badge").className = `state ${st.state}`;
+  $("state-name").textContent = st.state;
+  let attempt = "";
+  if (st.attempt_open) attempt = `Attempt ${st.attempt} · ${clock(st.elapsed_s)}`;
+  else if (st.last_attempt) {
+    const last = st.last_attempt;
+    attempt = `Attempt ${last.attempt} ${!last.saved ? "not saved" : last.ended_by === "fault" ? "saved at the fault" : "saved"}`;
+  }
+  $("state-attempt").textContent = attempt;
+  $("state-sentence").textContent = sentence(st);
+
+  $("prompt").hidden = !st.prompt;
+  if (st.prompt) $("prompt-title").textContent = `Attempt ${st.prompt.attempt} reached its time limit. How did it go?`;
+
+  renderTimeline(st);
+  renderReasons(st);
+
+  $("rewind-label").textContent = `Rewind ${st.rewind_s} s`;
+  for (const button of document.querySelectorAll("[data-command]")) {
+    const command = button.dataset.command;
+    const ok = !!st.allowed[command];
+    button.disabled = !ok;
+    button.querySelector(".h").textContent = ok ? hint(command, st) : (st.refusals[command] || "Not allowed now");
+  }
+
+  const sum = st.summary;
+  $("sum-attempts").textContent = sum.attempts;
+  $("sum-succeeded").textContent = sum.succeeded;
+  $("sum-share").textContent = sum.policy_share == null ? "-" : `${Math.round(sum.policy_share * 100)}%`;
+  $("sum-steps").textContent = sum.step_ins_per_attempt == null ? "-" : sum.step_ins_per_attempt.toFixed(1);
+
+  renderTools(st);
+
+  // The sheet ends only the attempt it was opened for; the server refuses it for any other.
+  if (!$("reset-sheet").hidden && (!st.allowed.reset || st.attempt !== sheetAttempt)) $("reset-sheet").hidden = true;
+  $("sheet-pause").hidden = !st.allowed.pause;
+  if (st.last_event > lastSeen) loadEvents();
+}
+
+const TOOL_NAMES = { check: "Run checks", pose: "Check pose" };
+let toolRunning = null;
+
+function renderTools(st) {
+  const refused = [];
+  for (const button of document.querySelectorAll("[data-tool]")) {
+    const tool = button.dataset.tool;
+    button.disabled = toolRunning !== null || !st.allowed[tool];
+    button.textContent = toolRunning === tool ? `${TOOL_NAMES[tool]}...` : TOOL_NAMES[tool];
+    if (!st.allowed[tool] && st.refusals[tool]) refused.push(`${TOOL_NAMES[tool]}: ${st.refusals[tool]}`);
+  }
+  // Another page's control is said once, above; repeating it per tool adds nothing.
+  $("tools-hint").hidden = refused.length === 0 || st.you_have_control === false;
+  $("tools-hint").textContent = refused.join(" ");
+}
+
+function showResults(title, summary, results) {
+  $("results-title").textContent = title;
+  $("results-summary").textContent = summary;
+  const lists = ["FAIL", "WARN", "PASS"].map((level) => {
+    const items = results.filter((r) => r.status === level);
+    if (!items.length) return null;
+    const section = el("div");
+    const list = el("ul");
+    list.replaceChildren(...items.map((r) => {
+      const item = el("li");
+      const line = el("div");
+      line.append(el("b", "", `${r.group}: `), r.detail);
+      item.append(line);
+      if (r.fix && level !== "PASS") item.append(el("div", "fix", `Fix: ${r.fix}`));
+      return item;
+    }));
+    section.append(el("div", `sect ${level}`, `${level} (${items.length})`), list);
+    return section;
+  }).filter(Boolean);
+  $("results").replaceChildren(...lists);
+  $("results-sheet").hidden = false;
+}
+
+function renderControl(st) {
+  // Another page has control: this one views, and its buttons say so, until it takes control.
+  $("control-box").hidden = st.you_have_control !== false;
+  if (st.you_have_control === false) {
+    $("control-text").textContent = st.link_lost
+      ? `The page in control (${st.controller}) stopped polling. Take control to drive from here.`
+      : `Viewing: another page has control (${st.controller}).`;
+  }
+  for (const button of document.querySelectorAll("[data-outcome]")) button.disabled = st.you_have_control === false;
+  if (st.you_have_control && st.controller) $("link").textContent += " · in control";
+}
+
+function buildCams(names) {
+  camsBuilt = true;
+  const note = el("div", "note");
+  note.id = "preview-note";
+  note.hidden = true;
+  $("cams").replaceChildren(...names.map((name) => {
+    const cam = el("div", "cam");
+    const none = el("div", "none", "No preview");
+    const img = el("img");
+    img.alt = `${name} camera`;
+    img.hidden = true;
+    img.dataset.src = `/camera/${encodeURIComponent(name)}`;
+    // Each frame shows the picture, unless previews were shed since, and asks for the next one at the
+    // preview rate. A failed one says "No preview" and tries again in 3 s.
+    img.onload = () => {
+      img.dataset.live = "1";
+      if (previewsOn) { img.hidden = false; none.hidden = true; }
+      setTimeout(() => nextFrame(img), framePeriod());
+    };
+    img.onerror = () => {
+      delete img.dataset.live; img.hidden = true; none.hidden = false;
+      setTimeout(() => nextFrame(img), NO_PREVIEW_RETRY_MS);
+    };
+    nextFrame(img);
+    cam.append(none, img, el("span", "lbl", name));
+    return cam;
+  }), note);
+}
+
+// Previews are single JPEG frames, asked for one at a time at the preview rate, never a stream held
+// open: over plain HTTP a browser opens about 6 connections to a server, and streams from a few tabs
+// would leave the newest tab none to poll or send Pause with. Each camera has one chain of requests.
+// It stops while previews are off or the page is hidden, and `resumePreviews` starts it again.
+function framePeriod() {
+  const fps = status && status.previews ? status.previews.fps : 0;
+  return fps > 0 ? 1000 / fps : NO_PREVIEW_RETRY_MS;
+}
+
+function nextFrame(img) {
+  if (!previewsOn || document.visibilityState !== "visible") {
+    img.dataset.waiting = "1";
+    return;
+  }
+  img.src = `${img.dataset.src}?n=${Date.now()}`;
+}
+
+function resumePreviews() {
+  if (!previewsOn || document.visibilityState !== "visible") return;
+  for (const img of document.querySelectorAll(".cam img[data-waiting]")) {
+    delete img.dataset.waiting;
+    nextFrame(img);
+  }
+}
+
+// Previews are shed when the control loop falls behind: the note says why. While they're off, the
+// tiles say so instead of showing a frozen frame.
+function renderPreviews(st) {
+  const previews = st.previews || { fps: 0, note: null };
+  previewsOn = previews.fps > 0;
+  $("preview-note").hidden = !previews.note;
+  $("preview-note").textContent = previews.note || "";
+  for (const cam of document.querySelectorAll(".cam")) {
+    const none = cam.querySelector(".none");
+    const img = cam.querySelector("img");
+    none.textContent = previewsOn ? "No preview" : "Previews off";
+    const showing = previewsOn && !!img.dataset.live;
+    img.hidden = !showing;
+    none.hidden = showing;
+  }
+  resumePreviews();
+}
+
+function renderTimeline(st) {
+  const runs = st.timeline || [];
+  $("timeline-box").hidden = runs.length === 0;
+  if (!runs.length) return;
+  const total = runs.reduce((sum, run) => sum + run.s, 0) || 1;
+  $("timeline-title").textContent = st.attempt_open ? "This attempt" : `Attempt ${st.attempt}`;
+  $("timeline-span").textContent = `0:00 to ${clock(total)}`;
+  $("timeline").replaceChildren(...runs.map((run) => {
+    const bar = el("i");
+    bar.style.flex = String(Math.max(run.s, 0.01));
+    bar.style.background = PHASE_COLOR[run.phase] || "var(--s-move)";
+    bar.title = `${run.phase} ${run.s} s`;
+    return bar;
+  }));
+  const marks = [];
+  let at = 0;
+  for (const run of runs) {
+    if (run.stepped_in) {
+      const mark = el("span");
+      mark.style.left = `${(at / total) * 100}%`;
+      marks.push(mark);
+    }
+    at += run.s;
+  }
+  $("marks").replaceChildren(...marks);
+}
+
+function renderReasons(st) {
+  const label = st.label;
+  $("reasons-box").hidden = label.refusal != null;
+  if (label.refusal != null) return;
+  const box = $("reasons");
+  const options = Object.keys(LABEL_TEXT);
+  if (box.childElementCount !== options.length) {
+    box.replaceChildren(...options.map((option) => {
+      const chip = el("button", "reason", LABEL_TEXT[option]);
+      chip.dataset.label = option;
+      chip.onclick = () => send({ command: "label", label: option });
+      return chip;
+    }));
+  }
+  for (const chip of box.children) chip.classList.toggle("on", chip.dataset.label === label.current);
+}
+
+function toast(text, ok) {
+  const box = $("toast");
+  box.textContent = text;
+  box.className = `toast ${ok ? "ok" : "no"}`;
+  box.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { box.hidden = true; }, 2000);
+}
+
+function commandName(command) {
+  return (command.charAt(0).toUpperCase() + command.slice(1)).replace("_", " ");
+}
+
+async function send(body) {
+  const tool = TOOL_NAMES[body.command];  // Run checks or Check pose: its reply opens the results sheet
+  const timeout = tool ? TOOL_TIMEOUT_MS : FETCH_TIMEOUT_MS;
+  let name = tool || commandName(body.command === "toggle" ? "pause or resume" : body.command);
+  if (tool) {
+    toolRunning = body.command;
+    if (status) renderTools(status);
+    if (body.command === "check") toast("Running checks: the arm holds still for about 3 s.", true);
+  }
+  try {
+    const started = performance.now();
+    const reply = await fetchJson("/command", {
+      method: "POST", headers: { ...HEADERS, "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }, timeout);
+    if (reply.command && !tool) name = commandName(reply.command);  // a toggle comes back as the pause or resume it became
+    if (!reply.accepted) toast(`${name} refused: ${reply.reason || reply.error}`, false);
+    else if (tool) showResults(tool, reply.summary, reply.results);
+    else toast(`${name}: accepted`, true);
+    if (reply.status) { status = reply.status; render(status, Math.round(performance.now() - started)); }
+  } catch (error) {
+    if (error.name === "AbortError") {
+      toast(`${name}: no answer in ${timeout / 1000} s. It may still apply: watch the state above.`, false);
+    } else {
+      toast(`${name} not sent: the robot computer didn't answer.`, false);
+    }
+  } finally {
+    if (tool) {
+      toolRunning = null;
+      if (status) renderTools(status);
+    }
+  }
+}
+
+async function poll() {
+  const started = performance.now();
+  let st = null;
+  let refusal = null;  // why the server refused this page, such as a request through Funnel
+  try {
+    const visible = document.visibilityState === "visible" ? "1" : "0";  // a hidden page's polls don't count
+    st = await fetchJson("/status", {
+      cache: "no-store", headers: { ...HEADERS, "X-SO101-Visible": visible },
+    }, 2000);
+    if (!st.server_id) { refusal = st.error || null; throw new Error(refusal || "not a status"); }  // such as a refused Host
+  } catch (error) {
+    st = null;
+    $("dot").className = "dot lost";
+    $("link").textContent = refusal ? "Refused: see above" : "Not connected: retrying";
+    $("server-warning").hidden = !refusal;
+    $("server-warning").textContent = refusal || "";
+    // With the server gone, its last frame would look live: say there's no preview instead. Each
+    // preview's next frame that loads shows it again.
+    for (const cam of document.querySelectorAll(".cam")) {
+      const img = cam.querySelector("img");
+      delete img.dataset.live;
+      img.hidden = true;
+      cam.querySelector(".none").hidden = false;
+    }
+  }
+  try {
+    if (st) {
+      // A new id means `so101 serve` restarted: reload, so nothing of the old run is left on the page
+      // (its previews, events, sheets and control). The reloaded page starts with no id, so it can't
+      // loop. A lost status needs nothing: previews retry every 3 s and events carry on from lastSeen.
+      if (serverId !== null && st.server_id !== serverId) { location.reload(); return; }
+      serverId = st.server_id;
+      status = st;
+      render(status, Math.round(performance.now() - started));
+    }
+  } finally {
+    setTimeout(poll, POLL_MS);
+  }
+}
+
+function describe(e) {
+  switch (e.type) {
+    case "attempt_start": return `Attempt ${e.attempt} started`;
+    case "state": {
+      const names = {
+        resting: "At rest", starting: "Moving to the start pose", autonomous: "The policy is driving", paused: "Paused",
+        handover: "Handing over to the leader", teleop: "Teleop: a human drives", rewinding: "Rewinding",
+        returning: "Returning to rest", fault: "Fault: the arm holds",
+      };
+      let text = names[e.state] || e.state;
+      if (e.ended_by) text += ` (ended by ${e.ended_by.replace("_", " ")})`;
+      if (e.note) text += `. ${e.note}`;
+      return text;
+    }
+    case "command": return e.accepted ? null : `${commandName(e.command)} refused: ${e.reason}`;
+    case "label": return `Step-in labelled: ${(LABEL_TEXT[e.reason] || e.reason).toLowerCase()}`;
+    case "outcome": return `Attempt ${e.attempt} labelled ${e.outcome}`;
+    case "attempt_end": {
+      const seconds = Object.values(e.seconds || {}).reduce((a, b) => a + b, 0);
+      return `Attempt ${e.attempt} ${e.saved ? "saved" : "not saved"} (${Math.round(seconds)} s, ended by ${String(e.ended_by).replace("_", " ")})`;
+    }
+    case "rewind": return `Rewound ${e.seconds} s`;
+    case "handover": return "The leader lined up with the follower: Teleop";
+    case "fault": return `Fault: ${e.error}`;
+    case "control_taken": return e.previous ? `A page (${e.who}) took control from ${e.previous}` : `A page (${e.who}) has control`;
+    case "link_lost": return `Lost the controlling page (${e.who}): no poll for ${Math.round(e.seconds)} s${e.on_link_loss === "pause" ? "" : ", the policy kept running"}`;
+    case "page_hidden": return `The controlling page (${e.who}) was hidden: screen locked or another app in front${e.on_link_loss === "pause" ? ", so a running policy pauses" : ""}`;
+    case "link_restored": return `The controlling page (${e.who}) is back`;
+    case "check": return `Checks: ${e.summary}`;
+    case "pose": return `Pose: ${e.summary}`;
+    case "loop_rate": return e.slow ? `The control loop slowed to ${e.hz} Hz (target ${e.target_hz})` : `The control loop is back to ${e.hz} Hz`;
+    default: return null;
+  }
+}
+
+async function loadEvents() {
+  if (fetchingEvents) return;
+  fetchingEvents = true;
+  try {
+    const reply = await fetchJson(`/events?after=${lastSeen}`, { cache: "no-store" }, FETCH_TIMEOUT_MS);
+    for (const e of reply.events) {
+      lastSeen = Math.max(lastSeen, e.id);
+      const text = describe(e);
+      if (text) events.unshift({ wall: e.wall, text });
+    }
+    events = events.slice(0, 8);
+    const list = $("events");
+    if (events.length) {
+      list.replaceChildren(...events.map((e) => {
+        const row = el("div", "ev");
+        row.append(el("time", "", wallTime(e.wall)), el("span", "", e.text));
+        return row;
+      }));
+    }
+  } catch (error) {
+    // timed out or failed: the next status poll tries again
+  } finally {
+    fetchingEvents = false;
+  }
+}
+
+for (const button of document.querySelectorAll("[data-command]")) {
+  button.onclick = () => {
+    const command = button.dataset.command;
+    // With no attempt open (after a fault, or resting away from rest) Reset only drives to rest: no sheet.
+    if (command === "reset" && status && status.attempt_open) {
+      sheetAttempt = status.attempt;
+      $("sheet-attempt").textContent = status.attempt;
+      $("reset-sheet").hidden = false;
+      return;
+    }
+    send({ command });
+  };
+}
+for (const button of document.querySelectorAll("[data-reset]")) {
+  button.onclick = () => {
+    $("reset-sheet").hidden = true;
+    if (button.dataset.reset) send({ command: "reset", outcome: button.dataset.reset, for_attempt: sheetAttempt });
+  };
+}
+$("reset-sheet").onclick = (event) => { if (event.target === $("reset-sheet")) $("reset-sheet").hidden = true; };
+// Pause leaves the sheet open, so the operator can still say how the attempt went.
+$("sheet-pause").onclick = () => send({ command: "pause" });
+for (const button of document.querySelectorAll("[data-tool]")) button.onclick = () => send({ command: button.dataset.tool });
+$("results-close").onclick = () => { $("results-sheet").hidden = true; };
+$("results-sheet").onclick = (event) => { if (event.target === $("results-sheet")) $("results-sheet").hidden = true; };
+$("take-control").onclick = () => send({ command: "take_control" });
+for (const button of document.querySelectorAll("[data-outcome]")) {
+  button.onclick = () => send({ command: "outcome", outcome: button.dataset.outcome });
+}
+
+// Keys on a laptop, the same as at the robot's terminal. Each acts through its button, so a key does
+// only what the button would, and says why when the button is disabled. Space sends "toggle": the
+// control loop decides between pause and resume against the state it has, not this page's copy. A held
+// Space sends nothing more: its repeats are ignored, and so is any keydown until the key has come up,
+// so only a fresh press can resume. The loop's 1 s rule backs this up. (The terminal sees no key-up,
+// so there Space only pauses.) With the Reset or results sheet open, Space and P both pause, and Space
+// never resumes: the policy keeps driving behind a sheet, and these keys must still stop it.
+const COMMAND_KEYS = { p: "pause", r: "resume", b: "rewind", t: "teleop" };
+const TOOL_KEYS = { c: "check", o: "pose" };
+const OUTCOME_KEYS = { s: "succeeded", f: "failed", i: "ignored" };
+
+function press(button, refusal) {
+  if (!button) return;
+  if (!button.disabled) button.click();
+  else if (refusal) toast(refusal, false);
+}
+
+let spaceDown = false;  // a Space keydown was taken and its keyup hasn't come yet
+
+function onKey(event) {
+  if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === " ") {
+    event.preventDefault();  // no scrolling, and no click on a focused button
+    if (spaceDown) return;
+    spaceDown = true;
+  }
+  if (key === "Escape") { $("reset-sheet").hidden = true; $("results-sheet").hidden = true; return; }
+  if (!status) return;
+  const refusal = (command) => status.refusals[command];
+  const sheetOpen = !$("reset-sheet").hidden || !$("results-sheet").hidden;
+  if (sheetOpen && (key === " " || key === "p")) {
+    press(document.querySelector('[data-command="pause"]'), refusal("pause"));
+    return;
+  }
+  if (!$("results-sheet").hidden) return;
+  if (!$("reset-sheet").hidden) {
+    if (OUTCOME_KEYS[key]) press(document.querySelector(`[data-reset="${OUTCOME_KEYS[key]}"]`));
+    return;
+  }
+  if (key === " ") {
+    if (status.you_have_control === false) toast(refusal("pause") || refusal("resume"), false);
+    else send({ command: "toggle" });
+  } else if (COMMAND_KEYS[key]) {
+    press(document.querySelector(`[data-command="${COMMAND_KEYS[key]}"]`), refusal(COMMAND_KEYS[key]));
+  } else if (key === "ArrowRight") {
+    press(document.querySelector('[data-command="reset"]'), refusal("reset"));
+  } else if (key === "ArrowLeft") {
+    if (!status.allowed.reset) toast(refusal("reset"), false);
+    else if (status.state !== "fault") send({ command: "reset", outcome: "ignored", for_attempt: status.attempt });
+  } else if (OUTCOME_KEYS[key] && !$("prompt").hidden) {
+    press(document.querySelector(`[data-outcome="${OUTCOME_KEYS[key]}"]`));
+  } else if (TOOL_KEYS[key]) {
+    press(document.querySelector(`[data-tool="${TOOL_KEYS[key]}"]`), refusal(TOOL_KEYS[key]));
+  } else if (/^[1-9]$/.test(key) && !$("reasons-box").hidden) {
+    press($("reasons").children[Number(key) - 1]);
+  }
+}
+document.addEventListener("keydown", onKey);
+
+// Out of sight (the screen locked, another app or tab in front), a phone's browser slows or stops
+// this page's polls, so it tells serve at once: a running policy pauses, as on a lost link. Only the
+// page in control reports it, and the server ignores any other page.
+function reportSight(visible) {
+  if (!status || status.you_have_control !== true) return;
+  fetch("/command", {
+    method: "POST", keepalive: true, headers: { ...HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify({ command: visible ? "page_visible" : "page_hidden" }),
+  }).catch(() => {});
+}
+document.addEventListener("visibilitychange", () => {
+  reportSight(document.visibilityState === "visible");
+  keepAwake();
+  resumePreviews();
+});
+window.addEventListener("pagehide", () => reportSight(false));
+
+// Keep the screen on while this page has control, so a phone doesn't dim, lock and pause the policy.
+// The Screen Wake Lock API needs HTTPS (tailscale serve); on plain HTTP this does nothing. The browser
+// releases the lock when the page is hidden, so it's taken again when the page is back.
+let wakeLock = null;
+let wakeRequest = null;
+function keepAwake() {
+  const wanted = status && status.you_have_control !== false && document.visibilityState === "visible";
+  if (!wanted) {
+    if (wakeLock) wakeLock.release().catch(() => {});
+    wakeLock = null;
+    return;
+  }
+  if (wakeLock || wakeRequest || !("wakeLock" in navigator)) return;
+  wakeRequest = navigator.wakeLock.request("screen")
+    .then((lock) => { wakeLock = lock; lock.addEventListener("release", () => { if (wakeLock === lock) wakeLock = null; }); })
+    .catch(() => {})
+    .finally(() => { wakeRequest = null; });
+}
+// A focused button would click on Space's keyup as well: Space acts only through onKey.
+document.addEventListener("keyup", (event) => {
+  if (event.key !== " ") return;
+  event.preventDefault();
+  spaceDown = false;
+});
+// A keyup made while another window has focus never reaches the page: without this, the next press
+// after switching back would be ignored, and a press meant to pause would do nothing.
+window.addEventListener("blur", () => { spaceDown = false; });
+poll();
+</script>
+</body>
+</html>

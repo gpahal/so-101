@@ -101,9 +101,10 @@ def dry_run(
     out.mkdir(parents=True)
 
     print("Checking the setup...", flush=True)
-    found_cameras = [s.camera(ours) for ours in task.cameras.values()]
+    found_cameras = [s.camera(name) for name in task.cameras]
     report, lookups = check.run_checks(
-        s, cameras=found_cameras, task=task, loop_fps=task.fps, keyboard=True, snapshot_dir=out / "snapshots"
+        s, cameras=found_cameras, task=task, loop_fps=task.fps, keyboard=True, snapshot_dir=out / "snapshots",
+        video=True,
     )
     report.print("SETUP")
 
@@ -129,10 +130,7 @@ def dry_run(
         finish()
         return
     cameras = task_cameras(s, task, [lookup.camera for lookup in lookups])
-    args = record_args(
-        s, task, cameras, root=root, repo_id=repo_id, episodes=2, episode_time_s=task.episode_time_s,
-        reset_time_s=task.reset_time_s, display=display,
-    )
+    args = record_args(s, task, cameras, root=root, repo_id=repo_id, episodes=2, display=display)
     data_report = Report()
     code = run_lerobot("lerobot-record", [*args, *extra])
     if code != 0:

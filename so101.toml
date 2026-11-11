@@ -1,11 +1,9 @@
-# SO-101 hardware settings. Every `uv run so101 ...` command and the Python helpers read this file.
+# SO-101 hardware settings. Every `uv run so101 ...` command reads this file.
 #
 # Ports can change when a board is replugged or moved to another USB socket.
 # `uv run so101 find-port <arm>` detects the board and rewrites `port` and `serial_number` here.
 # If a saved port is gone, commands look the board up by `serial_number` instead.
 #
-# Environment variables override this file: SO101_FOLLOWER_PORT, SO101_LEADER_PORT,
-# SO101_FOLLOWER_ID, SO101_LEADER_ID. `uv run so101 env` prints them all.
 # SO101_CONFIG points every command at a different settings file.
 
 # Calibration files, relative to this file. Each arm's lands in <calibration_dir>/<arm>/<id>.json.
@@ -23,15 +21,16 @@ serial_number = "5C82109414"
 
 [teleop]
 fps = 60
-# Max a follower joint may move per control step, while teleoperating and recording: degrees, or
-# percent of its range for the gripper. Smooths sudden jumps. Set to 0 to turn the limit off.
+# Max a follower joint may move per control step, in teleop, record, run and serve, the policy's
+# goals included: degrees, or percent of its range for the gripper. Smooths sudden jumps. run and
+# serve use the same limit as recording, because a lower one changes the arm's path. Set to 0 to
+# turn the limit off.
 max_relative_target = 10
 
 # Cameras. Commands find each camera by its USB vendor:product id (`usb_id`), so it doesn't matter
 # which socket it's in or what else is plugged in (on macOS). `index` is the OpenCV device index,
-# used only for a camera without a usb_id or when two cameras share one; `uv run so101 cameras`
-# lists what's connected. rotation is 0, 90, 180 or -90.
-# Environment variables force an index: SO101_CAMERA_FRONT_INDEX, SO101_CAMERA_WRIST_INDEX.
+# optional with a usb_id (0 when left out), and used only for a camera without a usb_id or when two
+# cameras share one; `uv run so101 cameras` lists what's connected. rotation is 0, 90, 180 or -90.
 #
 # [cameras.<name>.controls] is optional. Before any command opens the cameras, `so101` sets each
 # listed UVC control with uvc-util (install it with scripts/install-uvc-util.sh) and checks it
@@ -161,3 +160,66 @@ job_timeout = "1h"
 [remote.pi05]
 job_target = "l4x1"
 job_timeout = "1h"
+
+# `uv run so101 serve [task]`: the control center, a web page for supervising the follower from a
+# phone or laptop over Tailscale. `serve` checks every setting here before it starts, and refuses to
+# start on a missing or partial rest pose or a value out of its range; `so101 check` warns about the
+# same problems. Only blame_s is used elsewhere: `runs`, `build --with` and `review --runs` read it to
+# find the suspect frames, and stop if it isn't a number of 0 or more.
+[control]
+# Where Reset sends the follower at the end of every attempt: each of the six motors' raw position in
+# encoder steps (0-4095), the same for every task. Pick a folded pose that stays put with the power
+# off, move the arm there by hand, and save it with `uv run so101 pose --save-rest`, which replaces
+# the commented-out rest_pose and rest_pose_calibration lines below with the ones it saves.
+# rest_pose = { shoulder_pan = 2048, shoulder_lift = 2048, elbow_flex = 2048, wrist_flex = 2048, wrist_roll = 2048, gripper = 2048 }
+# The first 12 hex digits of the follower calibration file's SHA-256 when rest_pose was saved, which
+# `pose --save-rest` writes. Recalibrating changes where each step count puts a joint, so `serve`
+# refuses to start when the calibration file no longer matches, or when this line is missing:
+# save the rest pose again. `so101 check` only warns about either.
+# rest_pose_calibration = "0123456789ab"
+# Seconds of the arm's actual motion each Rewind plays back, newest first, in real time. Short
+# enough to undo only the mistake; press Rewind again to go back another rewind_s, never past the
+# start of the attempt.
+rewind_s = 2.5
+# Backstop for an attempt nobody ends: seconds of policy driving, not counting pauses, rewinds or
+# Teleop. Demos record for up to 30 s (episode_time_s in tasks.toml), so 45 s gives a policy half as
+# long again to finish or retry, while a forgotten attempt still ends. Only policy time counts because
+# the backstop limits how long the policy gets: a pause to look closer or step away never ends an
+# attempt. At the limit the arm returns to rest, the attempt is saved, and `serve` asks how it went.
+# The right arrow or Reset is the normal way an attempt ends. `so101 run` keeps [run] duration_s for
+# comparable evaluations.
+attempt_limit_s = 45
+# Backstop of Teleop seconds in one attempt. 3 minutes is six times a 30 s demo, so it doesn't cut
+# a slow correction or demo short, but a forgotten one stops recording.
+human_limit_s = 180
+# Where Teleop from rest starts: "start-pose" first drives to the demos' start pose, so human demos
+# start where the policy's attempts do; "rest" hands over at the rest pose.
+teleop_from_rest = "start-pose"
+# When an operator pauses without rewinding, the last blame_s seconds of frames where the policy
+# drove are marked as the suspect frames, kept out of training. Waiting frames, where it sent no
+# action, don't count. The same as rewind_s, so marking a mistake covers what one Rewind would have
+# undone.
+blame_s = 2.5
+# What a running policy does when the controlling page stops polling for link_timeout_s seconds:
+# "pause" holds the arm, so a policy never runs unsupervised; "continue" keeps it running.
+on_link_loss = "pause"
+# The page polls 4 times a second, so 3 s is 12 missed polls: a real dropout, not a slow phone. At
+# least 1 s, so a few slow polls never count as a lost link.
+link_timeout_s = 3
+# "tailscale" listens only on this computer's Tailscale address, as the tailscale command gives it,
+# or on 127.0.0.1 behind HTTPS when `tailscale serve` offers the port. It falls back to 127.0.0.1
+# with a warning when Tailscale isn't running, including when the tailscale command gives no
+# address, since another VPN can use the same 100.64.0.0/10 range. "127.0.0.1" allows only a
+# browser on this computer, so `serve` won't start there while a Tailscale route forwards raw TCP
+# to the port: those connections would look like this computer's own. On 127.0.0.1 `serve` checks
+# Tailscale's routes again every 5 s, and refuses every request while such a route exists, or,
+# behind HTTPS, a Funnel route. With the tailscale command installed but no status to read, as when
+# the Tailscale app is quit, it also refuses every request until a check reads the status: a raw
+# forward might exist. It never listens on every interface (0.0.0.0).
+bind = "tailscale"
+# The control page's port: `serve` serves the page at http://<address>:<port>/.
+port = 8101
+# Frames per second of each camera preview on the page, 320 px wide. Enough to see what the robot
+# sees, at a sixth of the cameras' 30 fps, so previews over Tailscale stay light on a phone. When
+# the control loop falls under 95% of the task's fps, previews drop to half this rate, then stop.
+preview_fps = 5

@@ -1,0 +1,37 @@
+# Run the unit tests on every pull request and on main. They need no hardware: LeRobot's motor code
+# runs over a fake bus, with fake cameras and a scripted policy (see tests/fakes.py).
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its run still in progress.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # macOS on Apple Silicon, the platform the CLI is built for: the lockfile resolves macOS-only
+    # dependencies (pyobjc for the cameras), and the recorder's video encoding runs as it does locally.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      # The tests never need the Hugging Face Hub; offline, a stray call fails instead of hanging.
+      HF_HUB_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+      # Python comes from .python-version (3.13: LeRobot's argument parser breaks on 3.14).
+      - run: uv sync --locked
+      - run: uv run python -m compileall -q src tests
+      - run: uv run python -m unittest discover -s tests -v

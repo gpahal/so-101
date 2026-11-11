@@ -1,103 +1,27 @@
-# Pretrained ACT policies for one SO-101 with two cameras, run with `uv run so101 run <task>`.
+# Tasks you record demos for and train a policy on, one SO-101 with two cameras.
 #
-# Each policy was trained by someone else on their own arm, cameras, table and lighting.
-# ACT does not generalise past what it saw, so a policy only has a chance when your scene looks
-# like theirs: copy the camera placement, props and table colour as closely as you can. Open the
-# `dataset` in the LeRobot visualizer (`uv run so101 tasks` prints the link) and match your
-# camera views to its frames before running.
-#
-# Fields:
-#   policy        Hub repo of the ACT checkpoint
-#   dataset       Hub dataset it was trained on, to look at
-#   prompt        The dataset's task text. ACT ignores language; it is only logged.
-#   cameras       checkpoint camera name -> your camera name in so101.toml
-#   use_degrees   Joint units the dataset was recorded in: true for LeRobot >= 0.5 ("so_follower"
-#                 datasets), false for older ones recorded in -100..100 units
-#   fps           Control rate the dataset was recorded at
-#   props, setup  What to put on the table and where the cameras go
-#
-# Your own tasks leave out `policy` and `dataset`; see "Your own tasks" at the end.
-
-# The task every `so101` command uses when you don't name one.
-default = "cylinder-bowl"
-
-[cube-dish]
-policy = "taiki-ishii/act_so101-pick-cube-01"
-dataset = "taiki-ishii/so101-pick-cube-01"
-prompt = "Pick the red cube and drop it on the silver dish"
-cameras = { top = "front", wrist = "wrist" }
-use_degrees = true
-fps = 30
-episodes = 50
-props = [
-  "Red cube, about 2.5 cm (wooden toy block or foam cube)",
-  "Round shallow silver dish, about 10 cm across (metal ramekin, tin lid or candle tin)",
-  "Light wood-colour or beige tabletop, plain, nothing else on it",
-]
-setup = [
-  "Front camera straight overhead looking down, about 60-80 cm above the table",
-  "Arm base at the top-centre edge of the overhead image",
-  "Dish in the middle of the image; cube between the dish and the arm, a little to the right",
-  "Wrist camera on the gripper, looking past the jaws",
-]
-
-[lego-bowl]
-policy = "f-dansard/act_so101_pickplace_v1"
-dataset = "f-dansard/so101_pickplace_v1"
-prompt = "Put the lego brick in the bowl"
-cameras = { front = "front", wrist = "wrist" }
-use_degrees = true
-fps = 30
-episodes = 30
-props = [
-  "Small tan or yellow LEGO brick (2x2 or 2x3)",
-  "Large pale-blue or white bowl, about 20 cm across",
-  "Dark brown wood tabletop",
-]
-setup = [
-  "Front camera at the opposite corner of the table, raised about 40 cm, looking diagonally across at the arm",
-  "Arm base at the far edge, top-centre of the front image",
-  "Bowl near the camera on the left; brick on the right, in front of the arm",
-  "Wrist camera on the gripper",
-]
-
-[lego-box]
-policy = "samarth-shukla6/act-svla-so101-pickplace"
-dataset = "lerobot/svla_so101_pickplace"
-prompt = "pink lego brick into the transparent box"
-# Official LeRobot dataset, but both of its cameras are fixed: one in front and one at the side.
-# Unmount the wrist camera and stand it to the arm's side, or skip this task.
-cameras = { up = "front", side = "wrist" }
-use_degrees = false
-fps = 30
-episodes = 50
-props = [
-  "Red or pink 2x4 LEGO brick",
-  "Clear plastic box, about 15 x 10 cm, low sides, with orange tape outlining its base",
-  "Plain white tabletop and a white wall behind",
-]
-setup = [
-  "'up' camera (your front camera) in front of the arm, raised and tilted down at about 45 degrees",
-  "'side' camera (your wrist camera, unmounted) beside the arm at table height, looking at it side-on",
-  "Box to the arm's left; brick in front of the arm, anywhere in reach",
-]
-
-# --- Your own tasks -------------------------------------------------------------------------------
-# No `policy` or `dataset`: demos are saved under data/<task>/ (see [data] in so101.toml), uploaded
-# for training to <your Hub user>/so101_<task>, and the trained policy goes to
-# <your Hub user>/act_so101_<task> (all private).
+# Demos are saved under data/<task>/ (see [data] in so101.toml), in degrees, uploaded for training
+# to <your Hub user>/so101_<task>, and the trained policy goes to <your Hub user>/act_so101_<task>
+# (or pi05_so101_<task>), all private.
 #   uv run so101 record --dry-run   rehearse and check everything first
 #   uv run so101 record    teleoperate demos, as a new session, until there are `episodes`
 #   uv run so101 review    trim idle time and delete bad demos
 #   uv run so101 train     build the training dataset and train ACT or (--policy pi05) pi0.5, on Hugging Face Jobs by default
 #   uv run so101 run       run the trained policy
-# Each command works on `default` above; add a task name to use another, e.g. `so101 record <task>`.
+# Each command works on `default` below; add a task name to use another, e.g. `so101 record <task>`.
+#
 # Fields:
+#   prompt          The task text saved with each demo and given to the policy. ACT ignores it.
+#   fps             Control rate to record and run at (default 30).
 #   episodes        Demos to keep. ~50 for one pick-and-place, spread over 5+ start positions.
 #   episode_time_s  Seconds per demo; press Right arrow or n to finish one early.
 #   reset_time_s    Seconds between demos to put the props back.
-#   cameras         Your cameras to record, named as in so101.toml (default: front and wrist).
-# Copy this section and change the name, prompt and props to add another task.
+#   cameras         Your cameras to record, named as in so101.toml (default: ["front", "wrist"]).
+#   props, setup    What to put on the table and where the cameras go.
+# Copy a task's section and change the name, prompt and props to add another task.
+
+# The task every `so101` command uses when you don't name one.
+default = "cylinder-bowl"
 
 [cylinder-bowl]
 prompt = "Pick up the cylinder and put it in the bowl"

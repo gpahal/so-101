@@ -1,5 +1,6 @@
 """Load `so101.toml` and resolve each arm's current serial port."""
 
+import hashlib
 import json
 import math
 import os
@@ -14,13 +15,15 @@ from serial.tools import list_ports
 ArmName = Literal["follower", "leader"]
 ARMS: tuple[ArmName, ...] = ("follower", "leader")
 
-# LeRobot's device type and CLI flag prefix for each arm.
-LEROBOT_TYPE = {"follower": "so101_follower", "leader": "so101_leader"}
+# LeRobot's CLI flag prefix for each arm.
 LEROBOT_PREFIX = {"follower": "robot", "leader": "teleop"}
 
 # A training job's timeout, from its expected time plus start-up. Generous, because hitting it loses work.
 JOB_TIMEOUT_MARGIN = 2.5
 JOB_STARTUP_S = 600
+# A calibrated range under this many encoder steps (4096 per turn) means the joint wasn't moved
+# through its range during calibration, and ends up nearly locked.
+MIN_JOINT_RANGE_STEPS = 500
 
 
 def config_path() -> Path:
@@ -38,30 +41,29 @@ class Arm:
     calibration_dir: Path
 
     @property
-    def lerobot_type(self) -> str:
-        return LEROBOT_TYPE[self.name]
-
-    @property
-    def prefix(self) -> str:
-        return LEROBOT_PREFIX[self.name]
-
-    @property
     def calibration_file(self) -> Path:
         return self.calibration_dir / f"{self.id}.json"
 
-    def narrow_joints(self, min_ticks: int = 500) -> list[str]:
-        """Joints whose calibrated range is under `min_ticks` encoder steps (4096 per turn).
+    def calibration_fingerprint(self) -> str | None:
+        """The first FINGERPRINT_DIGITS hex digits of the calibration file's SHA-256, or None without a file.
 
-        A joint that wasn't moved through its range during calibration ends up nearly locked.
+        `pose --save-rest` saves the follower's beside the rest pose, which is in raw motor steps:
+        recalibrating moves where each step count puts a joint, so the saved pose no longer folds the arm.
         """
+        if not self.calibration_file.is_file():
+            return None
+        return hashlib.sha256(self.calibration_file.read_bytes()).hexdigest()[:FINGERPRINT_DIGITS]
+
+    def narrow_joints(self) -> list[str]:
+        """Joints whose calibrated range is under MIN_JOINT_RANGE_STEPS encoder steps."""
         if not self.calibration_file.is_file():
             return []
         calibration = json.loads(self.calibration_file.read_text())
-        return [joint for joint, c in calibration.items() if c["range_max"] - c["range_min"] < min_ticks]
+        return [joint for joint, c in calibration.items() if c["range_max"] - c["range_min"] < MIN_JOINT_RANGE_STEPS]
 
     def resolve_port(self) -> str:
         """Return the saved port if present, else find the board by its USB serial number."""
-        if Path(self.port).exists():
+        if self.port and Path(self.port).exists():
             return self.port
         if self.serial_number:
             for p in list_ports.comports():
@@ -70,9 +72,9 @@ class Arm:
         raise PortNotFoundError(self)
 
     def lerobot_args(self) -> list[str]:
-        p = self.prefix
+        p = LEROBOT_PREFIX[self.name]
         return [
-            f"--{p}.type={self.lerobot_type}",
+            f"--{p}.type=so101_{self.name}",
             f"--{p}.port={self.resolve_port()}",
             f"--{p}.id={self.id}",
             f"--{p}.calibration_dir={self.calibration_dir}",
@@ -108,13 +110,11 @@ class Camera:
     rotation: int = 0
     usb_id: str = ""
     controls: dict[str, int] = field(default_factory=dict)
-    # True when SO101_CAMERA_<NAME>_INDEX set `index`, which then wins over the USB id lookup.
-    index_from_env: bool = False
 
-    def lerobot_spec(self, key: str | None = None, width: int | None = None, height: int | None = None) -> str:
-        """One entry of LeRobot's `--robot.cameras` dict, named `key` (default: this camera's name)."""
+    def lerobot_spec(self, width: int | None = None, height: int | None = None) -> str:
+        """One entry of LeRobot's `--robot.cameras` dict, named after this camera."""
         return (
-            f"{key or self.name}: {{type: opencv, index_or_path: {self.index}, width: {width or self.width}, "
+            f"{self.name}: {{type: opencv, index_or_path: {self.index}, width: {width or self.width}, "
             f"height: {height or self.height}, fps: {self.fps}, rotation: {self.rotation}}}"
         )
 
@@ -128,8 +128,6 @@ class Run:
     duration_s: float
     episodes: int
     device: str
-    max_relative_target: float
-    action_steps: int | None  # None uses the model's trained value
 
 
 @dataclass(frozen=True)
@@ -164,6 +162,70 @@ class Remote:
     job_timeout: str
 
 
+# Raw encoder steps per turn of an STS3215 motor: positions run 0-4095.
+MOTOR_STEPS = 4096
+# Hex digits of a calibration file's SHA-256 kept as `rest_pose_calibration`: enough to tell two
+# calibrations apart, short enough to read in so101.toml.
+FINGERPRINT_DIGITS = 12
+
+
+@dataclass(frozen=True)
+class ControlSetting:
+    """What `load()` uses when so101.toml leaves a `[control]` setting out, and what `serve`'s
+    preflight (`check.check_control`) allows for it."""
+
+    default: float | str
+    minimum: float | None = None  # the lowest a number may be
+    inclusive: bool = False  # whether `minimum` itself is allowed
+    why: str = ""  # why a number can't be lower
+    choices: tuple[str, ...] = ()  # the strings it may be
+
+
+# Every `[control]` setting but the rest pose. `check_control` also checks `port` is a port number.
+CONTROL_SETTINGS = {
+    "rewind_s": ControlSetting(2.5, minimum=0, why="each Rewind has to go back some time"),
+    "attempt_limit_s": ControlSetting(45, minimum=0, why="at 0 s every attempt would end as it starts"),
+    "human_limit_s": ControlSetting(180, minimum=0, why="at 0 s every Teleop would end as it starts"),
+    "teleop_from_rest": ControlSetting("start-pose", choices=("start-pose", "rest")),
+    "blame_s": ControlSetting(2.5, minimum=0, inclusive=True, why="0 marks no frames as suspect"),
+    "on_link_loss": ControlSetting("pause", choices=("pause", "continue")),
+    "link_timeout_s": ControlSetting(
+        3, minimum=1, inclusive=True,
+        why="the page polls every 0.25 s, so under 1 s a few slow polls would count as a lost link",
+    ),
+    "bind": ControlSetting("tailscale", choices=("tailscale", "127.0.0.1")),
+    "port": ControlSetting(8101),
+    "preview_fps": ControlSetting(5, minimum=0, inclusive=True, why="0 turns the camera previews off"),
+}
+
+
+@dataclass(frozen=True)
+class Control:
+    """The `[control]` section of so101.toml: settings for `so101 serve`, the control center.
+
+    `load()` keeps each value as the file writes it, without checking it, so a bad value never stops
+    the commands that fix it, such as `pose --save-rest`. `serve`'s preflight (`check.check_control`)
+    checks every value before the control center starts. Only `blame_s` is read elsewhere: by `runs`,
+    `build --with` and `review --runs`, which check it as they read runs (`analysis.check_blame_s`)."""
+
+    # Each motor's raw position in encoder steps (0-4095), independent of calibration and units, so it
+    # stays right for every task. None until `so101 pose --save-rest` saves one.
+    rest_pose: dict[str, int] | None
+    # The first FINGERPRINT_DIGITS hex digits of the follower calibration file's SHA-256 when the rest
+    # pose was saved, or None when it was saved before fingerprints were kept.
+    rest_pose_calibration: str | None
+    rewind_s: float
+    attempt_limit_s: float
+    human_limit_s: float
+    teleop_from_rest: str
+    blame_s: float
+    on_link_loss: str
+    link_timeout_s: float
+    bind: str
+    port: int
+    preview_fps: float
+
+
 @dataclass(frozen=True)
 class Settings:
     follower: Arm
@@ -173,6 +235,7 @@ class Settings:
     run: Run
     train: dict[str, Train]
     remote: dict[str, Remote]
+    control: Control
     data_dir: Path
     path: Path
 
@@ -189,34 +252,63 @@ class Settings:
         return self.cameras[name]
 
 
+def _control(section: dict) -> Control:
+    return Control(
+        rest_pose=section.get("rest_pose"),
+        rest_pose_calibration=section.get("rest_pose_calibration"),
+        **{key: section.get(key, setting.default) for key, setting in CONTROL_SETTINGS.items()},
+    )
+
+
 def load() -> Settings:
     path = config_path()
+    try:
+        return _parse(path)
+    except (KeyError, ValueError, TypeError, tomllib.TOMLDecodeError) as e:
+        problem = f"the setting {e.args[0]!r} is missing" if isinstance(e, KeyError) else e
+        raise ConfigError(f"{path}: {problem}") from e
+
+
+def _parse(path: Path) -> Settings:
     data = tomllib.loads(path.read_text())
     calibration_root = path.parent / data.get("calibration_dir", "calibration")
 
     def arm(name: ArmName) -> Arm:
         section = data[name]
-        env = f"SO101_{name.upper()}_"
         return Arm(
             name=name,
-            id=os.environ.get(env + "ID", section["id"]),
-            port=os.environ.get(env + "PORT", section.get("port", "")),
+            id=section["id"],
+            port=section.get("port", ""),
             serial_number=section.get("serial_number", ""),
             calibration_dir=calibration_root / name,
         )
 
     def camera(name: str, section: dict) -> Camera:
-        env_index = os.environ.get(f"SO101_CAMERA_{name.upper()}_INDEX")
+        index = section.get("index", 0)
+        if type(index) is not int:  # not int(index), which takes 1.5 and true as camera 1
+            raise ValueError(f"camera {name}'s index is {index!r}: set it to a whole number.")
         return Camera(
             name=name,
-            index=int(env_index if env_index is not None else section["index"]),
+            index=index,
             width=section.get("width", 640),
             height=section.get("height", 480),
             fps=section.get("fps", 30),
             rotation=section.get("rotation", 0),
             usb_id=section.get("usb_id", ""),
             controls=section.get("controls", {}),
-            index_from_env=env_index is not None,
+        )
+
+    def recipe(policy: str, section: dict) -> Train:
+        checkpoints = section["checkpoints"]
+        if type(checkpoints) is not int or checkpoints < 1:
+            raise ValueError(f"[train.{policy}] checkpoints is {checkpoints!r}: set it to a whole number, 1 or more.")
+        return Train(
+            job_target=section["job_target"],
+            seconds_per_step=section["seconds_per_step"],
+            steps_per_demo=section["steps_per_demo"],
+            batch_size=section["batch_size"],
+            num_workers=section["num_workers"],
+            checkpoints=checkpoints,
         )
 
     teleop = data.get("teleop", {})
@@ -232,41 +324,105 @@ def load() -> Settings:
             duration_s=run.get("duration_s", 30),
             episodes=run.get("episodes", 1),
             device=run.get("device", "mps"),
-            max_relative_target=run.get("max_relative_target", teleop.get("max_relative_target", 0)),
-            action_steps=run.get("action_steps"),
         ),
-        train={
-            policy: Train(
-                job_target=section["job_target"],
-                seconds_per_step=section["seconds_per_step"],
-                steps_per_demo=section["steps_per_demo"],
-                batch_size=section["batch_size"],
-                num_workers=section["num_workers"],
-                checkpoints=section["checkpoints"],
-            )
-            for policy, section in train.items()
-        },
+        train={policy: recipe(policy, section) for policy, section in train.items()},
         remote={
             policy: Remote(job_target=section["job_target"], job_timeout=section["job_timeout"])
             for policy, section in data.get("remote", {}).items()
         },
+        control=_control(data.get("control", {})),
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,
     )
 
 
-def save_port(name: ArmName, port: str, serial_number: str) -> Path:
-    """Rewrite `port` and `serial_number` in the arm's section, keeping comments and layout."""
+def _replace_file(path: Path, text: str) -> None:
+    """Write `text` to `path` through a temporary file, so a kill leaves the old file or the new one."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+def save_port(name: ArmName, port: str, serial_number: str) -> bool:
+    """Set `port` and `serial_number` in the arm's section, keeping comments and layout. Returns
+    whether the file changed: it doesn't when both already hold these values."""
     path = config_path()
-    lines = path.read_text().splitlines(keepends=True)
+    old_text = path.read_text()
+    lines = _set_in_section(old_text.splitlines(keepends=True), name, "port", f'port = "{port}"\n')
+    lines = _set_in_section(lines, name, "serial_number", f'serial_number = "{serial_number}"\n', after="port")
+    new_text = "".join(lines)
+    if new_text == old_text:
+        return False
+    _replace_file(path, new_text)
+    return True
+
+
+def _set_in_section(lines: list[str], name: str, key: str, line: str, after: str | None = None) -> list[str]:
+    """`lines` with `key = ...` under the section `[name]` set to `line`.
+
+    Replaces an existing `key = ...` line in the section, or a commented-out `# key = ...` placeholder,
+    else adds the line right after the `after = ...` line, else right after the section's header,
+    adding the section at the end of the file when there is none. A dotted header such as
+    `[cameras.front]` is a section of its own."""
+    lines = list(lines)
     section = None
-    for i, line in enumerate(lines):
-        if m := re.match(r"\s*\[(\w+)\]", line):
-            section = m.group(1)
+    header = existing = placeholder = anchor = None
+    for i, current in enumerate(lines):
+        if m := re.match(r"\s*\[([^\[\]]+)\]\s*(#.*)?$", current):
+            section = m.group(1).strip()
+            if section == name:
+                header = i
         elif section == name:
-            if re.match(r"\s*port\s*=", line):
-                lines[i] = f'port = "{port}"\n'
-            elif re.match(r"\s*serial_number\s*=", line):
-                lines[i] = f'serial_number = "{serial_number}"\n'
-    path.write_text("".join(lines))
+            if existing is None and re.match(rf"\s*{key}\s*=", current):
+                existing = i
+            elif placeholder is None and re.match(rf"\s*#\s*{key}\s*=", current):
+                placeholder = i
+            elif after is not None and anchor is None and re.match(rf"\s*{after}\s*=", current):
+                anchor = i
+    if existing is not None:
+        lines[existing] = line
+    elif placeholder is not None:
+        lines[placeholder] = line
+    elif anchor is not None:
+        lines.insert(anchor + 1, line)
+    elif header is not None:
+        lines.insert(header + 1, line)
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines += ["\n", f"[{name}]\n", line]
+    return lines
+
+
+def save_rest_pose(pose: dict[str, int], path: Path | None = None, *, calibration: str) -> Path:
+    """Write `rest_pose` under `[control]`, and `rest_pose_calibration` = `calibration`, the follower
+    calibration file's fingerprint (`Arm.calibration_fingerprint`), keeping the rest of the file as it is.
+
+    Each line replaces an existing one in the section, or a commented-out placeholder, else goes right
+    after the `[control]` header (`rest_pose_calibration` right after `rest_pose`), adding the section
+    at the end of the file when there is none. Checks every position is from 0 to 4095, and that the
+    result parses to the same values, before writing.
+    """
+    path = path or config_path()
+    # The same rule `serve`'s preflight applies, checked first: a bad value written here would stop `serve`.
+    for motor, steps in pose.items():
+        if isinstance(steps, bool) or not isinstance(steps, int) or not 0 <= steps < MOTOR_STEPS:
+            raise ConfigError(
+                f"The follower's {motor} read {steps!r}, not a raw position from 0 to {MOTOR_STEPS - 1}, so rest_pose "
+                f"wasn't saved and {path} is unchanged. Check the arm's power and cable, then run `uv run so101 scan`."
+            )
+    pose_line = "rest_pose = { " + ", ".join(f"{motor} = {int(steps)}" for motor, steps in pose.items()) + " }\n"
+    lines = _set_in_section(path.read_text().splitlines(keepends=True), "control", "rest_pose", pose_line)
+    lines = _set_in_section(lines, "control", "rest_pose_calibration", f'rest_pose_calibration = "{calibration}"\n',
+                            after="rest_pose")
+    new_text = "".join(lines)
+    try:
+        saved = tomllib.loads(new_text).get("control", {})
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"Saving rest_pose would break {path} ({e}), so it was left unchanged.") from e
+    wanted = {"rest_pose": {motor: int(steps) for motor, steps in pose.items()}, "rest_pose_calibration": calibration}
+    got = {key: saved.get(key) for key in wanted}
+    if got != wanted:
+        raise ConfigError(f"Saving rest_pose to {path} didn't round-trip (read back {got!r}), so it was left unchanged.")
+    _replace_file(path, new_text)
     return path

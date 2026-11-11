@@ -9,11 +9,16 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
-SERVER_IMAGE = "huggingface/lerobot-gpu:latest"
+from so_101 import svtshim
+
+# LeRobot publishes no image tagged for a release, so this is what `latest` was on 2026-11-11, by
+# digest: a job must not change under a working setup when `latest` moves. Move it on purpose.
+SERVER_IMAGE = "huggingface/lerobot-gpu@sha256:aed1a4990fedee463b545050f33a38afce4f6ec18f7ceb8be17f850737860d6c"
 PORT = 7447
 DEPLOYMENT = "so101"
 SEMANTICS = "so101-degrees-gripper-percent-v1"
@@ -21,8 +26,9 @@ SERVER_LABEL = "policy-server"
 SSH_KEYS_URL = "https://huggingface.co/settings/keys"
 DONE_STAGES = {"COMPLETED", "CANCELED", "ERROR", "DELETED"}
 JOINTS = ["shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos", "wrist_roll.pos", "gripper.pos"]
-IMAGE_PREFIX = "observation.images."
-EMPTY_CAMERA_PREFIX = IMAGE_PREFIX + "empty_camera_"
+# ssh gives up after 15 s without an answer (ServerAliveInterval 5 x ServerAliveCountMax 3), and is
+# started again this long after each exit, so the tunnel comes back on its own after a network drop.
+RESTART_DELAY_S = 5.0
 
 # LeRobot 0.7's server requires every input the model declares, but the client can only send cameras
 # that exist. pi0.5 pads and masks a missing camera itself, which is what it saw in training, so
@@ -53,24 +59,26 @@ main()
 '''
 
 
-def server_config(repo: str, revision: str, config: dict, action_steps: int) -> dict:
-    """The policy server's config, describing the model's inputs and outputs from its config.json."""
+def server_config(
+    repo: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int, fps: int
+) -> dict:
+    """The policy server's config, describing the model's inputs and outputs. `image_sizes` is each
+    camera's (width, height), from `Task.image_sizes`."""
     vector = {"dtype": "float32", "names": JOINTS, "semantics": SEMANTICS, "shape": [len(JOINTS)]}
     cameras = [
         {
-            "name": key,
-            "shape": [feature["shape"][1], feature["shape"][2], feature["shape"][0]],
+            "name": f"observation.images.{camera}",
+            "shape": [height, width, 3],
             "dtype": "uint8",
             "kind": "rgb",
-            "semantics": f"rgb-{key.removeprefix(IMAGE_PREFIX)}-v1",
+            "semantics": f"rgb-{camera}-v1",
         }
-        for key, feature in config["input_features"].items()
-        if key.startswith(IMAGE_PREFIX) and not key.startswith(EMPTY_CAMERA_PREFIX)
+        for camera, (width, height) in image_sizes.items()
     ]
     return {
         "deployment": DEPLOYMENT,
         "model": {"repo_or_path": repo, "revision": revision, "device": "cuda"},
-        "execution": {"supported_modes": ["chunk"], "action_fps": 30.0, "n_action_steps": action_steps},
+        "execution": {"supported_modes": ["chunk"], "action_fps": float(fps), "n_action_steps": action_steps},
         "language": {"enabled": False},
         "zenoh": {"mode": "peer", "listen_endpoints": [f"tcp/127.0.0.1:{PORT}"]},
         "semantics": SEMANTICS,
@@ -99,6 +107,7 @@ def check_ssh_key() -> None:
         ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=accept-new", "git@hf.co"],
         capture_output=True,
         text=True,
+        env=svtshim.other_env(),
     )
     reply = result.stdout + result.stderr
     if "welcome to hugging face" not in reply.lower() or "hi anonymous" in reply.lower():
@@ -110,15 +119,16 @@ def check_ssh_key() -> None:
         )
 
 
-def active_server():
-    """The running policy-server job, if there is one."""
+def active_servers() -> list:
+    """Every running policy-server job. There should be one, but each one bills."""
     from huggingface_hub import HfApi
 
-    servers = [
-        job
-        for job in HfApi().list_jobs(labels={"so101": SERVER_LABEL})
-        if job.status.stage not in DONE_STAGES
-    ]
+    return [job for job in HfApi().list_jobs(labels={"so101": SERVER_LABEL}) if job.status.stage not in DONE_STAGES]
+
+
+def active_server():
+    """The running policy-server job, if there is one."""
+    servers = active_servers()
     return servers[0] if servers else None
 
 
@@ -132,7 +142,8 @@ def describe(job) -> str:
 
 
 def start_server(
-    *, repo: str, task: str, policy_type: str, revision: str, config: dict, action_steps: int, target: str, timeout: str
+    *, repo: str, task: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int,
+    fps: int, target: str, timeout: str,
 ) -> None:
     """Start the job and wait until the model is loaded and serving."""
     from huggingface_hub import HfApi, get_token
@@ -140,7 +151,7 @@ def start_server(
     check_ssh_key()
     if server := active_server():
         sys.exit(f"A policy server is already running: {describe(server)}.\nStop it first: uv run so101 server stop")
-    setup, serve = setup_script(policy_type, server_config(repo, revision, config, action_steps))
+    setup, serve = setup_script(policy_type, server_config(repo, revision, image_sizes, action_steps, fps))
     api = HfApi()
     job = api.run_job(
         image=SERVER_IMAGE,
@@ -167,6 +178,7 @@ def start_server(
     print(
         "\nThe policy server is ready. Next:\n"
         f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision} --action-steps {action_steps}\n"
+        f"  uv run so101 serve {task} --policy {policy_type} --remote --revision {revision} --action-steps {action_steps}\n"
         "  uv run so101 server stop"
     )
 
@@ -192,12 +204,22 @@ def wait_until_ready(job_id: str, policy_type: str) -> None:
 def stop_server() -> None:
     from huggingface_hub import HfApi
 
-    server = active_server()
-    if server is None:
+    servers = active_servers()
+    if not servers:
         print("No policy server is running.")
         return
-    HfApi().cancel_job(job_id=server.id)
-    print(f"Stopped {describe(server)}.")
+    api = HfApi()
+    failed = []
+    for server in servers:  # one that can't be cancelled must not leave the others billing
+        try:
+            api.cancel_job(job_id=server.id)
+        except Exception as error:
+            failed.append(f"{describe(server)}: {error}")
+        else:
+            print(f"Stopped {describe(server)}.")
+    if failed:
+        sys.exit("Couldn't stop these, and they may still bill. Run `uv run so101 server stop` again:\n  "
+                 + "\n  ".join(failed))
 
 
 def require_server(task: str, policy_type: str, revision: str, action_steps: int):
@@ -215,25 +237,12 @@ def require_server(task: str, policy_type: str, revision: str, action_steps: int
 
 @contextmanager
 def tunnel(job_id: str) -> Iterator[None]:
-    """Forward the job's server port to this Mac for as long as the block runs."""
+    """Forward the job's server port to this Mac for as long as the block runs, restarting ssh when it exits."""
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", PORT)) == 0:
             sys.exit(f"Something on this Mac already uses port {PORT}. Close it and try again.")
-    # In its own session, so Ctrl+C lets the client shut down over a tunnel that's still open.
-    proc = subprocess.Popen(
-        [
-            "ssh", "-N", "-L", f"{PORT}:127.0.0.1:{PORT}",
-            "-o", "ExitOnForwardFailure=yes",
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ServerAliveInterval=5",
-            "-o", "ServerAliveCountMax=3",
-            "-o", "ControlMaster=no",
-            "-o", "ControlPath=none",
-            f"{job_id}@ssh.hf.jobs",
-        ],
-        start_new_session=True,
-    )  # fmt: skip
+    proc = _start_ssh(job_id)
+    supervisor = None
     try:
         deadline = time.monotonic() + 30
         while True:
@@ -245,10 +254,62 @@ def tunnel(job_id: str) -> Iterator[None]:
             if time.monotonic() > deadline:
                 sys.exit("The SSH tunnel to the job didn't open within 30 seconds.")
             time.sleep(0.2)
+        supervisor = _Supervisor(job_id, proc)
         yield
     finally:
+        if supervisor is not None:
+            proc = supervisor.stop()
         proc.terminate()
         proc.wait()
+
+
+def _start_ssh(job_id: str) -> subprocess.Popen:
+    # In its own session, so Ctrl+C lets the client shut down over a tunnel that's still open.
+    return subprocess.Popen(
+        [
+            "ssh", "-N", "-L", f"127.0.0.1:{PORT}:127.0.0.1:{PORT}",
+            "-o", "ForwardAgent=no",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=3",
+            "-o", "ControlMaster=no",
+            "-o", "ControlPath=none",
+            f"{job_id}@ssh.hf.jobs",
+        ],
+        start_new_session=True,
+        env=svtshim.other_env(),
+    )  # fmt: skip
+
+
+class _Supervisor:
+    """Starts ssh again `RESTART_DELAY_S` after each exit or failed start, until `stop`. Its printed
+    line can't end its thread: once the terminal is closed, printing fails, and the line is dropped."""
+
+    def __init__(self, job_id: str, proc: subprocess.Popen) -> None:
+        self.job_id = job_id
+        self.proc = proc
+        self.stopping = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="ssh-tunnel", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stopping.wait(0.2):
+            if self.proc.poll() is None:
+                continue
+            with suppress(OSError, ValueError, RuntimeError):  # a closed terminal (EIO), a closed stdout
+                print("SSH tunnel to the job dropped; reconnecting.", flush=True)
+            if self.stopping.wait(RESTART_DELAY_S):
+                return
+            with suppress(OSError):  # as when too many files are open: the next pass tries again
+                self.proc = _start_ssh(self.job_id)
+
+    def stop(self) -> subprocess.Popen:
+        """Stop restarting, and return the ssh that's running now, or that ran last."""
+        self.stopping.set()
+        self.thread.join()
+        return self.proc
 
 
 def client_args() -> list[str]:
