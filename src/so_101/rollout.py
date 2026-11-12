@@ -183,5 +183,8 @@ def main() -> None:
     svtshim.require()  # it records the attempts with SVT-AV1
     from lerobot.scripts.lerobot_rollout import main as rollout
 
+    from so_101 import connect
+
+    connect.install()  # the follower connects holding where it is, never at an old goal
     install()
     sys.exit(rollout())

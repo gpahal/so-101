@@ -378,7 +378,7 @@ def control(cfg) -> None:
 
 def main() -> None:
     require_serve_env()  # first: nothing else here means anything without it
-    from so_101 import svtshim
+    from so_101 import connect, svtshim
 
     svtshim.ensure()  # `so101 serve` starts this with the fix loaded
     svtshim.require()  # the recorder encodes each attempt's video with SVT-AV1 in this process
@@ -388,6 +388,7 @@ def main() -> None:
     from lerobot.utils import register_third_party_plugins
 
     register_third_party_plugins()
+    connect.install()  # the follower connects holding where it is, never at an old goal
 
     @parser.wrap()
     def run(cfg: RolloutConfig) -> None:

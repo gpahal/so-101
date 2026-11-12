@@ -18,6 +18,8 @@ dependencies = [
 so101 = "so_101.cli:main"
 so101-rollout = "so_101.rollout:main"
 so101-control = "so_101.control.main:main"
+so101-teleoperate = "so_101.connect:teleoperate"
+so101-record = "so_101.connect:record"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]

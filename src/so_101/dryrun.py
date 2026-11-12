@@ -132,7 +132,7 @@ def dry_run(
     cameras = [lookup.camera for lookup in lookups]
     args = record_args(s, task, cameras, root=root, repo_id=repo_id, episodes=2, display=display)
     data_report = Report()
-    code = run_lerobot("lerobot-record", [*args, *extra])
+    code = run_lerobot("so101-record", [*args, *extra])  # lerobot-record, connecting the follower where it is
     if code != 0:
         data_report.fail("rehearsal", f"lerobot-record exited with {code}")
     summary = None

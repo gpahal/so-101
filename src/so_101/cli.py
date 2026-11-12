@@ -252,7 +252,7 @@ def cmd_teleop(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -
     args = [*s.follower_args(), *s.leader.lerobot_args(), f"--fps={s.teleop.fps}"]
     if ns.cameras:
         args += [cameras_arg([cam.lerobot_spec() for cam in cameras]), "--display_data=true"]
-    lerobot("lerobot-teleoperate", [*args, *extra])
+    lerobot("so101-teleoperate", [*args, *extra])  # lerobot-teleoperate, connecting the follower where it is
 
 
 def cmd_cameras(s: settings.Settings, _: argparse.Namespace, extra: list[str]) -> None:
@@ -330,7 +330,7 @@ def cmd_record(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -
     args = record_args(
         s, task, cameras, root=session.dataset_root, repo_id=session.repo_id, episodes=count, display=not ns.no_display,
     )
-    code = run_lerobot("lerobot-record", [*args, *extra])
+    code = run_lerobot("so101-record", [*args, *extra])  # lerobot-record, connecting the follower where it is
 
     session = data.Session(session.task, session.name, session.path)  # re-read the dataset just written
     if session.episodes == 0:
