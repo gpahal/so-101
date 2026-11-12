@@ -749,6 +749,37 @@ class LoopSafetyTest(RigTest):
             rig.holds(FPS)
         self.assertTrue(rig.motors.torqued())
 
+    def test_a_tripped_gripper_only_warns_and_its_load_is_logged_but_other_alarms_fault(self) -> None:
+        rig = self.new_rig("grasp", recorded=True)
+        rig.start_policy()
+        gripper = rig.motors.registers[6]
+        gripper["present_load"] = 0x400 | 497  # 49.7%, closing: stalled at its 50% torque limit
+        rig.tick(FPS + 1)
+        self.assertEqual(rig.events("gripper_load")[-1]["load"], 49.7)
+        self.assertEqual(rig.events("gripper_load")[-1]["attempt"], 1)
+        rig.motors.status["gripper"] = 32  # the grasp held 2 s past the 25% threshold: overload protection trips
+        rig.tick(2 * FPS)
+        status = rig.status()
+        self.assertEqual(status["state"], "autonomous", "a firm grasp carries on, as in so101 run")
+        self.assertIn("overload protection tripped", " ".join(status["warnings"]))
+        self.assertEqual(len(rig.events("gripper_overload")), 1, "logged once while it stands")
+        gripper["present_load"] = 120  # 12%: released
+        rig.motors.status["gripper"] = 0
+        logged = len(rig.events("gripper_load"))
+        rig.tick(2 * FPS)
+        self.assertEqual(len(rig.events("gripper_load")), logged, "a light load isn't logged")
+        self.assertEqual(rig.status()["warnings"], [])
+
+        # Any other bit on the gripper, and an overload on any other joint, still faults.
+        for motor, bits, named in (("gripper", 32 | 4, "gripper (overheat)"), ("elbow_flex", 32, "elbow_flex (overload)")):
+            with self.subTest(motor):
+                rig = self.new_rig(motor)
+                rig.start_policy()
+                rig.motors.status[motor] = bits
+                rig.tick(FPS + 1)
+                self.assertEqual(rig.status()["state"], "fault")
+                self.assertIn(named, rig.status()["fault"])
+
     def test_a_persistent_motor_alarm_gets_a_hold_on_every_fault_tick(self) -> None:
         rig = self.rig
         rig.start_policy()

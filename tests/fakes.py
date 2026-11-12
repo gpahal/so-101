@@ -114,6 +114,7 @@ class FakeMotors:
                 "torque_enable": 0,
                 "max_torque_limit": 1000,  # EEPROM: what torque_limit becomes at power-on
                 "torque_limit": 1000,
+                "present_load": 0,  # magnitude in 0.1% units, direction in bit 10
             }
         self.goals: list[dict[str, int]] = []
         self.torque: list[tuple[bool, dict[str, int]]] = []

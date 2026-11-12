@@ -30,6 +30,15 @@ from so_101.scan import Reply
 
 TEMP_WARN_C = 55  # a warning before 60 °C, where `so101 check` fails: a joint is straining or the arm needs a rest
 MOTORS_READ_S = 1.0  # how often the loop reads the motors' temperatures and alarms: one bus read
+# The overload bit. LeRobot sets the gripper to trip at 25% load held for 2 s (`Overload_Torque` 25),
+# and a gripper closed on an object stalls at its 50% torque limit, so every firm grasp trips it.
+# The servo then grips at its holding torque, 20%, and `so101 run` carries on: on the gripper it's a
+# warning, not a fault. On any other joint, and any other bit on the gripper, it still faults.
+OVERLOAD = 32
+GRIPPER_TRIPPED = ("The gripper's overload protection tripped: it gripped above 25% load for 2 s, as a firm grasp "
+                   "does. It now grips at 20% force, and the attempt carries on. If it stops opening, switch the "
+                   "arm's power off and on at rest.")
+GRIP_LOG_PCT = 20.0  # the gripper's load, in %, above which each motor read logs a gripper_load event
 TORQUE_LIMIT_CHANGED = ("The follower's torque_limit changed without a restart: {listed}, where serve set it one below "
                         "max_torque_limit. Something else changed it, such as the servo's own overload protection; it's left "
                         "as found. The arm holds its last goal: look for a joint straining against something, then "
@@ -122,10 +131,12 @@ class Follower:
 
     `robot` is LeRobot's robot wrapper (ThreadSafeRobot). `present` is the pose measured last, in
     the arm's units and keyed like its actions; `present` starts it. `say(message)` tells the
-    operator. With `previews`, each observation's camera frames are handed to it at its rate."""
+    operator, and `log(type, **fields)` writes an event to the run's log. With `previews`, each
+    observation's camera frames are handed to it at its rate."""
 
     def __init__(self, robot, present: dict[str, float], clock: Callable[[], float],
-                 say: Callable[[str], None], previews: Previews | None) -> None:
+                 say: Callable[[str], None], previews: Previews | None,
+                 log: Callable[..., None] = lambda type_, **fields: None) -> None:
         self.robot = robot
         self.inner = robot.inner
         self.arm = Arm(robot)
@@ -133,6 +144,7 @@ class Follower:
         self.arm.present = present  # what a hold before the first tick keeps
         self.clock = clock
         self.say = say
+        self.log = log
         self.previews = previews
         self.read_errors: dict[str, str] = {}  # device -> why its last read failed, until one succeeds
         self.lost = False  # the follower stopped answering or lost power: hold where it is found
@@ -141,6 +153,7 @@ class Follower:
         self.changed: dict[str, int] = {}  # motor -> another torque_limit value, reported once and left as found
         self.alarm: str | None = None  # the follower's motors reported a protection alarm
         self.hot: str | None = None  # the warning about hot motors, while they are
+        self.gripper_tripped: str | None = None  # GRIPPER_TRIPPED while the gripper's overload bit stands
         self.motors_read_at: float | None = None
         self.unblamed: str | None = None  # the last error of a hold that no device explains, logged once
 
@@ -204,17 +217,30 @@ class Follower:
         return observation
 
     def read_motors(self) -> None:
-        """One bus read for every motor's temperature, with the alarm bits of its status reply."""
+        """One bus read for every motor's temperature, with the alarm bits of its status reply, and one
+        for the gripper's load. The gripper's overload bit is a warning (OVERLOAD); a load over
+        GRIP_LOG_PCT is logged as a gripper_load event, to measure what a grasp does."""
         bus = self.inner.bus
         names = list(bus.motors)
         try:
             replies = bus._connected_bus.sync_read_register_with_error(
                 [bus.motors[name].id for name in names], "present_temperature", retries=2
             )
+            load = self._gripper_load() if "gripper" in bus.motors else None
         except Exception as error:
             raise FollowerLost(f"Reading the motors' temperatures failed: {error}") from error
         temps = {name: int(value) for name, (value, _) in zip(names, replies, strict=True)}
-        alarms = {name: Reply(0, status).errors() for name, (_, status) in zip(names, replies, strict=True) if status}
+        statuses = {name: status for name, (_, status) in zip(names, replies, strict=True)}
+        if load is not None and load > GRIP_LOG_PCT:
+            self.log("gripper_load", load=load, temperature=temps.get("gripper"), status=statuses.get("gripper", 0))
+        tripped = bool(statuses.get("gripper", 0) & OVERLOAD)
+        if tripped and not self.gripper_tripped:
+            self.say(GRIPPER_TRIPPED)
+            self.log("gripper_overload", load=load, temperature=temps.get("gripper"))
+        self.gripper_tripped = GRIPPER_TRIPPED if tripped else None
+        if "gripper" in statuses:
+            statuses["gripper"] &= ~OVERLOAD
+        alarms = {name: Reply(0, status).errors() for name, status in statuses.items() if status}
         if alarms:
             listed = ", ".join(f"{name} ({', '.join(errors)})" for name, errors in alarms.items())
             # Kept until a read shows the alarm cleared, which only the motors' power cycle does.
@@ -232,6 +258,13 @@ class Follower:
         if warning and not self.hot:
             self.say(warning)
         self.hot = warning
+
+    def _gripper_load(self) -> float:
+        """The gripper's load, in % of its full torque. The register holds the magnitude in 0.1% units
+        in its low 10 bits, and the direction in bit 10."""
+        bus = self.inner.bus
+        raw, _ = bus._connected_bus.read_register_with_error(bus.motors["gripper"].id, "present_load", retries=2)
+        return (int(raw) & 0x3FF) / 10
 
     # --- Power marks -----------------------------------------------------------------------------
 

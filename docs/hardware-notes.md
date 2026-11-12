@@ -28,9 +28,10 @@ Untested on this firmware:
 
 - that `torque_limit` really is reloaded at power-on. To test it, switch the arm's power off and on while `serve` holds it.
 - whether overload protection changes `torque_limit` at all. Feetech's table says a trip drops output to the holding torque (address 34), not whether it writes address 48. To test it, close the gripper on a rigid object for 3 s while paused, then read address 48.
-- whether a held grasp sets the overload bit (32) in the error byte of the gripper's status replies. `serve` reads every motor's temperature once a second and faults on any alarm bit in those replies, so if a firm grip sets it, holding a grasp faults the attempt. To test it, grip a rigid object and then a sponge for 10 s each while paused, and see whether `serve` faults with "Motors in a protection alarm: gripper (overload)".
 
 ### The gripper's overload trips (left as is)
+
+**Measured on 2026-11-12:** the ACT policy closing the gripper on the block set the overload bit (32) in the gripper's status replies about 7 to 11 s into each autonomous attempt, in two runs out of two, with every LED steady. `serve` faulted on it until then; it now warns instead (`follower.OVERLOAD`) and logs the gripper's load once a second while it's over 20% (`gripper_load` events), to measure a grasp before changing any threshold. Any other alarm bit on the gripper, and an overload on any other joint, still faults.
 
 The follower's gripper sometimes stops answering and blinks red until its power is switched off and on (README, Troubleshooting). The likely cause is the overload threshold LeRobot sets.
 

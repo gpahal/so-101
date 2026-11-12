@@ -184,7 +184,7 @@ class Controller:
         self._toggle = Toggle(clock)
         self._last_tick = clock()
         self._follower = Follower(robot, rollout.positions(robot, rest_pose), clock, self._say,
-                                  self.previews)
+                                  self.previews, log=self.recorder.event)
         self._follower.mark()
         # The status as of the last tick, and the page in control then: replaced whole, in one
         # assignment, so another thread never reads one without the other.
