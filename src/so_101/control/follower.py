@@ -332,17 +332,24 @@ class Follower:
     def mark(self) -> None:
         """Set each motor's torque_limit one below its max_torque_limit, the mark `check_marks` looks for,
         and keep each max_torque_limit. A motor restart copies max_torque_limit back, so the mark tells a
-        restart apart."""
+        restart apart. A motor whose torque_limit still reads the value `check_marks` reported as
+        changed keeps it: only a restart, which reads max_torque_limit, is marked again."""
         bus = self.inner.bus._connected_bus
         ids = {name: motor.id for name, motor in self.inner.bus.motors.items()}
         try:
             maxima = {name: int(value) for name, value in
                       zip(ids, bus.sync_read_register(list(ids.values()), "max_torque_limit", retries=2), strict=True)}
             marks = {name: max(value - 1, 0) for name, value in maxima.items()}
-            bus.sync_write_register(list(ids.values()), "torque_limit", [marks[name] for name in ids], retries=2)
+            kept = {}
+            if self.changed:
+                found = zip(ids, bus.sync_read_register(list(ids.values()), "torque_limit", retries=2), strict=True)
+                kept = {name: int(value) for name, value in found if self.changed.get(name) == int(value)}
+            if marking := [name for name in ids if name not in kept]:
+                bus.sync_write_register([ids[name] for name in marking], "torque_limit",
+                                        [marks[name] for name in marking], retries=2)
         except Exception as error:
             raise FollowerLost(f"Setting the motors' restart marks failed: {error}") from error
-        self.marks, self.maxima, self.changed = marks, maxima, {}
+        self.marks, self.maxima, self.changed = marks, maxima, kept
 
     def check_marks(self) -> None:
         """Raise FollowerLost when a motor's torque_limit is back at its max_torque_limit: it lost power or

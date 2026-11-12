@@ -1228,6 +1228,16 @@ class ArmsTest(RigTest):
         rig.tick_until("resting")
         self.assertEqual(gripper["torque_limit"], 300, "still as found")
 
+        # A read timeout makes the follower lost; when it answers again, only a restarted motor is
+        # marked again, and the changed value stays as found.
+        rig.motors.failing = True
+        rig.tick(2)
+        rig.motors.failing = False
+        rig.tick(3)
+        self.assertEqual(gripper["torque_limit"], 300, "a timeout never re-marks a changed limit")
+        elbow = rig.motors.registers[MOTORS.index("elbow_flex") + 1]
+        self.assertEqual(elbow["torque_limit"], elbow["max_torque_limit"] - 1, "the others keep their mark")
+
 
 if __name__ == "__main__":
     unittest.main()
