@@ -780,6 +780,24 @@ class LoopSafetyTest(RigTest):
                 self.assertEqual(rig.status()["state"], "fault")
                 self.assertIn(named, rig.status()["fault"])
 
+    def test_an_alarm_bit_feetech_doesnt_name_is_logged_not_a_fault(self) -> None:
+        rig = self.new_rig("unnamed", recorded=True)
+        rig.start_policy()
+        rig.motors.status["shoulder_lift"] = 0x10  # as on the arm: no LED, no torque cut
+        rig.tick(FPS + 1)
+        rig.motors.status["shoulder_lift"] = 0
+        rig.tick(FPS)
+        status = rig.status()
+        self.assertEqual(status["state"], "autonomous")
+        self.assertEqual(rig.events("motor_status")[-1]["bits"], {"shoulder_lift": "0x10"})
+        self.assertIn("doesn't name 1 time this run, last shoulder_lift 0x10", " ".join(status["warnings"]))
+
+        # A named bit with it still faults, naming only the protection.
+        rig.motors.status["shoulder_lift"] = 0x10 | 4
+        rig.tick(FPS + 1)
+        self.assertEqual(rig.status()["state"], "fault")
+        self.assertIn("shoulder_lift (overheat)", rig.status()["fault"])
+
     def test_a_persistent_motor_alarm_gets_a_hold_on_every_fault_tick(self) -> None:
         rig = self.rig
         rig.start_policy()

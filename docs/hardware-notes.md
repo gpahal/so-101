@@ -29,9 +29,13 @@ Untested on this firmware:
 - that `torque_limit` really is reloaded at power-on. To test it, switch the arm's power off and on while `serve` holds it.
 - whether overload protection changes `torque_limit` at all. Feetech's table says a trip drops output to the holding torque (address 34), not whether it writes address 48. To test it, close the gripper on a rigid object for 3 s while paused, then read address 48.
 
+### Alarm bit 0x10
+
+**Seen on 2026-11-12:** replies from the elbow (at rest, 1 s after `serve` started) and from shoulder_lift (three times in two minutes, while the policy drove and in Teleop) carried bit 0x10, with every LED steady. Feetech's SDK names only bits 1, 2, 4, 8 and 32, and these servos cut torque only on overheat, overcurrent and overload (`unloading_condition` 44). In the Dynamixel 1.0 protocol Feetech's follows, bit 4 is a checksum error, so it's most likely a garbled packet. Each 0x10 came while the gripper was stalled at about 95% load, which may add noise on the shared supply. `serve` logs any such bit as a `motor_status` event and carries on (`follower.PROTECTION_BITS`). Untested: whether it appears with `serve` stopped.
+
 ### The gripper's overload trips (left as is)
 
-**Measured on 2026-11-12:** the ACT policy closing the gripper on the block set the overload bit (32) in the gripper's status replies about 7 to 11 s into each autonomous attempt, in two runs out of two, with every LED steady. `serve` faulted on it until then; it now warns instead (`follower.OVERLOAD`) and logs the gripper's load once a second while it's over 20% (`gripper_load` events), to measure a grasp before changing any threshold. Any other alarm bit on the gripper, and an overload on any other joint, still faults.
+**Measured on 2026-11-12:** the ACT policy closing the gripper on the block set the overload bit (32) in the gripper's status replies about 7 to 11 s into each autonomous attempt, in two runs out of two, with every LED steady. `serve` faulted on it until then; it now warns instead (`follower.OVERLOAD`) and logs the gripper's load once a second while it's over 20% (`gripper_load` events), to measure a grasp before changing any threshold. The first session's events show 92 to 100% load from the grasp until Reset opens the gripper, Fault holds included, with the gripper reaching 54 °C: the policy commands it further closed than the block allows. Any other alarm bit on the gripper, and an overload on any other joint, still faults.
 
 The follower's gripper sometimes stops answering and blinks red until its power is switched off and on (README, Troubleshooting). The likely cause is the overload threshold LeRobot sets.
 

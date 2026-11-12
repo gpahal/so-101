@@ -26,7 +26,7 @@ import traceback
 from collections.abc import Callable
 
 from so_101.control.previews import Previews
-from so_101.scan import Reply
+from so_101.scan import ERROR_BITS, Reply
 
 TEMP_WARN_C = 55  # a warning before 60 °C, where `so101 check` fails: a joint is straining or the arm needs a rest
 MOTORS_READ_S = 1.0  # how often the loop reads the motors' temperatures and alarms: one bus read
@@ -39,6 +39,11 @@ GRIPPER_TRIPPED = ("The gripper's overload protection tripped: it gripped above 
                    "does. It now grips at 20% force, and the attempt carries on. If it stops opening, switch the "
                    "arm's power off and on at rest.")
 GRIP_LOG_PCT = 20.0  # the gripper's load, in %, above which each motor read logs a gripper_load event
+# Feetech names five alarm bits (`scan.ERROR_BITS`), and only those are protections. Another bit, as
+# the 0x10 seen on the elbow and shoulder_lift with no LED and no torque cut (unloading_condition 44),
+# is most likely the protocol's checksum error: a garbled packet on the bus. It's logged and counted
+# as a motor_status event, never a fault.
+PROTECTION_BITS = sum(ERROR_BITS)
 TORQUE_LIMIT_CHANGED = ("The follower's torque_limit changed without a restart: {listed}, where serve set it one below "
                         "max_torque_limit. Something else changed it, such as the servo's own overload protection; it's left "
                         "as found. The arm holds its last goal: look for a joint straining against something, then "
@@ -154,6 +159,8 @@ class Follower:
         self.alarm: str | None = None  # the follower's motors reported a protection alarm
         self.hot: str | None = None  # the warning about hot motors, while they are
         self.gripper_tripped: str | None = None  # GRIPPER_TRIPPED while the gripper's overload bit stands
+        self.unnamed = 0  # motor reads that carried an alarm bit Feetech doesn't name, this run
+        self.unnamed_warning: str | None = None  # says how many, and the last, once there is one
         self.motors_read_at: float | None = None
         self.unblamed: str | None = None  # the last error of a hold that no device explains, logged once
 
@@ -240,6 +247,18 @@ class Follower:
         self.gripper_tripped = GRIPPER_TRIPPED if tripped else None
         if "gripper" in statuses:
             statuses["gripper"] &= ~OVERLOAD
+        if unnamed := {name: status & ~PROTECTION_BITS for name, status in statuses.items() if status & ~PROTECTION_BITS}:
+            self.unnamed += 1
+            self.log("motor_status", bits={name: f"0x{bits:02x}" for name, bits in unnamed.items()})
+            listed = ", ".join(f"{name} 0x{bits:02x}" for name, bits in unnamed.items())
+            if self.unnamed_warning is None:
+                self.say(f"A motor reply carried an alarm bit Feetech doesn't name ({listed}), most likely a garbled "
+                         "message on the bus. It's not a protection, so the arm carries on; each one is logged as "
+                         "a motor_status event.")
+            self.unnamed_warning = (f"Motor replies carried an alarm bit Feetech doesn't name {self.unnamed} "
+                                    f"time{'s' if self.unnamed != 1 else ''} this run, last {listed}: most likely "
+                                    "garbled messages on the bus. Not a protection: the arm carries on.")
+        statuses = {name: status & PROTECTION_BITS for name, status in statuses.items()}
         alarms = {name: Reply(0, status).errors() for name, status in statuses.items() if status}
         if alarms:
             listed = ", ".join(f"{name} ({', '.join(errors)})" for name, errors in alarms.items())

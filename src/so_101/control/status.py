@@ -39,7 +39,8 @@ def build(controller, refusals: dict[str, str | None]) -> dict:
         "devices": {device: "missing" if reason else "ok" for device, reason in devices.items()},
         "device_problems": {device: reason for device, reason in devices.items() if reason},
         "fault": c._fault_error if c._state is State.FAULT else None,
-        "warnings": [warning for warning in (c._follower.hot, c._follower.gripper_tripped, c._pace.behind) if warning],
+        "warnings": [warning for warning in (c._follower.hot, c._follower.gripper_tripped, c._follower.unnamed_warning,
+                                             c._pace.behind) if warning],
         "previews": {"fps": c.previews.fps if c.previews else 0, "note": c._pace.preview_note},
         "prompt": c._prompt,  # the attempt a time limit ended, waiting for its outcome, or None
         "operator": c.operator,
