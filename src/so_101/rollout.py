@@ -77,10 +77,13 @@ class Move:
         return None
 
 
-def drive_to(robot, target: dict[str, float], sleep=time.sleep, clock=time.monotonic) -> bool:
-    """Move smoothly to `target` and keep commanding it until every joint is within TOLERANCE."""
+def drive_to(robot, target: dict[str, float], sleep=time.sleep, clock=time.monotonic, stopping=lambda: False) -> bool:
+    """Move smoothly to `target` and keep commanding it until every joint is within TOLERANCE. Raise
+    StopRun as soon as `stopping()`: the arm holds where it was last sent."""
     move = Move(target, clock=clock)
     while (arrived := move.step(robot)) is None:
+        if stopping():
+            raise StopRun
         sleep(1 / FPS)
     return arrived
 
@@ -109,8 +112,10 @@ def engage(robot) -> None:
 
 
 def ensure_at_start(robot, target: dict[str, float], events: dict[str, bool], stopping, sleep=time.sleep) -> None:
-    """Return only with the arm at `target`, moving it there or waiting while you do."""
-    while not drive_to(robot, target, sleep=sleep):
+    """Return only with the arm at `target`, moving it there or waiting while you do. Esc or Ctrl+C
+    on the way, which sets both `stop_recording` and `exit_early`, raises StopRun rather than start
+    the attempt: clearing `exit_early` alone would leave LeRobot's policy loop to run it in full."""
+    while not drive_to(robot, target, sleep=sleep, stopping=stopping):
         key, off = farthest(positions(robot, target), target)
         print(
             f"\nThe arm can't reach its start pose: {key} is {off:.0f} away. Right arrow turns the motors off so "
@@ -122,6 +127,8 @@ def ensure_at_start(robot, target: dict[str, float], events: dict[str, bool], st
         print("Motors off. Move the arm to its start pose, then press right arrow.", flush=True)
         wait_for_key(events, stopping, sleep)
         engage(robot)
+    if stopping():
+        raise StopRun
     events["exit_early"] = False
     events["rerecord_episode"] = False
 
@@ -157,7 +164,7 @@ def install() -> None:
         try:
             run(self, ctx)
         except StopRun:
-            print("Stopped at the start pose.", flush=True)
+            print("Stopped before the attempt started.", flush=True)
 
     def start_at_pose(self, robot, timer) -> None:
         ctx = self._so101_ctx
