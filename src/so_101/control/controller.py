@@ -502,7 +502,7 @@ class Controller:
             leader_to_rest=self.leader.to_rest is not None,
             attempt_open=attempt is not None,
             follower_missing=devices["follower"],
-            follower_silent=self._follower.lost,
+            follower_silent=self._follower.silent,
             device_missing=next((reason for reason in devices.values() if reason), None),
             fault=self._fault_error,
             leader=self._leader_reason(),

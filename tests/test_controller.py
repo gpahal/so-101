@@ -1080,6 +1080,18 @@ class QuitTest(RigTest):
                 rig.controller.close()
                 self.assertEqual(rig.events()[-1]["type"], "run_end")
 
+        # A motor restart its marks found answered: the follower may hold a raised arm, so a quit only asks.
+        rig = self.new_rig("restarted")
+        rig.start_policy()
+        rig.motors.power_cycle({motor: steps - 300 for motor, steps in rig.motors.present().items()})
+        rig.tick()
+        self.assertEqual(rig.status()["state"], "fault")
+        quit = rig.controller.submit("quit", "signal")
+        rig.tick()
+        self.assertTrue(quit.result(timeout=0).accepted)
+        self.assertFalse(rig.controller.done, "a follower that answers never exits on a signal")
+        self.assertFalse(rig.controller.leaves_motors)
+
         # Once it answers again, the arm may be powered and raised: a quit only asks.
         rig = self.new_rig("answering-again")
         rig.start_policy()

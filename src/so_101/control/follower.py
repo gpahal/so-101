@@ -98,10 +98,12 @@ class TorqueLimitChanged(Failure):
 
 class FollowerLost(Failure):
     """The follower may have lost power: it stopped answering a read, or a motor restarted. It gets
-    no goal until it answers again, then holds where it's found (`Follower.hold_in_fault`)."""
+    no goal until it answers again, then holds where it's found (`Follower.hold_in_fault`). `silent`
+    is whether it stopped answering; a restart found by its marks answered."""
 
-    def __init__(self, message: str, detail: str | None = None) -> None:
+    def __init__(self, message: str, detail: str | None = None, silent: bool = True) -> None:
         super().__init__(message, "follower", detail)
+        self.silent = silent
 
 
 class PowerLost(Failure):
@@ -187,6 +189,9 @@ class Follower:
         self.previews = previews
         self.read_errors: dict[str, str] = {}  # device -> why its last read failed, until one succeeds
         self.lost = False  # the follower stopped answering or lost power: hold where it is found
+        # It doesn't answer now: its last read failed. A restart found by its marks makes it lost, not
+        # silent. Exiting can't turn a silent follower's motors off (`states._quit`).
+        self.silent = False
         self.marks: dict[str, int] = {}  # motor -> the torque_limit value that shows it hasn't restarted
         self.maxima: dict[str, int] = {}  # motor -> its max_torque_limit, which a restart copies into torque_limit
         self.changed: dict[str, int] = {}  # motor -> another torque_limit value, reported once and left as found
@@ -228,6 +233,7 @@ class Follower:
         else:
             observation = self._read_follower()
         self.arm.present = {key: float(observation[key]) for key in self.keys}
+        self.silent = False
         self.check_marks()  # every tick, before any goal: a restarted motor's first goal re-arms it
         self.check_power()  # and a motor without power must not be left a goal away from the arm
         now = self.clock()
@@ -245,6 +251,7 @@ class Follower:
     def read_joints(self) -> None:
         """Read the follower's joints into `present`, and nothing else. Raises while it's silent."""
         self.arm.present = {key: float(value) for key, value in self._read_positions().items()}
+        self.silent = False
         self.read_errors.pop("follower", None)
 
     def _read_positions(self) -> dict:
@@ -366,7 +373,7 @@ class Follower:
         except Exception as error:
             raise FollowerLost(f"Reading the motors' restart marks failed: {error}") from error
         if lost := [name for name, value in values.items() if value == self.maxima[name] != self.marks[name]]:
-            raise FollowerLost(POWER_LOST.format(motors=", ".join(lost)))
+            raise FollowerLost(POWER_LOST.format(motors=", ".join(lost)), silent=False)
         for name, value in values.items():
             if value == self.marks[name]:
                 self.changed.pop(name, None)
@@ -525,7 +532,12 @@ class Follower:
             logging.getLogger(__name__).error("Holding the arm in Fault hit an error: %s", text, exc_info=error)
 
     def _lose(self, error: BaseException) -> None:
-        """Mark the follower lost if `error` means it may have lost power, logging the change."""
+        """Mark the follower lost if `error` means it may have lost power, logging the change, and
+        silent if it means the follower didn't answer."""
+        if isinstance(error, FollowerLost):
+            self.silent = self.silent or error.silent
+        elif not isinstance(error, Failure) and self.blame(error) == "follower":
+            self.silent = True
         if not self.lost and self.is_lost(error):
             self.lost = True
             self.log("follower_lost", error=self.describe(error, "follower"))

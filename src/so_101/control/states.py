@@ -120,8 +120,9 @@ class Facts:
     # (follower first), or None when it's there.
     follower_missing: str | None
     device_missing: str | None
-    # The follower stopped answering or restarted, and hasn't answered since (`Follower.lost`): exiting
-    # can't turn its motors off, so it changes nothing about the arm.
+    # The follower doesn't answer: its last read failed (`Follower.silent`). Exiting can't turn its
+    # motors off, so it changes nothing about the arm. A motor restart its marks found answered, so
+    # it isn't silent, and a quit then asks for y.
     follower_silent: bool
     fault: str | None  # the error that caused the Fault state
     leader: str | None  # why the leader can't take over, or None when it is connected
