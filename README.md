@@ -51,7 +51,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 record [task] [--episodes N] [--note TEXT] [--no-display]` | Record demos of your own task by teleoperating, as a new session. `--no-display` doesn't open the Rerun camera viewer. A session in which nothing was saved is removed; one with data but no readable episodes is kept, and `build` skips it |
 | `uv run so101 review [task] [--episode SESSION/N] [--all] [--no-view]` | Step through recorded demos to trim idle time or delete bad ones. `--all` includes demos already reviewed, `--no-view` doesn't open the Rerun viewer |
 | `uv run so101 build [task] [--with SOURCES] [--keep-labels] [--force]` | Make the training dataset from all sessions plus your edits (`train` does this itself); `--force` rebuilds even if nothing changed; `--with corrections` adds what a human did after taking over from the policy in `serve` runs (see [Training on corrections](#training-on-corrections)) |
-| `uv run so101 train [task] [--policy act\|pi05] [--target FLAVOR] [--with SOURCES]` | Train a policy on your demos, ACT by default, on Hugging Face Jobs by default |
+| `uv run so101 train [task] [--policy act\|pi05] [--target FLAVOR] [--with SOURCES] [--base REPO[@REVISION]]` | Train a policy on your demos, ACT by default, on Hugging Face Jobs by default; `--base` starts from a model you trained |
 | `uv run so101 backup [task]` | Upload a task's sessions, edits and runs to a private Hub dataset |
 | `uv run so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--action-steps N] [--display] [--revision TAG]` | Run a task's ACT policy on the follower, on the Mac's GPU, and record it to `outputs/rollouts/` |
 | `uv run so101 run [task] --policy act\|pi05 --remote [--revision TAG]` | Run a policy on the cloud GPU below, with the arm and cameras on the Mac |
@@ -205,6 +205,7 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - It trains ACT on Hugging Face Jobs (`[train.act]` in `so101.toml`: an RTX PRO 6000 for 2,000 steps per demo at batch 8). 100 demos take 200k steps, about 3 hours and $8, stopped at 8 hours. The first 100-demo run took 2 hours 35 minutes.
    - `--policy pi05` trains π0.5 instead (`[train.pi05]`: an RTX PRO 6000 for 120 steps per demo at batch 32). 100 demos take 12k steps, about 10 hours and $27, stopped at 25 hours. First request access to [its tokenizer](https://huggingface.co/google/paligemma-3b-pt-224).
    - Steps follow the demos kept after your edits, and the timeout follows the steps at 2.5x the expected time, so time and cost grow in step with the number of demos. The command prints all of this before it starts. Other `--target` flavors need a measured speed in `so101.toml`.
+   - `--base <you>/<policy>_so101_<task>@<tag>` starts from a model you trained instead of the default: from scratch for ACT, `lerobot/pi05_base` for π0.5. Use it to train a model further when you add demos. Train it on every demo, old and new: a model trained on only the new ones gets worse where it was good. The joint ranges the model scales its inputs by come from the new dataset. Pin the base with a tag, because each run replaces the repo's newest model. `train` checks that the base exists and is the same policy before it uploads or bills anything. Steps and cost are the same as without it.
    - Checkpoints go to the model repo as they're saved. To continue a stopped run: `uv run lerobot-train --config_path=<you>/<policy>_so101_<task> --resume=true --job.target=<flavor>`.
    - Logs stream to the terminal. Ctrl+C stops watching but the job keeps running (`uv run hf jobs ps`, `uv run hf jobs logs <id>`).
    - The trained policy lands in the private repo `<you>/<policy>_so101_<task>`.
@@ -217,7 +218,7 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - Every attempt starts from the pose your built demos start from (the arm's pose at launch, for a task with no build in `data/<task>/train/`). The arm goes there after each attempt and holds it, so reset the scene around it. An attempt won't start until the arm has arrived: if it can't get there, right arrow turns the motors off so you can move it by hand, and right arrow again carries on. Support the arm first, because it goes limp.
    - Retraining replaces the model in the same repo. A tag keeps a trained model you can still run later: `uv run hf repos tag create <you>/<policy>_so101_<task> <tag>` before you retrain, then `--revision <tag>` runs that model, and leaving it out runs the newest. `run`, `serve` and `server start` all take `--revision`.
 
-If it fails at some block positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again.
+If it fails at some block positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again. Tag the current model first; `--base <you>/<policy>_so101_<task>@<tag>` then starts the new run from it instead of from scratch.
 
 ### Run on a cloud GPU
 
@@ -561,6 +562,7 @@ Plain `uv run so101 review` reviews demos and writes `edits.toml`.
 - **Labels decide it.** Set an attempt's outcome or its suspect frames in the run's `labels.toml` (see above), and the next build follows them.
 - **`build.json` records the sources,** the runs it read and their `labels.toml`, `blame_s`, and the version of the rules that cut and label runs. Changing any of them, or recording another run, rebuilds; so does `train` without `--with` after a build with it. A build made with `--with` or `--keep-labels` under other rules rebuilds too.
 - **Steps still follow the demos kept,** not the added episodes: corrections are a few seconds each, and `train` prints how many it adds.
+- **`--base` starts from the policy that made the runs,** pinned by its tag, rather than from scratch: `uv run so101 train --with corrections --base <you>/<policy>_so101_<task>@<tag>`. The build still holds every demo, so the policy keeps what it learned from them.
 - **A run must match the demos:** the same fps, robot, joints, and cameras at the same size. Otherwise `build` stops and names the run and what differs. Set its attempts to `ignored` in its `labels.toml`, or move it out of `runs/`.
 - **`--keep-labels`** keeps the run columns for training methods that use them, and the built dataset has these besides the demo columns. Without it the dataset has only the demo columns. `train` uses a current `--keep-labels` build as it is, rather than rebuilding without the columns, and LeRobot's training ignores them.
 
@@ -571,7 +573,7 @@ Plain `uv run so101 review` reviews demos and writes `edits.toml`.
   | `control.label` | 1 where `intervention` is true, 0 elsewhere. Demos and human attempts are 0: they correct no policy. -1 marks a suspect frame, which no build includes |
   | `control.attempt_success` | true when the attempt's outcome is succeeded; true in demos |
 
-Other ways to use runs, such as weighting corrections, a failure detector, a π0.5 quality tag or simulating from the states where the policy failed, are in [`docs/using-run-data.md`](docs/using-run-data.md). None of them is built yet.
+Other ways to use runs, such as weighting corrections, a failure detector, a π0.5 quality tag or simulating from the states where the policy failed, are in [`docs/using-run-data.md`](docs/using-run-data.md). Training methods that learn from corrections and from the frames a rewind undid are compared in [`docs/learning-from-corrections.md`](docs/learning-from-corrections.md). None of them is built yet.
 
 ## The video encoder's macOS crash
 

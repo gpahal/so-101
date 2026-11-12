@@ -444,6 +444,58 @@ POLICY_FLAGS = {
 PI05_TOKENIZER = "google/paligemma-3b-pt-224"
 
 
+def default_base(policy: str) -> str | None:
+    """The Hub model `policy` starts from without `--base`; None trains it from scratch."""
+    prefix = "--policy.pretrained_path="
+    return next((f.removeprefix(prefix) for f in POLICY_FLAGS[policy] if f.startswith(prefix)), None)
+
+
+def parse_base(text: str) -> tuple[str, str | None]:
+    """`--base REPO[@REVISION]`: a Hub model repo, and the tag, branch or commit to start from (None: main)."""
+    repo, at, revision = text.partition("@")
+    owner, slash, name = repo.partition("/")
+    if not (owner and slash and name) or "/" in name or (at and not revision):
+        raise ConfigError(
+            f"--base {text!r} isn't a Hub model: give it as user/name, optionally with @ and a tag, branch or "
+            "commit, such as gpahal/act_so101_block-container@100-demos."
+        )
+    return repo, revision or None
+
+
+def policy_flags(policy: str, base: tuple[str, str | None] | None) -> list[str]:
+    """POLICY_FLAGS for `policy`, starting from `base` instead of its default base model when given."""
+    if base is None:
+        return list(POLICY_FLAGS[policy])
+    repo, revision = base
+    rest = [f for f in POLICY_FLAGS[policy] if not f.startswith("--policy.pretrained_path=")]
+    return [f"--policy.pretrained_path={repo}", *([f"--policy.pretrained_revision={revision}"] if revision else []), *rest]
+
+
+def check_base(repo: str, revision: str | None, policy: str) -> None:
+    """Stop before building, uploading or paying if the job couldn't start from this base model."""
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import (
+        EntryNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,
+    )
+
+    name = f"{repo}@{revision}" if revision else repo
+    try:
+        config = json.loads(Path(hf_hub_download(repo, "config.json", revision=revision)).read_text())
+    except GatedRepoError:  # before RepositoryNotFoundError, its parent class
+        sys.exit(f"--base {name}: request access at https://huggingface.co/{repo}, and train again once it's approved.")
+    except RepositoryNotFoundError:
+        sys.exit(f"--base {name}: there's no such model on the Hub, or your login can't see it.")
+    except RevisionNotFoundError:
+        sys.exit(f"--base {name}: {repo} has no revision {revision!r}.")
+    except EntryNotFoundError:
+        sys.exit(
+            f"--base {name} has no config.json at its top level, so it isn't a trained LeRobot model. "
+            "Training checkpoint tags like 020000 keep theirs under checkpoints/."
+        )
+    if config.get("type") != policy:
+        sys.exit(f"--base {name} is a model of type {config.get('type')}, not {policy}: train it with --policy {config.get('type')}.")
+
+
 def check_pi05_access() -> None:
     """Stop before uploading or paying if the job couldn't load pi0.5's gated tokenizer."""
     from huggingface_hub import HfApi
@@ -500,6 +552,9 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         if target == "local":
             sys.exit("pi0.5 can't train locally: it needs an NVIDIA GPU with the `lerobot[pi]` extra.")
         check_pi05_access()
+    base = parse_base(ns.base) if ns.base else None
+    if base:
+        check_base(*base, ns.policy)
     sources = build_sources(ns)
     policy = task.policy_for(ns.policy)  # needs a Hugging Face login; fail before building
     # A build with --keep-labels has the same demos and cuts, and training ignores its extra columns.
@@ -514,7 +569,7 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         f"--policy.type={ns.policy}",
         f"--policy.repo_id={policy}",
         "--policy.private=true",
-        *POLICY_FLAGS[ns.policy],
+        *policy_flags(ns.policy, base),
         *([f"--policy.scheduler_decay_steps={steps}"] if ns.policy == "pi05" else []),
         f"--job_name={ns.policy}_so101_{task.name}",
         f"--steps={steps}",
@@ -525,6 +580,10 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     ]
     cuts = sum("run" in e for e in json.loads(data.build_manifest_path(s, task).read_text())["episodes"])
     also = f" and {cuts} run episode{'' if cuts == 1 else 's'} ({', '.join(sources)})" if sources else ""
+    if base:
+        also += f", starting from {ns.base}"
+    elif start := default_base(ns.policy):
+        also += f", starting from {start}"
     if target == "local":
         args += [f"--dataset.repo_id=local/so101_{task.name}", f"--dataset.root={root}", f"--policy.device={s.run.device}"]
         print(f"Training {ns.policy} on {kept} demos{also} for {steps:,} steps on this computer ({s.run.device}).")
@@ -746,6 +805,9 @@ def main() -> None:
     p.add_argument("--target", help="HF Jobs flavor, or `local` for this Mac (default: [train.<policy>] in so101.toml)")
     p.add_argument("--with", dest="with_", metavar="SOURCES",
                    help="build with these serve-run sources too, as `so101 build --with` (default: the demos only)")
+    p.add_argument("--base", metavar="REPO[@REVISION]",
+                   help="start from this Hub model instead of the default (act: none, from scratch; pi05: "
+                        f"{default_base('pi05')}), such as a model you trained, pinned with @tag")
     p.set_defaults(fn=cmd_train, forwards=True)
 
     p = sub.add_parser("run", help="run a task's policy on the follower, recording to outputs/rollouts/")
