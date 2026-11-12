@@ -29,7 +29,9 @@ held still by a hand otherwise falls behind a goal that keeps moving, and jumps 
 from collections.abc import Callable
 
 from so_101 import rollout
+from so_101.check import TEMP_FAIL_C
 from so_101.control.states import LEADER_MISSING
+from so_101.scan import ERROR_BITS, Reply
 from so_101.control.watch import INTERVAL_S
 
 # Each failed leader connect doubles the wait before the next try, from the watch's 2 s (so 4 s,
@@ -182,6 +184,8 @@ class Leader:
             if not leader.is_calibrated:
                 raise RuntimeError(f"its motors' calibration doesn't match {leader.calibration_fpath}; "
                                    "run `uv run so101 calibrate leader`")
+            if unfit := _unfit(leader.bus):
+                raise RuntimeError(unfit)
         except Exception as error:
             try:
                 leader.disconnect()
@@ -357,3 +361,24 @@ class Mirror:
             limit = abs(follower_goal[key] - self.mirrored[key]) + self.extra
             mirrored[key] = last + max(-limit, min(limit, follower_goal[key] - last))
         self.goal, self.mirrored = self.leader.send(mirrored, measured), dict(follower_goal)
+
+
+def _unfit(bus) -> str | None:
+    """Why the leader's motors aren't fit to drive, as preflight judges them (`check.check_arm`): one
+    in a protection alarm, or at TEMP_FAIL_C or hotter. None when they're fit. A Handover turns
+    their torque on, so a leader preflight failed connects only once they're fit."""
+    names = list(bus.motors)
+    replies = bus._connected_bus.sync_read_register_with_error(
+        [bus.motors[name].id for name in names], "present_temperature", retries=2
+    )
+    alarms = {name: Reply(0, status & sum(ERROR_BITS)).errors()
+              for name, (_, status) in zip(names, replies, strict=True) if status & sum(ERROR_BITS)}
+    hot = {name: int(temp) for name, (temp, _) in zip(names, replies, strict=True) if int(temp) >= TEMP_FAIL_C}
+    problems = []
+    if alarms:
+        listed = ", ".join(f"{name} ({', '.join(errors)})" for name, errors in alarms.items())
+        problems.append(f"its motors are in a protection alarm: {listed}; switch its power off and on to clear it")
+    if hot:
+        listed = ", ".join(f"{name} {temp} °C" for name, temp in hot.items())
+        problems.append(f"its motors are hot: {listed}, at or above {TEMP_FAIL_C} °C; let it cool down")
+    return "; ".join(problems) or None

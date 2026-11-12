@@ -476,6 +476,26 @@ class ControllerTest(RigTest):
                                            msg=f"leader {motor} reached rest before its motors turned off")
                 self.assertFalse(rig.leader_motors.torqued())
 
+    def test_a_hot_or_alarmed_leader_never_connects_so_teleop_stays_unavailable(self) -> None:
+        # Preflight's WARN says Teleop won't be available: a Handover would turn those motors on.
+        rig = self.new_rig("leader-unfit")
+        elbow = rig.leader_motors.registers[MOTORS.index("elbow_flex") + 1]
+        elbow["present_temperature"] = 65
+        rig.tick()
+        status = rig.status()
+        self.assertEqual(status["devices"]["leader"], "missing")
+        self.assertIn("elbow_flex 65 °C", status["device_problems"]["leader"])
+        self.assertFalse(rig.leader_motors.torqued())
+
+        elbow["present_temperature"] = 40
+        rig.leader_motors.status["wrist_roll"] = 4  # overheat alarm, until its power is cycled
+        rig.tick(31 * FPS)
+        self.assertIn("protection alarm", rig.status()["device_problems"]["leader"])
+
+        rig.leader_motors.status.clear()
+        rig.tick(31 * FPS)
+        self.assertEqual(rig.status()["devices"]["leader"], "ok", "fit again: it connects")
+
     def test_a_leader_motor_left_on_in_teleop_is_logged_and_turned_off(self) -> None:
         rig = self.new_rig("stuck", recorded=True)
         rig.start_policy()
