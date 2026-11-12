@@ -704,7 +704,7 @@ def main() -> None:
     add_task(p)
     p.add_argument("--episodes", type=int, help="how many to record (default: up to `episodes` in tasks.toml)")
     p.add_argument("--no-display", action="store_true", help="don't open the Rerun camera viewer")
-    p.add_argument("--note", help="a note saved with the session, e.g. 'lamp on, cylinder at spot 3'")
+    p.add_argument("--note", help="a note saved with the session, e.g. 'lamp on, block at spot 3'")
     p.add_argument("--dry-run", action="store_true", help="rehearse: record 2 throwaway episodes and check them")
     p.add_argument("--replay", action="store_true", help="dry run: replay a rehearsal episode on the follower")
     p.add_argument("--keep", action="store_true", help="dry run: keep the rehearsal dataset")

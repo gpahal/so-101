@@ -68,14 +68,14 @@ These runs open, encode, flush and close two encoders at a time, as LeRobot's en
 | 1–3-frame clips | 38 of 36,000 | 0 of 36,000 |
 | 1–3-frame clips, the shipped `svtsem.c` and the recorder's options (CRF 30, preset 10, `lp=2`) | 134 of 36,000 | 0 of 36,000 |
 
-Every crash without the shim was SIGTRAP with exit code 133. With and without the shim, 20 s of the front camera encoded with the recorder's options gave the same video stream byte for byte (ffmpeg's MD5 of the packets).
+Every crash without the shim was SIGTRAP with exit code 133. With and without the shim, 20 s of the top camera encoded with the recorder's options gave the same video stream byte for byte (ffmpeg's MD5 of the packets).
 
 ## Alternatives considered
 
 In order of how close each comes:
 
 - **Recording with Apple's VideoToolbox H.264.**
-  - **What works:** it avoids SVT-AV1 entirely. With quality set through `flags=+qscale` and `global_quality`, it matched AV1 at CRF 30 (VMAF 86.1 against 86.4 front, 82.9 against 82.7 wrist), at about 1.7× the file size, and encoding took 0.8 ms a frame against 2–3 ms.
+  - **What works:** it avoids SVT-AV1 entirely. With quality set through `flags=+qscale` and `global_quality`, it matched AV1 at CRF 30 (VMAF 86.1 against 86.4 top, 82.9 against 82.7 wrist), at about 1.7× the file size, and encoding took 0.8 ms a frame against 2–3 ms.
   - **Why not:** `build` would still encode with SVT-AV1 and could crash, and so could the tests. LeRobot's `vcodec=auto` passes its quality as `q:v`, which PyAV ignores, so `auto` alone gives whatever bitrate VideoToolbox picks and can't be tuned ([huggingface/lerobot#5309](https://github.com/huggingface/lerobot/issues/5309)). It's the fallback if the shim ever can't be used.
 - **SVT-AV1's low-delay mode (`pred-struct=1`).**
   - **What works:** it's a config change only. 0 of 36,000 closes crashed, against 38 in the default mode, at 1.16× the size for the same quality.

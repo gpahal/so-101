@@ -7,8 +7,8 @@ camera is noted in `read_errors`, and the arm can still go to rest after a camer
 
 A motor that loses power comes back with torque off, and its first goal turns the torque on again
 and drives it to that goal at full speed. To catch a restart, the loop sets each motor's
-torque_limit (SRAM, address 48) one below its max_torque (EEPROM, address 16), which the motor
-copies into torque_limit at power-on. A torque_limit back at max_torque means the motor restarted.
+torque_limit (SRAM, address 48) one below its max_torque_limit (EEPROM, address 16), which the motor
+copies into torque_limit at power-on. A torque_limit back at max_torque_limit means the motor restarted.
 Any other value means something else changed it, such as the servo's own protection: that is a
 fault of its own, which holds the last goal and leaves the value as found. The loop reads these
 marks on every tick, before any goal goes out: about 1.5 ms of a 33 ms tick.
@@ -31,7 +31,7 @@ from so_101.scan import Reply
 TEMP_WARN_C = 55  # a warning before 60 °C, where `so101 check` fails: a joint is straining or the arm needs a rest
 MOTORS_READ_S = 1.0  # how often the loop reads the motors' temperatures and alarms: one bus read
 TORQUE_LIMIT_CHANGED = ("The follower's torque_limit changed without a restart: {listed}, where serve set it one below "
-                        "max_torque. Something else changed it, such as the servo's own overload protection; it's left "
+                        "max_torque_limit. Something else changed it, such as the servo's own overload protection; it's left "
                         "as found. The arm holds its last goal: look for a joint straining against something, then "
                         "Reset.")
 POWER_LOST = ("The follower's {motors} lost power or restarted. The arm now holds where it is, not where it "
@@ -49,7 +49,7 @@ class Failure(Exception):
 
 
 class TorqueLimitChanged(Failure):
-    """A motor's torque_limit reads neither the restart mark nor its max_torque. The arm holds its last
+    """A motor's torque_limit reads neither the restart mark nor its max_torque_limit. The arm holds its last
     goal, and the value is left as found."""
 
     def __init__(self, message: str) -> None:
@@ -137,7 +137,7 @@ class Follower:
         self.read_errors: dict[str, str] = {}  # device -> why its last read failed, until one succeeds
         self.lost = False  # the follower stopped answering or lost power: hold where it is found
         self.marks: dict[str, int] = {}  # motor -> the torque_limit value that shows it hasn't restarted
-        self.maxima: dict[str, int] = {}  # motor -> its max_torque, which a restart copies into torque_limit
+        self.maxima: dict[str, int] = {}  # motor -> its max_torque_limit, which a restart copies into torque_limit
         self.changed: dict[str, int] = {}  # motor -> another torque_limit value, reported once and left as found
         self.alarm: str | None = None  # the follower's motors reported a protection alarm
         self.hot: str | None = None  # the warning about hot motors, while they are
@@ -236,14 +236,14 @@ class Follower:
     # --- Power marks -----------------------------------------------------------------------------
 
     def mark(self) -> None:
-        """Set each motor's torque_limit one below its max_torque, the mark `check_marks` looks for,
-        and keep each max_torque. A motor restart copies max_torque back, so the mark tells a
+        """Set each motor's torque_limit one below its max_torque_limit, the mark `check_marks` looks for,
+        and keep each max_torque_limit. A motor restart copies max_torque_limit back, so the mark tells a
         restart apart."""
         bus = self.inner.bus._connected_bus
         ids = {name: motor.id for name, motor in self.inner.bus.motors.items()}
         try:
             maxima = {name: int(value) for name, value in
-                      zip(ids, bus.sync_read_register(list(ids.values()), "max_torque", retries=2), strict=True)}
+                      zip(ids, bus.sync_read_register(list(ids.values()), "max_torque_limit", retries=2), strict=True)}
             marks = {name: max(value - 1, 0) for name, value in maxima.items()}
             bus.sync_write_register(list(ids.values()), "torque_limit", [marks[name] for name in ids], retries=2)
         except Exception as error:
@@ -251,7 +251,7 @@ class Follower:
         self.marks, self.maxima, self.changed = marks, maxima, {}
 
     def check_marks(self) -> None:
-        """Raise FollowerLost when a motor's torque_limit is back at its max_torque: it lost power or
+        """Raise FollowerLost when a motor's torque_limit is back at its max_torque_limit: it lost power or
         restarted. Any other value than the mark is something else, such as the servo's own
         protection: a Failure naming the motor and the value, raised once for that value. The value
         is left as found, never marked again, and the arm holds its last goal."""

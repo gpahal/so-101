@@ -15,6 +15,10 @@ from so_101.control.states import CONFIRM_S, State
 SUPPORT_AND_QUIT = (f"To exit here, support the arm, then press y at this terminal within {CONFIRM_S:g} s: the "
                     "motors turn off, so lower it to rest by hand. With no terminal, the arm keeps holding: support "
                     "it, then switch the arm's power off.")
+# A quit in Fault while the follower doesn't answer exits at once (`states._quit`).
+LEAVING_MOTORS = ("The follower isn't answering, so serve exits now and leaves its motors as they are: without "
+                  "power they stay off, and if only its USB cable came out, the arm keeps holding until you switch "
+                  "its power off.")
 # The announcement when a quit's drive to rest stops short, before SUPPORT_AND_QUIT.
 SHORT_OF_REST = "The arm holds where it stopped, short of rest."
 # The time-limit prompt's question; the terminal answers it with s, f or i at rest.

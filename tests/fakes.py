@@ -23,6 +23,7 @@ os.environ.setdefault("SVT_LOG", "1")
 import av
 import datasets.utils.logging
 import numpy as np
+import rustypot
 import torch
 
 from so_101 import svtshim
@@ -62,6 +63,8 @@ video_utils.StreamingVideoEncoder.__init__ = lambda self, *args, **kwargs: _enco
 STEPS_PER_TURN = 4096
 MOTORS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 STS3215_MODEL = 777
+# The STS3215 register names rustypot knows; the fake bus refuses any other, as the real one does.
+STS3215_REGISTERS = frozenset(r.name for r in rustypot.Sts3215PyController.registers())
 
 
 class FakeClock:
@@ -109,7 +112,7 @@ class FakeMotors:
                 "present_position": positions[name],
                 "goal_position": positions[name],
                 "torque_enable": 0,
-                "max_torque": 1000,  # EEPROM: what torque_limit becomes at power-on
+                "max_torque_limit": 1000,  # EEPROM: what torque_limit becomes at power-on
                 "torque_limit": 1000,
             }
         self.goals: list[dict[str, int]] = []
@@ -158,7 +161,7 @@ class FakeMotors:
         self.powered = True
         for r in self.registers.values():
             r["torque_enable"] = 0
-            r["torque_limit"] = r["max_torque"]
+            r["torque_limit"] = r["max_torque_limit"]
         self.move_by_hand(positions)
 
     def power_cycle(self, positions: dict[str, int]) -> None:
@@ -173,12 +176,21 @@ class FakeMotors:
 
     # The rustypot.Bus methods LeRobot's SerialMotorsBus calls.
 
+    @staticmethod
+    def _register(name: str) -> str:
+        """`name` as the STS3215 table spells it. Like rustypot, a name the servo doesn't define raises."""
+        if name.lower() not in STS3215_REGISTERS:
+            raise ValueError(f"no register named '{name}'")
+        return name.lower()
+
     def read_register_with_error(self, motor_id: int, name: str, retries: int = 0) -> tuple[int, int]:
+        name = self._register(name)
         self._answer([motor_id])
         self._settle()
         return self.registers[motor_id].get(name, 0), self.status.get(self.names[motor_id], 0)
 
     def sync_read_register_with_error(self, ids: list[int], name: str, retries: int = 0) -> list[tuple[int, int]]:
+        name = self._register(name)
         self._answer(ids)
         self._settle()
         return [(self.registers[i].get(name, 0), self.status.get(self.names[i], 0)) for i in ids]
@@ -187,12 +199,15 @@ class FakeMotors:
         return [value for value, _ in self.sync_read_register_with_error(ids, name, retries)]
 
     def write_register_with_error(self, motor_id: int, name: str, value: int, retries: int = 0) -> int:
+        name = self._register(name)
+        self._answer([motor_id])  # it waits for the motor's status packet
         self._settle()
         self._write(motor_id, name, value)
         return 0
 
     def sync_write_register(self, ids: list[int], name: str, values: list[int], retries: int = 0) -> None:
         """A sync write gets no reply, so it never fails: unpowered motors just miss it."""
+        name = self._register(name)
         self._settle()
         for i, value in zip(ids, values, strict=True):
             self._write(i, name, value)
@@ -221,7 +236,8 @@ class FakeMotors:
     def set_baudrate(self, baudrate: int) -> None:
         pass
 
-    def is_open(self) -> bool:
+    @property
+    def is_open(self) -> bool:  # a property on rustypot.Bus
         return self.open
 
     def close(self) -> None:
@@ -298,16 +314,27 @@ class NoRecorder:
 class FakeCamera:
     """A camera source that always has a black frame ready while connected.
 
-    Set `is_connected` to False to make it report itself disconnected, as LeRobot's OpenCV camera
-    does once its device is gone: its reads then raise, and LeRobot's follower counts itself as not
-    connected, refusing `get_observation` and `send_action`."""
+    Set `is_connected` to False to make it report itself disconnected: its reads then raise, and
+    LeRobot's follower counts itself as not connected, refusing `get_observation` and `send_action`.
+    LeRobot's OpenCV camera does that only if OpenCV closes the device. A camera that's unplugged
+    usually stays "connected" and fails its reads instead, as `stalled()` and `thread_died()` do."""
 
     def __init__(self) -> None:
         self.width, self.height = 64, 48
         self.is_connected = False
+        self.failure: Exception | None = None  # what each read raises while connected
+
+    def stalled(self) -> None:
+        """No new frame: LeRobot's `read_latest` raises once the last one is over `max_age_ms` old."""
+        self.failure = TimeoutError(f"{self} latest frame is too old: 812.4 ms (max allowed: 500 ms).")
+
+    def thread_died(self) -> None:
+        """LeRobot's read thread gave up after 10 failed reads in a row, so every read raises."""
+        self.failure = RuntimeError(f"{self} read thread is not running.")
 
     def connect(self, warmup: bool = True) -> None:
         self.is_connected = True
+        self.failure = None
 
     def disconnect(self) -> None:
         self.is_connected = False
@@ -317,6 +344,8 @@ class FakeCamera:
             from lerobot.utils.errors import DeviceNotConnectedError
 
             raise DeviceNotConnectedError(f"{type(self).__name__} is not connected. Run `.connect()` first.")
+        if self.failure is not None:
+            raise self.failure
         return np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
     read = async_read = read_latest
@@ -343,7 +372,7 @@ def make_follower(clock: FakeClock, positions: dict[str, int]):
     ))
     motors = FakeMotors(clock, calibration(), positions)
     robot.bus._open_bus = lambda: motors
-    robot.cameras = {"front": FakeCamera(), "wrist": FakeCamera()}
+    robot.cameras = {"top": FakeCamera(), "wrist": FakeCamera()}
     robot.connect(calibrate=False)
     wrapper = ThreadSafeRobot(robot)
     wrapper.configure_hold()

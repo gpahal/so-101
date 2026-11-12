@@ -147,7 +147,7 @@ def load() -> dict[str, Task]:
             catalog[name] = Task(
                 name=name,
                 prompt=t["prompt"],
-                cameras=tuple(t.get("cameras", ["front", "wrist"])),
+                cameras=tuple(t.get("cameras", ["top", "wrist"])),
                 fps=t.get("fps", 30),
                 episodes=t.get("episodes", 50),
                 episode_time_s=t.get("episode_time_s", 20),

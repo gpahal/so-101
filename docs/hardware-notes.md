@@ -10,7 +10,7 @@ The SO-101 uses Feetech STS3215 servos on a Waveshare bus servo board. Register 
 
 The STS3215 has no watchdog or communication timeout: none of its registers (0 to 86) is one. If the host process dies, each servo keeps driving to the last goal it received, then holds it with torque on. Only cutting its power makes it go limp.
 
-- **A clean exit** (Esc, Ctrl+C, SIGTERM, or SIGHUP from closing its terminal) turns torque off: `serve` first drives the arm to rest. Where it can't (after a fault, after a move to rest that stopped short, or resting away from the rest pose), only `y` at the terminal exits there, and no signal does, so with no terminal the arm holds until someone switches its power off.
+- **A clean exit** (Esc, Ctrl+C, SIGTERM, or SIGHUP from closing its terminal) turns torque off: `serve` first drives the arm to rest. Where it can't (after a fault, after a move to rest that stopped short, or resting away from the rest pose), only `y` at the terminal exits there, and no signal does, so with no terminal the arm holds until someone switches its power off. The exception is a follower that doesn't answer: any quit exits at once and leaves its motors as they are, since `serve` can't reach them.
 - **A crash or `kill -9`** skips that. The arm most likely finishes its last move and holds there until someone switches the power off. Untested. To settle it, run `kill -9` on `so101-control` while the arm moves to the start pose, again while the policy drives, and pull the follower's USB cable mid-move, with a hand under the arm each time. Then note whether the arm stops and holds, finishes its last move and holds, or goes limp.
 - **For operators away from the robot**, see [Stopping the arm](#stopping-the-arm).
 
@@ -21,8 +21,8 @@ A servo that loses power, or restarts in a brownout, comes back with torque off.
 `serve` handles this (README, "Devices and faults"):
 - **While the follower is silent,** it gets no goal, whatever other error comes meanwhile.
 - **Once it answers,** `serve` re-marks the motors, sets each goal to where the motor is found, then writes `Torque_Enable` = 1 itself rather than rely on the goal write turning it on.
-- **Restart detection:** `serve` sets each motor's `torque_limit` (address 48, in RAM) one below its `max_torque` (address 16, in EEPROM), and keeps each `max_torque`. At power-on the servo copies `max_torque` into `torque_limit`, so a restarted motor reads back at `max_torque`. `serve` reads the marks on every tick, before any goal goes out, and faults on the first tick after a restart.
-- **Only `max_torque` means a restart.** A `torque_limit` that reads anything else, neither the mark nor `max_torque`, was changed by something other than a restart, perhaps the servo's own overload protection. That is a fault of its own, `TorqueLimitChanged`, naming the motor and the value, reported once per value, in Fault too. The arm holds its last goal, as for a motor alarm, and `serve` doesn't write the mark over it, so the value stays as found.
+- **Restart detection:** `serve` sets each motor's `torque_limit` (address 48, in RAM) one below its `max_torque_limit` (address 16, in EEPROM), and keeps each `max_torque_limit`. At power-on the servo copies `max_torque_limit` into `torque_limit`, so a restarted motor reads back at `max_torque_limit`. `serve` reads the marks on every tick, before any goal goes out, and faults on the first tick after a restart.
+- **Only `max_torque_limit` means a restart.** A `torque_limit` that reads anything else, neither the mark nor `max_torque_limit`, was changed by something other than a restart, perhaps the servo's own overload protection. That is a fault of its own, `TorqueLimitChanged`, naming the motor and the value, reported once per value, in Fault too. The arm holds its last goal, as for a motor alarm, and `serve` doesn't write the mark over it, so the value stays as found.
 
 Untested on this firmware:
 
@@ -61,7 +61,7 @@ The follower's gripper sometimes stops answering and blinks red until its power 
 | Overload torque | 36 | 80% | The trip threshold. LeRobot sets the gripper's to 25 |
 | Acceleration | 41 | — | 8.79 °/s² per unit. LeRobot writes 254, about 2,230 °/s², close to the maximum |
 | Goal speed | 46 | 0 (no limit) | 0.732 rpm, about 4.4 °/s, per unit. Unused: the arm's speed is capped by `max_relative_target` |
-| Torque limit | 48 | `max_torque` at power-on | `serve` sets it one lower to detect restarts |
+| Torque limit | 48 | `max_torque_limit` at power-on | `serve` sets it one lower to detect restarts |
 | Status | 65 | — | Alarm bits: 1 voltage, 2 encoder, 4 temperature, 8 current, 32 load |
 
 Two of LeRobot's writes don't match Feetech's table: `Return_Delay_Time` goes to address 7, which Feetech lists as reserved on the STS, and `Maximum_Acceleration` to 85, which Feetech lists as read-only. Neither has shown an effect.
@@ -70,7 +70,7 @@ Unchecked: the actual values of registers 19 and 20 on these servos, which Feete
 
 ### Speed
 
-Measured on the 60 cylinder-bowl demos: 99.9% of joint motion is under 92 °/s, and the fastest single frame was 227 °/s (the elbow). `max_relative_target` (10 degrees a tick at 30 Hz) allows up to 300 °/s. A speed cap in the servos' own memory (Goal speed, address 46) isn't used: it would stay set until power-off, so it would also slow `teleop` and `record` after a `serve` session.
+Measured on 60 teleoperated pick-and-place demos on this arm: 99.9% of joint motion is under 92 °/s, and the fastest single frame was 227 °/s (the elbow). `max_relative_target` (10 degrees a tick at 30 Hz) allows up to 300 °/s. A speed cap in the servos' own memory (Goal speed, address 46) isn't used: it would stay set until power-off, so it would also slow `teleop` and `record` after a `serve` session.
 
 ## Stopping the arm
 

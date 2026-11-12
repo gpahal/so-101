@@ -17,7 +17,7 @@ from unittest import mock
 
 import numpy as np
 import pandas as pd
-from fakes import (MOTORS, DeadStream, FakeClock, FullDisk, NoRecorder, control, make_engine, make_follower,
+from fakes import (MOTORS, DeadStream, FakeCamera, FakeClock, FullDisk, NoRecorder, control, make_engine, make_follower,
                    make_leader)
 
 from so_101 import rollout
@@ -342,8 +342,8 @@ class ControllerTest(RigTest):
         self.rig.start_policy()
         self.rig.command("pause")
         self.assertGreater(self.rig.status()["rewind_available_s"], 0)
-        reason = "The front isn't connected. Plug it in."
-        self.rig.missing = {"front": reason}
+        reason = "The top camera isn't connected. Plug it in."
+        self.rig.missing = {"top": reason}
         sent = len(self.rig.goals())
 
         self.assertEqual(self.rig.command("rewind"), Result("rewind", False, reason))
@@ -359,7 +359,7 @@ class ControllerTest(RigTest):
         self.assertEqual(self.rig.status()["state"], "handover")
         self.rig.command("pause")
         self.assertEqual(self.rig.command("resume"), Result("resume", True))
-        self.assertEqual(self.rig.status()["devices"], {"follower": "ok", "front": "ok", "wrist": "ok", "leader": "ok"})
+        self.assertEqual(self.rig.status()["devices"], {"follower": "ok", "top": "ok", "wrist": "ok", "leader": "ok"})
 
     def test_teleop_hands_over_at_the_measured_pose_without_jumping(self) -> None:
         self.rig.start_policy()
@@ -524,7 +524,7 @@ class RecordingTest(RigTest):
         features = json.loads((rig.run_dir / "dataset" / "meta" / "info.json").read_text())["features"]
         self.assertEqual(
             sorted(key for key in features if key.startswith("observation.")),
-            ["observation.images.front", "observation.images.wrist", "observation.state"],
+            ["observation.images.top", "observation.images.wrist", "observation.state"],
         )
         frames, _ = rig.frames()
         runs = [(phase, len(list(group))) for phase, group in itertools.groupby(frames["control.phase"])]
@@ -581,14 +581,14 @@ class RecordingTest(RigTest):
         self.assertIsNotNone(encoder, "the run records with streaming encoding")
         self.assertTrue(hasattr(encoder, "_dropped_frames"), "LeRobot's streaming encoder moved its dropped frames")
         self.assertEqual(encoder._dropped_frames, {}, "the attempt's episode started with no frames dropped")
-        encoder._dropped_frames["observation.images.front"] = 3  # as `feed_frame` counts a frame its full queue refused
+        encoder._dropped_frames["observation.images.top"] = 3  # as `feed_frame` counts a frame its full queue refused
         with self.assertLogs("lerobot.datasets.video_utils", "WARNING") as logs:
             rig.reset("succeeded")
-        self.assertIn("3 dropped frame(s) for observation.images.front", "\n".join(logs.output),
+        self.assertIn("3 dropped frame(s) for observation.images.top", "\n".join(logs.output),
                       "LeRobot reads the count as its own as it finishes the episode")
 
         [end] = rig.events("attempt_end")
-        self.assertEqual((end["saved"], end.get("dropped_frames")), (True, {"front": 3}))
+        self.assertEqual((end["saved"], end.get("dropped_frames")), (True, {"top": 3}))
 
         # The next attempt's episode starts its count again.
         rig.tick(2 * FPS)  # past the toggle's rule, so a new attempt may start
@@ -864,6 +864,42 @@ class QuitTest(RigTest):
                 self.assertEqual(rig.events()[-1]["type"], "run_end")
 
 
+    def test_a_quit_while_the_follower_is_silent_exits_at_once_and_leaves_its_motors(self) -> None:
+        # The arm's power is switched off mid-attempt: exiting can't turn its motors off, so no y is needed.
+        for source in ("signal", "terminal"):
+            with self.subTest(source):
+                self.said = []
+                rig = self.new_rig(f"silent-{source}", notify=lambda message, state: self.said.append(message))
+                rig.start_policy()
+                rig.motors.power_off()
+                rig.tick(3)
+                self.assertEqual(rig.status()["state"], "fault")
+
+                quit = rig.controller.submit("quit", source)
+                rig.tick()
+                self.assertTrue(quit.result(timeout=0).accepted)
+                self.assertTrue(rig.controller.done, "a silent follower needs no confirmation")
+                self.assertTrue(rig.controller.leaves_motors)
+                self.assertTrue(any("leaves its motors as they are" in message for message in self.said))
+                self.assertEqual(rig.episodes(), 1, "the attempt was saved at the fault")
+                rig.controller.close()
+                self.assertEqual(rig.events()[-1]["type"], "run_end")
+
+        # Once it answers again, the arm may be powered and raised: a quit only asks.
+        rig = self.new_rig("answering-again")
+        rig.start_policy()
+        rig.motors.power_off()
+        rig.tick(3)
+        rig.motors.power_on(rig.motors.present())
+        rig.tick(2)
+        rig.controller.submit("quit", "signal")
+        rig.tick(FPS)
+        self.assertFalse(rig.controller.done)
+        self.assertFalse(rig.controller.leaves_motors)
+        self.assertTrue(rig.status()["confirm_quit"])
+        self.assertTrue(rig.motors.torqued(), "it holds where it fell")
+
+
 class ResetTest(RigTest):
     """Reset always has a way to send the arm to rest, and an outcome given with it is recorded or refused."""
 
@@ -918,7 +954,7 @@ class ResetTest(RigTest):
         self.assertEqual(self.rig.command("reset"), Result("reset", True), "Reset without an outcome goes to rest")
 
     def test_a_fault_on_the_tick_an_attempt_opens_saves_nothing_to_label(self) -> None:
-        camera = self.rig.robot.inner.cameras["front"]
+        camera = self.rig.robot.inner.cameras["top"]
         camera.is_connected = False  # the first observation of the attempt fails
         self.addCleanup(setattr, camera, "is_connected", True)  # before the rig closes
         self.assertEqual(self.rig.command("resume"), Result("resume", True))
@@ -935,27 +971,35 @@ class ResetTest(RigTest):
 class ArmsTest(RigTest):
     """Goals without cameras, and the follower's restart marks."""
 
-    def test_a_camera_that_reports_itself_disconnected_faults_naming_it_and_reset_reaches_rest(self) -> None:
-        rig = self.rig
-        rig.start_policy()
-        camera = rig.robot.inner.cameras["front"]
-        camera.is_connected = False
-        self.addCleanup(setattr, camera, "is_connected", True)  # before the rig closes
-        sent = len(rig.goals())
+    def test_a_lost_camera_faults_naming_it_and_reset_reaches_rest(self) -> None:
+        def disconnected(camera) -> None:
+            camera.is_connected = False
 
-        rig.tick()
-        status = rig.status()
-        self.assertEqual(status["state"], "fault")
-        self.assertIn("front camera", status["fault"])
-        self.assertEqual(status["devices"]["front"], "missing")
-        rig.tick(FPS)
-        self.assertGreaterEqual(len(rig.goals()) - sent, FPS, "the arm keeps getting its hold every tick")
-        self.assertEqual(len({tuple(g.values()) for g in rig.goals()[sent:]}), 1, "and holds where it was")
+        # It reports itself disconnected, or, as an unplugged camera usually does, stays "connected"
+        # while its reads fail: no new frame, then LeRobot's read thread giving up.
+        for case, lose in (("disconnected", disconnected), ("stalled", FakeCamera.stalled),
+                           ("read thread died", FakeCamera.thread_died)):
+            with self.subTest(case):
+                rig = self.new_rig()
+                rig.start_policy()
+                camera = rig.robot.inner.cameras["top"]
+                lose(camera)
+                self.addCleanup(camera.connect)  # before the rig closes
+                sent = len(rig.goals())
 
-        self.assertEqual(rig.command("reset"), Result("reset", True))
-        rig.tick_until("resting")
-        for motor, steps in REST_STEPS.items():
-            self.assertAlmostEqual(rig.goals()[-1][motor], steps, delta=1, msg=motor)
+                rig.tick()
+                status = rig.status()
+                self.assertEqual(status["state"], "fault")
+                self.assertIn("top camera", status["fault"])
+                self.assertEqual(status["devices"]["top"], "missing")
+                rig.tick(FPS)
+                self.assertGreaterEqual(len(rig.goals()) - sent, FPS, "the arm keeps getting its hold every tick")
+                self.assertEqual(len({tuple(g.values()) for g in rig.goals()[sent:]}), 1, "and holds where it was")
+
+                self.assertEqual(rig.command("reset"), Result("reset", True))
+                rig.tick_until("resting")
+                for motor, steps in REST_STEPS.items():
+                    self.assertAlmostEqual(rig.goals()[-1][motor], steps, delta=1, msg=motor)
 
     def test_a_torque_limit_changed_to_another_value_is_its_own_fault_and_left_as_found(self) -> None:
         rig = self.rig

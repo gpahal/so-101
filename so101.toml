@@ -38,8 +38,8 @@ max_relative_target = 10
 # camera's controls and their ranges (that's the wrist camera's usb_id, with 0x before each part).
 # exposure-time-abs is nominally in units of 0.1 ms; the wrist camera's run off (see below).
 
-# Fixed camera looking at the workspace.
-[cameras.front]
+# Fixed camera above the workspace, looking down on the mat and the arm.
+[cameras.top]
 index = 0
 width = 640
 height = 480
@@ -47,22 +47,29 @@ fps = 30
 rotation = 0
 usb_id = "32e6:9221"
 
-[cameras.front.controls]
+[cameras.top.controls]
 # Anti-flicker for 50 Hz mains (India). 0 = off, 1 = 50 Hz, 2 = 60 Hz.
 power-line-frequency = 1
-# Fixed 20 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. Auto
-# exposure blows out the walls and bowl; shorter exposures (2.5, 5 ms) band and go dark. Picked from a
-# sweep of exposure, gamma, contrast and saturation: 20 ms with gamma 80 is bright with nothing clipped.
-# Fixed exposure doesn't adapt to light: if the room gets much brighter, try 10 ms with gamma 100.
-# Tuned on the wooden table: retune for the black mat before recording on it (README, Camera controls).
+# Fixed 20 ms exposure: two whole cycles of the lights' 10 ms flicker, so no banding (0.2%
+# measured). 30 ms looked a little richer but smeared the arm in the first recorded demos when it
+# moved fast; 20 ms cuts that blur by a third. Gamma 150 puts the mat at about 40/255 and the white
+# wall and arm near 211/255, with 0.16% of pixels clipped. Contrast 36 crushes the mat to 13/255;
+# gamma 220 washes the picture out.
+# The camera gives 20 frames/s at every exposure from 10 to 30 ms.
+# Fixed exposure doesn't adapt to light: if the room gets brighter, lower gamma first.
 auto-exposure-mode = 1
 exposure-time-abs = 200
-gamma = 80
+gamma = 150
+# Fixed white balance, so colours don't shift as the arm and props move through the picture.
+# 4000 K turns the white wall neutral. Auto must be off before the temperature takes effect, so it
+# comes first.
+auto-white-balance-temp = 0
+white-balance-temp = 4000
+# Saturation 64, up from the default 57, so the red block and amber container stand out more.
+saturation = 64
 # The camera's defaults, listed so applying this config also undoes any other values left set.
-# white-balance-temp is left out: this camera accepts it but the picture doesn't change.
 brightness = 0
 contrast = 32
-saturation = 57
 
 # Camera on the gripper.
 [cameras.wrist]
@@ -76,23 +83,23 @@ usb_id = "32e6:9005"
 [cameras.wrist.controls]
 # This camera ignores power-line-frequency, so tube lights on 50 Hz mains put rolling bands in
 # its picture. A fixed exposure of a whole number of flicker cycles avoids them (auto measured 5.3%
-# flicker), but this camera's exposure units run about 12% off: a sweep found the band-free values
-# at 114, about 228 and 285, while 200 (nominally 20 ms) measured 2.7%. Retune from those values.
-# A longer exposure slows the camera (40 ms: 14 fps).
+# flicker), but this camera's exposure units run about 12% off: the band-free values are 114,
+# about 228 and 285. Values between them band (140 to 185 measured 3-8% flicker).
+# 228 with gamma 120 gives a black mat, a white wall and a saturated red block, with 0.5-1% of
+# pixels clipped and none on the gripper fingers. 114 needed gamma 200 to be bright enough, which
+# turned the mat milky grey and kept the brightest 1% under 195/255: a pale, flat picture. Higher
+# gamma at 228 clips the fingers (25% of their pixels at gamma 180).
 # Fixed exposure doesn't adapt to light: if images get too dark or bright, adjust gamma first.
-# Tuned for the wooden table: the shortest band-free exposure leaves highlight headroom, so red
-# maxed out in at most 11% of pixels just before a grasp, against 31-63% at 200. Gamma 130 with
-# brightness -10 sets the mid-tones. Reflections off the table still clip in a small stripe.
-# Retune for the black mat before recording on it (README, Camera controls).
-# White balance isn't set here, and the picture can shift: it turned pink around the release in
-# 5 of 60 demos.
 auto-exposure-mode = 1
-exposure-time-abs = 114
-gamma = 130
-brightness = -10
-# The camera's defaults, listed so applying this config also undoes any other values left set.
-saturation = 25
-contrast = 27
+exposure-time-abs = 228
+gamma = 120
+brightness = 0
+# Auto white balance stays on: every fixed temperature from 3600 to 6500 K tinted this camera's
+# whites green or yellow, while auto keeps them neutral.
+auto-white-balance-temp = 1
+# Contrast 32 and saturation 40, up from the defaults 27 and 25, which looked washed out.
+contrast = 32
+saturation = 40
 
 # Where `so101 record` saves demos (<dir>/<task>/sessions/) and `so101 serve` its runs
 # (<dir>/<task>/runs/), plus edits and the training dataset.
@@ -174,12 +181,12 @@ job_timeout = "1h"
 # encoder steps (0-4095), the same for every task. Pick a folded pose that stays put with the power
 # off, move the arm there by hand, and save it with `uv run so101 pose --save-rest`, which replaces
 # the commented-out rest_pose and rest_pose_calibration lines below with the ones it saves.
-# rest_pose = { shoulder_pan = 2048, shoulder_lift = 2048, elbow_flex = 2048, wrist_flex = 2048, wrist_roll = 2048, gripper = 2048 }
+rest_pose = { shoulder_pan = 2053, shoulder_lift = 841, elbow_flex = 3026, wrist_flex = 2872, wrist_roll = 2045, gripper = 862 }
 # The first 12 hex digits of the follower calibration file's SHA-256 when rest_pose was saved, which
 # `pose --save-rest` writes. Recalibrating changes where each step count puts a joint, so `serve`
 # refuses to start when the calibration file no longer matches, or when this line is missing:
 # save the rest pose again. `so101 check` only warns about either.
-# rest_pose_calibration = "0123456789ab"
+rest_pose_calibration = "3b1efd26e3ea"
 # Seconds of the arm's actual motion each Rewind plays back, newest first, in real time. Short
 # enough to undo only the mistake; press Rewind again to go back another rewind_s, never past the
 # start of the attempt.

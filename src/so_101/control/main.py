@@ -45,6 +45,21 @@ RUN_ENV = "SO101_RUN"
 QUIT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
+# Ctrl+Z would stop the loop with the arm powered and holding its last goal, and the keys, the page and
+# the policy frozen with it. `so101 serve` ignores it, and this process says how to quit instead.
+SUSPEND_REFUSED = "Ctrl+Z doesn't suspend serve: the arm would hold with nothing watching it. Esc quits."
+
+
+def refuse_suspend() -> None:
+    """Make Ctrl+Z (SIGTSTP) print SUSPEND_REFUSED instead of stopping this process. Main thread only."""
+
+    def refuse(signum, frame) -> None:
+        with contextlib.suppress(OSError, ValueError, RuntimeError):  # a closed terminal can't take it
+            print(SUSPEND_REFUSED, flush=True)
+
+    signal.signal(signal.SIGTSTP, refuse)
+
+
 def exit_on_signals() -> None:
     """Until the controller runs, make SIGTERM and SIGHUP raise SystemExit, as Ctrl+C raises
     KeyboardInterrupt, so every cleanup registered so far runs. Left at their default, they would end
@@ -205,8 +220,7 @@ def remote_context(cfg):
 
 def control(cfg) -> None:
     exit_on_signals()  # first: LeRobot's imports and the policy's loading can take minutes
-
-    import logging
+    refuse_suspend()
 
     from lerobot.rollout import build_rollout_context
     from lerobot.utils import init_logging
@@ -220,7 +234,7 @@ def control(cfg) -> None:
     from so_101.control.server import ControlServer, resolve_bind, route_warning
     from so_101.control.watch import DeviceWatch
 
-    init_logging(console_level=logging.WARNING)
+    init_logging(console_level="WARNING")  # a level name: LeRobot calls .upper() on it
     # so101.toml, read once for the whole run.
     s = settings.load()
     check_settings(s)  # before anything is connected or bound
@@ -274,14 +288,18 @@ def control(cfg) -> None:
             ctx, reconnect = build_rollout_context(cfg, threading.Event()), None
         robot = ctx.hardware.robot_wrapper
 
+        recorder = controller = None
+
         def disconnect_follower() -> None:
             """Turn the follower's motors off and close its port, then its cameras. LeRobot's own
             disconnect refuses while any camera reports itself disconnected, which would leave the
-            motors on."""
+            motors on. After a quit that found the follower silent, its motors are left as they are
+            (`Controller.leaves_motors`): one that answers again by now may hold a raised arm."""
             inner = robot.inner
+            leave = controller is not None and controller.leaves_motors
             try:
                 if inner.bus.is_connected:
-                    inner.bus.disconnect(inner.config.disable_torque_on_disconnect)
+                    inner.bus.disconnect(inner.config.disable_torque_on_disconnect and not leave)
             finally:
                 for camera in inner.cameras.values():
                     if camera.is_connected:
@@ -299,7 +317,6 @@ def control(cfg) -> None:
         watch.start()
         if not robot.supports_hold:
             robot.configure_hold()
-        recorder = controller = None
 
         def close_run() -> None:
             if controller is not None:

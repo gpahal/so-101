@@ -33,7 +33,7 @@ from so_101.control.recorder import Phase, features
 from so_101.data import Run
 from so_101.tasks import Task
 
-TASK = Task(name="test", prompt="test", cameras=("front", "wrist"), fps=FPS,
+TASK = Task(name="test", prompt="test", cameras=("top", "wrist"), fps=FPS,
             episodes=1, episode_time_s=10, reset_time_s=5, props=[], setup=[])
 BLAME_S = 2.5
 
@@ -95,7 +95,7 @@ def make_demo_session(root: Path, frames: int) -> None:
         state = np.full(6, i, dtype=np.float32)
         image = np.full((48, 64, 3), 128, dtype=np.uint8)
         dataset.add_frame({"observation.state": state, "action": state, "task": "test",
-                           "observation.images.front": image, "observation.images.wrist": image})
+                           "observation.images.top": image, "observation.images.wrist": image})
     dataset.save_episode()
     dataset.finalize()
 

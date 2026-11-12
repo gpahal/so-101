@@ -8,6 +8,7 @@ Only this virtualenv's python and a fake `ssh` run; nothing here reaches the net
 import contextlib
 import io
 import json
+import logging
 import os
 import signal
 import socket
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from concurrent.futures import Future
@@ -211,7 +213,7 @@ class ControlShutdown(unittest.TestCase):
         def disconnect() -> None:  # if the test failed before so101-control disconnected it
             for camera in self.robot.inner.cameras.values():
                 camera.is_connected = True
-            if self.motors.is_open():
+            if self.motors.is_open:
                 self.robot.inner.disconnect()
 
         self.addCleanup(disconnect)
@@ -228,8 +230,13 @@ class ControlShutdown(unittest.TestCase):
         path = self.run_dir / "events.jsonl"
         return [json.loads(line)["type"] for line in path.read_text().splitlines()] if path.exists() else []
 
-    def control(self, before_quit=lambda: None) -> None:
-        """Run `so101-control` until the key reader's quit, after `before_quit()`. Its stop raises."""
+    def control(self, before_quit=lambda: None, quit_in: str = "resting", at_exit=lambda: None) -> None:
+        """Run `so101-control` until the key reader's quit, after `before_quit()`. Its stop raises.
+
+        The quit comes from the terminal at once, at rest; with another `quit_in`, it comes as a signal
+        once the state is `quit_in`. If that never comes within 10 s, or the signal's quit hasn't ended
+        the run 2 s later, the terminal quits and confirms, so the run always ends. `at_exit()` runs as the policy stops, just before the
+        follower disconnects."""
         from fakes import control, make_engine
         from test_controller import POLICY_ACTIONS, REST_STEPS
 
@@ -237,8 +244,15 @@ class ControlShutdown(unittest.TestCase):
         from so_101.control.policy import EngineDriver
         from so_101.control.server import Bind
 
-        order, robot = self.order, self.robot
+        order, robot, test = self.order, self.robot, self
         driver = EngineDriver(make_engine(POLICY_ACTIONS), list(robot.action_features))
+        stop_driver = driver.stop
+
+        def stop() -> None:
+            stop_driver()
+            at_exit()
+
+        driver.stop = stop
         s = SimpleNamespace(control=control(preview_fps=0, rest_pose=REST_STEPS), follower=None, leader=None,
                             camera=lambda name: name, path=Path("so101.toml"))
         task = SimpleNamespace(name="test", cameras=tuple(robot.inner.cameras))
@@ -259,11 +273,26 @@ class ControlShutdown(unittest.TestCase):
 
         class Keys:
             def __init__(self, submit, status) -> None:
-                self.submit = submit
+                self.submit, self.status = submit, status
+                test.keys_submit = submit  # for `before_quit`
 
             def start(self) -> None:
                 before_quit()
-                self.submit("quit", source="terminal")  # at rest: the run ends on the first tick
+                if quit_in == "resting":
+                    self.submit("quit", source="terminal")  # at rest: the run ends on the first tick
+                    return
+
+                def quit_later() -> None:
+                    deadline = time.monotonic() + 10
+                    while self.status().get("state") != quit_in and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if self.status().get("state") == quit_in:
+                        self.submit("quit", source="signal")
+                        time.sleep(2)  # if that didn't end the run, the confirmed quit below does
+                    self.submit("quit", source="terminal")
+                    self.submit("exit_here", source="terminal")
+
+                threading.Thread(target=quit_later, daemon=True).start()
 
             def stop(self) -> None:
                 raise RuntimeError("restoring the terminal failed")
@@ -271,6 +300,11 @@ class ControlShutdown(unittest.TestCase):
         manifest = {"operator": None, "control": {"fps": 30},
                     "policy": {"type": "act", "revision": "main", "inference": "local"}}
         environment = {main.RUN_ENV: json.dumps({"dir": str(self.run_dir), "manifest": manifest})}
+        # LeRobot's real init_logging runs, so a call it rejects fails here. It replaces the root
+        # logger's handlers and level, which the other tests rely on, so they're put back after.
+        root = logging.getLogger()
+        self.addCleanup(setattr, root, "handlers", root.handlers[:])
+        self.addCleanup(root.setLevel, root.level)
         with mock.patch.dict(os.environ, environment), \
                 mock.patch("so_101.settings.load", return_value=s), \
                 mock.patch("so_101.tasks.load", return_value={"test": task}), \
@@ -281,7 +315,6 @@ class ControlShutdown(unittest.TestCase):
                 mock.patch.object(main, "quit_on_signals"), \
                 mock.patch.object(main, "interrupt_on_signals"), \
                 mock.patch.object(main, "keep_awake", return_value=None), \
-                mock.patch("lerobot.utils.init_logging"), \
                 mock.patch("lerobot.rollout.build_rollout_context",
                            return_value=SimpleNamespace(hardware=SimpleNamespace(robot_wrapper=robot))), \
                 mock.patch.object(EngineDriver, "from_context", return_value=driver), \
@@ -294,13 +327,38 @@ class ControlShutdown(unittest.TestCase):
 
     def test_every_cleanup_runs_when_the_first_raises_and_the_run_closes_before_the_follower_disconnects(self) -> None:
         def unplug() -> None:  # the follower still disconnects while a camera reports itself disconnected
-            self.robot.inner.cameras["front"].is_connected = False
+            self.robot.inner.cameras["top"].is_connected = False
 
         self.control(before_quit=unplug)
         self.assertIn("run_end", self.events())
         self.assertEqual(self.order, ["follower disconnected after run_end", "page stopped"])
         self.assertFalse(self.motors.torqued(), "the motors turned off")
-        self.assertFalse(self.motors.is_open())
+        self.assertFalse(self.motors.is_open)
+
+    def test_a_quit_with_the_follower_silent_leaves_its_motors_on_when_it_answers_again_at_exit(self) -> None:
+        def unplug() -> None:  # the follower's USB cable comes out with its power on, then a policy starts
+            self.motors.failing = True
+            self.keys_submit("resume", source="terminal")
+
+        def answers_again() -> None:  # the cable is back just as serve exits, with the arm raised and holding
+            self.motors.failing = False
+
+        self.control(before_quit=unplug, quit_in="fault", at_exit=answers_again)
+        self.assertIn("run_end", self.events())
+        self.assertTrue(self.motors.torqued(), "its motors were left on: the arm keeps holding")
+        self.assertFalse(self.motors.is_open, "its port closed")
+
+
+class SuspendTest(unittest.TestCase):
+    def test_ctrl_z_never_stops_so101_control(self) -> None:
+        from so_101.control import main
+
+        # A child of its own: a test process that stops would hang the run, where this one times out.
+        code = ("import os, signal, time; from so_101.control import main; main.refuse_suspend(); "
+                "os.kill(os.getpid(), signal.SIGTSTP); time.sleep(0.2); print('still running', flush=True)")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.splitlines(), [main.SUSPEND_REFUSED, "still running"])
+
 
 class TunnelRestart(unittest.TestCase):
     def setUp(self) -> None:

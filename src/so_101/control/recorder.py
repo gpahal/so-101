@@ -38,7 +38,7 @@ up with the `control.phase` column. No other field can replace these.
     attempt_end    ended_by, saved, episode (None when not saved), frames, seconds (per phase), for
                    a time limit, limit (the setting that fired, such as attempt_limit_s) and limit_s,
                    and when the video encoder fell behind and dropped frames of a saved attempt,
-                   dropped_frames (per camera, such as {"front": 3}): its video and its other columns
+                   dropped_frames (per camera, such as {"top": 3}): its video and its other columns
                    don't line up, so builds leave it out
     outcome        outcome (succeeded, failed or ignored), episode and operator. An outcome given after
                    its attempt closed (at rest after a time limit, or with the Reset after a fault)

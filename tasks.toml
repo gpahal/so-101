@@ -17,26 +17,26 @@
 #   episodes        Demos to keep (default 50). ~50 for one pick-and-place, spread over 5+ start positions.
 #   episode_time_s  Seconds per demo (default 20); press Right arrow or n to finish one early.
 #   reset_time_s    Seconds between demos to put the props back (default 10).
-#   cameras         Your cameras to record, named as in so101.toml (default: ["front", "wrist"]).
+#   cameras         Your cameras to record, named as in so101.toml (default: ["top", "wrist"]).
 #   props, setup    What to put on the table and where the cameras go.
 # Copy a task's section and change the name, prompt and props to add another task.
 
 # The task every `so101` command uses when you don't name one.
-default = "cylinder-bowl"
+default = "block-container"
 
-[cylinder-bowl]
-prompt = "Pick up the cylinder and put it in the bowl"
+[block-container]
+prompt = "Pick up the red block and put it in the cylindrical container"
 episodes = 50
 episode_time_s = 30
 reset_time_s = 15
 props = [
-  "Cylindrical block, standing upright",
-  "Bowl",
+  "Red toy brick (2x2), lying flat",
+  "Clear cylindrical container with an amber tint, open side up",
   "Matte black mat under the workspace",
 ]
 setup = [
-  "Front camera above the mat, fixed: don't move it between recording and running",
-  "Bowl stays in one spot; move the cylinder to a new spot every 10 demos (5 spots for 50)",
+  "Top camera above the mat, fixed: don't move it between recording and running",
+  "Container stays in one spot, within easy reach and off the wall; move the block to a new spot every 10 demos (5 spots for 50)",
   "Start every demo from the same folded rest pose, and do the task the same way each time",
   "The policy learns the props' colours and the surface: if you change one, record new demos with it",
 ]

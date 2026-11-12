@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import signal
 import sys
 from functools import partial
 
@@ -48,6 +49,9 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     manifest["operator"] = ns.operator
     os.environ[RUN_ENV] = json.dumps({"dir": str(run.path), "manifest": manifest})
     print("Not an emergency stop: keep a hand near the follower's power switch.\n", flush=True)
+    # Ctrl+Z reaches this process too: stopped, it would leave the terminal to the shell. so101-control
+    # inherits the ignore until it sets its own handler (`main.refuse_suspend`). uv keeps running.
+    signal.signal(signal.SIGTSTP, signal.SIG_IGN)
     setup.run("so101-control", [*setup.args, f"--task={task.prompt}", *extra], None, partial(print_serve_summary, run))
 
 

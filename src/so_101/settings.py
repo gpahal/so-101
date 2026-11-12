@@ -340,7 +340,7 @@ def _parse(path: Path) -> Settings:
     return Settings(
         follower=arm("follower"),
         leader=arm("leader"),
-        teleop=Teleop(fps=teleop.get("fps", 60), max_relative_target=teleop.get("max_relative_target", 0)),
+        teleop=Teleop(fps=teleop.get("fps", 60), max_relative_target=float(teleop.get("max_relative_target", 0))),
         cameras={name: camera(name, section) for name, section in data.get("cameras", {}).items()},
         run=Run(
             duration_s=run.get("duration_s", 30),
@@ -385,7 +385,7 @@ def _set_in_section(lines: list[str], name: str, key: str, line: str, after: str
     Replaces an existing `key = ...` line in the section, or a commented-out `# key = ...` placeholder,
     else adds the line right after the `after = ...` line, else right after the section's header,
     adding the section at the end of the file when there is none. A dotted header such as
-    `[cameras.front]` is a section of its own."""
+    `[cameras.top]` is a section of its own."""
     lines = list(lines)
     section = None
     header = existing = placeholder = anchor = None

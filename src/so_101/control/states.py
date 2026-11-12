@@ -91,6 +91,8 @@ class Action(StrEnum):
     CONFIRM_QUIT = "confirm_quit"
     CLOSE_ATTEMPT = "close_attempt"  # the arm arrived at rest, or a quit's drive stopped short: save the attempt
     EXIT = "exit"
+    # The follower doesn't answer: exit now, leaving its motors as they are, never turning them off.
+    EXIT_LEAVING_MOTORS = "exit_leaving_motors"
 
 
 # Teleop's refusal while no leader is connected: unplugged, without a calibration file, or lost.
@@ -114,6 +116,9 @@ class Facts:
     # (follower first), or None when it's there.
     follower_missing: str | None
     device_missing: str | None
+    # The follower stopped answering or restarted, and hasn't answered since (`Follower.lost`): exiting
+    # can't turn its motors off, so it changes nothing about the arm.
+    follower_silent: bool
     fault: str | None  # the error that caused the Fault state
     leader: str | None  # why the leader can't take over, or None when it is connected
     teleop_from_start_pose: bool  # Teleop from rest first drives to the demos' start pose
@@ -263,13 +268,18 @@ def _reset(state: State, facts: Facts) -> Transition:
 def _quit(state: State, facts: Facts) -> Transition:
     # Where the arm can't get to rest, a Quit only asks, and asks again while one is pending: a held
     # Esc, a doubled signal or a closed terminal must never turn the motors off with the arm raised.
+    # The one exception is a silent follower in Fault, whose motors exiting leaves as they are.
     if facts.quitting:
         return _refuse(state, "Already quitting. The arm is on its way to rest, and serve exits once it's there; "
                               "Pause cancels the quit.")
     if state is State.RESTING:
         return Transition(state, (Action.EXIT,) if facts.at_rest else (Action.CONFIRM_QUIT,))
     if state is State.FAULT:
-        # The follower may not answer, so the arm can't be driven to rest.
+        # The follower may not answer, so the arm can't be driven to rest. One that doesn't, as when its
+        # power is off, can't have its motors turned off either: exiting leaves the arm as it is, so no
+        # confirmation is needed, and a signal exits too.
+        if facts.follower_silent:
+            return Transition(state, (Action.EXIT_LEAVING_MOTORS,))
         return Transition(state, (Action.CONFIRM_QUIT,))
     if state is State.RETURNING:
         return Transition(state, (Action.QUIT_AT_REST,))

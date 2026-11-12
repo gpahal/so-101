@@ -146,6 +146,9 @@ class Controller:
         self.clock = clock
         self.notify = notify or (lambda message, state: None)
         self.done = False
+        # Set with `done` when the quit found the follower silent: the exit leaves its motors as they are
+        # (`main.disconnect_follower`), so a follower that answers again just then is never turned off.
+        self.leaves_motors = False
         self.presence = presence
         inner = robot.inner
         self.required = ("follower", *inner.cameras)
@@ -490,6 +493,7 @@ class Controller:
             at_rest=self.at_rest,
             attempt_open=attempt is not None,
             follower_missing=devices["follower"],
+            follower_silent=self._follower.lost,
             device_missing=next((reason for reason in devices.values() if reason), None),
             fault=self._fault_error,
             leader=self._leader_reason(),
@@ -693,8 +697,11 @@ class Controller:
                 self._confirm_until = self.clock() + CONFIRM_S  # asked again: CONFIRM_S from now
             case Action.CLOSE_ATTEMPT:
                 self._close_attempt()
-            case Action.EXIT:
+            case Action.EXIT | Action.EXIT_LEAVING_MOTORS:
                 # No attempt is open here: it was saved at rest, where the arm stopped short, or at a fault.
+                if action is Action.EXIT_LEAVING_MOTORS:
+                    self.leaves_motors = True
+                    self._say(wording.LEAVING_MOTORS)
                 self.done = True
                 try:
                     self.policy.pause()
