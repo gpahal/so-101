@@ -11,7 +11,7 @@ own episode, after the demos. The cuts already leave out scripted, suspect and w
 ignored attempts (`analysis.training_cuts` has the full list). A cut whose episode the run's episode index doesn't list, as when a kill
 came after its data file was finished and before its index row was written, is left out with a note.
 Only the demos' columns are written, unless `keep_labels` is set.
-With either, build.json records `analysis.RULES_VERSION`, so a build made under older cut or label
+With either, build.json records `analysis.RULES_VERSION`, so a build made under other cut or label
 rules isn't current.
 """
 
@@ -77,7 +77,7 @@ class Plan:
             # A demo is a human driving with the leader, as in Teleop, but no policy ran: it corrects
             # nothing, so it isn't an intervention.
             return _labels(False, Phase.TELEOP, analysis.FrameLabel.NEUTRAL, True)
-        # From the analysis's rule, not the recorded column, which older runs set in every Teleop frame.
+        # From the analysis's rule, so the label follows `analysis`, whatever the recorded column says.
         return _labels(bool(self.intervention_mask[i]), int(self.attempt.phases[i]),
                        int(self.frame_labels[i]), self.attempt.outcome == "succeeded")
 
@@ -283,8 +283,8 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
                 raise ConfigError(p.damaged(task, e)) from e
             # Parallel encoding starts a process pool per episode, and on macOS each
             # worker is a fresh Python that imports torch and LeRobot. Serial encoding
-            # took one 300-frame, two-camera episode from 5.7-6.1 s to 4.7-4.9 s, and
-            # the build tests from 59.7 s to 7.6 s.
+            # takes a 300-frame, two-camera episode 4.7-4.9 s against 5.7-6.1 s in
+            # parallel, and the build tests 7.6 s against 59.7 s.
             out.save_episode(parallel_encoding=False)
             done += p.stop - p.start
             mapping.append(p.entry())

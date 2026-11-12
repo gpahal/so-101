@@ -54,7 +54,7 @@ LeRobot encodes each camera's video with SVT-AV1, through PyAV, on one encoder t
   - `tests/fakes.py` calls `ensure()`, so the recorder and build tests run with it.
 - **Why it can load at all.** uv's Python (`cpython-3.13.14`) is ad-hoc signed without the hardened runtime (`codesign -dv`: `flags=0x20002(adhoc,linker-signed)`), so dyld honours `DYLD_INSERT_LIBRARIES`. A hardened-runtime Python would ignore it, and the checks would then fail rather than run unprotected.
 - **Child processes.** This venv's Python processes inherit the variable, so the LeRobot commands `so101` starts, and their worker processes, load the shim too. Every other program `so101` starts (`git`, `ssh`, `caffeinate`, `tailscale`, `uvc-util`, `cc`) is started with `svtshim.other_env()`, which leaves the shim out. Three cases matter:
-  - **SIP off.** macOS's own programs (`git`, `ssh`, `caffeinate`, `cc`, `/bin/sh`) are arm64e. With System Integrity Protection off, as on GitHub's macOS runners, dyld refuses to start one with the arm64 shim inserted ("incompatible architecture (have 'arm64', need 'arm64e')"). The first CI run failed this way, when `cc` was started from a test process with the shim loaded.
+  - **SIP off.** macOS's own programs (`git`, `ssh`, `caffeinate`, `cc`, `/bin/sh`) are arm64e. With System Integrity Protection off, as on GitHub's macOS runners, dyld refuses to start one with the arm64 shim inserted ("incompatible architecture (have 'arm64', need 'arm64e')"). `cc` started from a test process with the shim loaded fails this way.
   - **SIP on, the default.** macOS strips `DYLD_*` variables from its own programs anyway, so a Python started through `/bin/sh` runs without the shim, and its checks fail.
   - **The guard.** `tests/test_svtshim.py` checks that every subprocess call in `src/` passes `env=` unless it starts this venv's Python. A program that LeRobot or a library starts from inside a shim-loaded process isn't covered: with SIP off, an arm64e one would fail to start.
 
@@ -72,7 +72,7 @@ Every crash without the shim was SIGTRAP with exit code 133. With and without th
 
 ## Alternatives considered
 
-Each of these was tried or measured. In order of how close it came:
+In order of how close each comes:
 
 - **Recording with Apple's VideoToolbox H.264.**
   - **What works:** it avoids SVT-AV1 entirely. With quality set through `flags=+qscale` and `global_quality`, it matched AV1 at CRF 30 (VMAF 86.1 against 86.4 front, 82.9 against 82.7 wrist), at about 1.7× the file size, and encoding took 0.8 ms a frame against 2–3 ms.

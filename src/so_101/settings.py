@@ -229,7 +229,7 @@ class Control:
     # stays right for every task. None until `so101 pose --save-rest` saves one.
     rest_pose: dict[str, int] | None
     # The first FINGERPRINT_DIGITS hex digits of the follower calibration file's SHA-256 when the rest
-    # pose was saved, or None when it was saved before fingerprints were kept.
+    # pose was saved, or None when so101.toml has none.
     rest_pose_calibration: str | None
     rewind_s: float
     attempt_limit_s: float

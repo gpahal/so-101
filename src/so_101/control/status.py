@@ -1,7 +1,7 @@
 """The controller's status, shaped like the control page's /status, as a function of its state.
 
 The controller builds it at the end of each tick, and the web server's threads read the copy it
-kept (`Controller.status`). It is the controller's own, split out of `controller.py`: it reads the
+kept (`Controller.status`). It is the controller's own, kept in a file beside `controller.py`: it reads the
 controller's state and changes nothing.
 """
 

@@ -23,7 +23,6 @@ module and `svtsem.c` can go.
 """
 
 import ctypes
-import fnmatch
 import functools
 import hashlib
 import os
@@ -106,11 +105,6 @@ def build() -> Path:
     return target
 
 
-def _is_shim(library: str) -> bool:
-    """Whether `library` is a build of the fix, whichever source it was built from."""
-    return fnmatch.fnmatch(Path(library).name, "svtsem-*.dylib")
-
-
 def other_env() -> dict[str, str] | None:
     """The environment for a program other than this venv's Python: this one without the fix in
     DYLD_INSERT_LIBRARIES, or None (inherit it) when the fix isn't there. Pass it as `env=` to every
@@ -120,7 +114,8 @@ def other_env() -> dict[str, str] | None:
     if not inserted:
         return None
     env = dict(os.environ)
-    if rest := ":".join(entry for entry in inserted.split(":") if entry and not _is_shim(entry)):
+    shim = str(path())
+    if rest := ":".join(entry for entry in inserted.split(":") if entry and entry != shim):
         env[INSERT_ENV] = rest
     else:
         del env[INSERT_ENV]

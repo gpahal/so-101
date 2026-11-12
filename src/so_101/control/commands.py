@@ -12,7 +12,7 @@ A toggle resumes only once the arm has been stopped, and no toggle has come, for
 TOGGLE_RESUME_AFTER_S, so a double press or a held key, meant to stop the arm, can't start it again.
 The terminal's Space sends only Pause, because a terminal sees no key-up (terminal.py).
 
-The intake is the controller's own, split out of `controller.py`: it reads the controller's state
+The intake is the controller's own, kept in a file beside `controller.py`: it reads the controller's state
 and carries out commands through it.
 """
 

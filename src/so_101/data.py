@@ -364,7 +364,7 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
     """Everything a build depends on. A build is current when this equals what build.json recorded.
 
     `sources` are the run sources besides the demos (`so101 build --with`). A demos-only build
-    without labels records the same inputs as before runs existed, so builds made then stay current.
+    without labels depends on no run, so it records no runs and a new run doesn't make it stale.
     """
     inputs = {
         "prompt": task.prompt,
@@ -373,9 +373,10 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
             for session in sessions(s, task)
         },
         "edits_sha256": file_hash(edits_path(s, task)),
+        "sources": ["demos", *sources],
+        "keep_labels": keep_labels,
     }
     if sources:
-        inputs["sources"] = ["demos", *sources]
         inputs["blame_s"] = s.control.blame_s  # it moves the suspect frames, and so the cuts
         inputs["runs"] = {
             run.name: {
@@ -386,12 +387,10 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
             }
             for run in runs(s, task)
         }
-    if keep_labels:
-        inputs["keep_labels"] = True
     if sources or keep_labels:
         from so_101.control.analysis import RULES_VERSION
 
-        inputs["rules"] = RULES_VERSION  # how runs are cut and labelled: builds under older rules rebuild
+        inputs["rules"] = RULES_VERSION  # how runs are cut and labelled: a build under other rules isn't current
     return inputs
 
 

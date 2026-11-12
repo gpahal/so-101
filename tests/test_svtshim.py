@@ -114,9 +114,6 @@ class OtherProgramsTest(unittest.TestCase):
             self.assertEqual(svtshim.other_env()[svtshim.INSERT_ENV], "/opt/other.dylib")
         with mock.patch.dict(os.environ, {svtshim.INSERT_ENV: mine}):
             self.assertNotIn(svtshim.INSERT_ENV, svtshim.other_env())
-        # A build from an older source is still the fix: path() names only the current source's build.
-        with mock.patch.dict(os.environ, {svtshim.INSERT_ENV: "/elsewhere/svtsem-000000000000.dylib"}):
-            self.assertNotIn(svtshim.INSERT_ENV, svtshim.other_env())
         with mock.patch.dict(os.environ, clean_env(), clear=True):
             self.assertIsNone(svtshim.other_env())
         # /usr/bin/true is arm64e. With System Integrity Protection off (GitHub's macOS runners), it

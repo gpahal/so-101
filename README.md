@@ -176,7 +176,7 @@ Tube lights on 50 Hz mains flicker 100 times a second, which shows up as rolling
 
 Both cameras give 20 frames per second at 640x480 whatever the exposure, so `check` warns that about a third of recorded frames repeat the one before. That's harmless for ACT. Setting the task's `fps` to 20 in `tasks.toml` makes repeats rare; the loop and the cameras aren't in step, so a few remain.
 
-The scene is now a matte black mat (see [Training your own task](#training-your-own-task)), so retune both cameras before recording on it. A matte black mat reflects nothing and sets most props apart from it, but it pulls auto exposure up and darkens the wrist camera's picture. The settings last tuned on a black mat, in commit 13fc784 under older lighting, are a starting point:
+The scene is a matte black mat (see [Training your own task](#training-your-own-task)), so tune both cameras for it before recording. A matte black mat reflects nothing and sets most props apart from it, but it pulls auto exposure up and darkens the wrist camera's picture. These settings, measured on a black mat under other lighting, are a starting point:
 
 - **Front camera:** `exposure-time-abs = 100` (10 ms, one flicker cycle) with gamma 115. Auto exposure blew out 24% of the picture, the white walls behind the mat; 10 ms clipped 0.2%.
 - **Wrist camera:** `exposure-time-abs = 285` with gamma 150 and brightness 20, which lifted the mat from 50/255 to 127/255, still at 20 fps.
@@ -561,14 +561,14 @@ Plain `uv run so101 review` reviews demos and writes `edits.toml`.
 
 - **Never in a build:** paused, handover, moving to the start pose, rewinding and returning frames, which the script drove; waiting frames, where the policy sent no action and the arm held, so a policy is never trained to wait; Teleop frames with no leader pose, the tick the leader was lost; suspect frames; ignored attempts; and attempts whose video dropped frames, with a note. A cut whose episode the run's episode index doesn't list, as when a kill came between finishing its data file and writing its index row, is left out with a note too. A segment with suspect frames inside it becomes two episodes, one on each side, because an episode can't skip frames. Episodes under 0.5 s are left out and listed in the build's notes.
 - **Labels decide it.** Set an attempt's outcome or its suspect frames in the run's `labels.toml` (see above), and the next build follows them.
-- **`build.json` records the sources,** the runs it read and their `labels.toml`, `blame_s`, and the version of the rules that cut and label runs. Changing any of them, or recording another run, rebuilds; so does `train` without `--with` after a build with it. A build made with `--with` or `--keep-labels` under an older version of these rules rebuilds too.
+- **`build.json` records the sources,** the runs it read and their `labels.toml`, `blame_s`, and the version of the rules that cut and label runs. Changing any of them, or recording another run, rebuilds; so does `train` without `--with` after a build with it. A build made with `--with` or `--keep-labels` under other rules rebuilds too.
 - **Steps still follow the demos kept,** not the added episodes: corrections are a few seconds each, and `train` prints how many it adds.
 - **A run must match the demos:** the same fps, robot, joints, and cameras at the same size. Otherwise `build` stops and names the run and what differs. Set its attempts to `ignored` in its `labels.toml`, or move it out of `runs/`.
 - **`--keep-labels`** keeps the run columns for training methods that use them, and the built dataset has these besides the demo columns. Without it the dataset has only the demo columns. `train` uses a current `--keep-labels` build as it is, rather than rebuilding without the columns, and LeRobot's training ignores them.
 
   | Column | Holds |
   | --- | --- |
-  | `intervention` | true only in Teleop frames after the policy had driven in that attempt: a human stepping in on the policy. False in demos and in human attempts, where no policy ran. Worked out from `control.phase`, so older runs are labelled the same way |
+  | `intervention` | true only in Teleop frames after the policy had driven in that attempt: a human stepping in on the policy. False in demos and in human attempts, where no policy ran. Worked out from `control.phase`, whatever the recorded column holds |
   | `control.phase` | the run's own; 4 (teleop) in demo frames |
   | `control.label` | 1 where `intervention` is true, 0 elsewhere. Demos and human attempts are 0: they correct no policy. -1 marks a suspect frame, which no build includes |
   | `control.attempt_success` | true when the attempt's outcome is succeeded; true in demos |
@@ -585,7 +585,7 @@ Other ways to use runs, such as weighting corrections, a failure detector, a π0
   - Xcode's command line tools aren't installed, so there's no C compiler: run `xcode-select --install`.
   - Something between your shell and `so101` dropped `DYLD_INSERT_LIBRARIES`: with System Integrity Protection on (the default), macOS strips `DYLD_*` variables when it starts a system program such as `/bin/sh`. Run `uv run so101 ...` directly rather than through `sh -c`.
 
-How the fix works, the measurements, the alternatives that were tried and how to remove the fix once PyAV bundles SVT-AV1 4.3.0 are in [`docs/svt-av1-crash.md`](docs/svt-av1-crash.md).
+How the fix works, the measurements, the alternatives and how to remove the fix once PyAV bundles SVT-AV1 4.3.0 are in [`docs/svt-av1-crash.md`](docs/svt-av1-crash.md).
 
 ## Troubleshooting
 

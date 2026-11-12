@@ -101,8 +101,8 @@ CORRECTIONS, HUMAN_ATTEMPTS, POLICY_SUCCESSES = "corrections", "human-attempts",
 SOURCES = (CORRECTIONS, HUMAN_ATTEMPTS, POLICY_SUCCESSES)
 
 # The version of the rules that cut and label a run's frames, which build.json records. Raise it when
-# `training_cuts`, `intervention_mask` or `frame_labels` change what a build holds, so builds made
-# under the old rules aren't current.
+# `training_cuts`, `intervention_mask` or `frame_labels` change what a build holds, so a build made
+# under other rules isn't current.
 RULES_VERSION = 5
 
 Range = tuple[int, int]
@@ -240,8 +240,8 @@ class Attempt:
     def intervention_mask(self) -> np.ndarray:
         """`intervention` per frame: a Teleop frame after the policy had driven in this attempt, a
         human stepping in on the policy. A human attempt, or Teleop before the policy first drove,
-        corrects no policy, so it isn't one. Derived from the phases, not the recorded column, so
-        runs recorded before this rule are labelled the same way."""
+        corrects no policy, so it isn't one. Derived from the phases, so it follows this rule whatever the
+        recorded column says."""
         return (self.phases == Phase.TELEOP) & (np.arange(self.frames) >= self.policy_start)
 
     def frame_labels(self) -> np.ndarray:

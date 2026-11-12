@@ -222,7 +222,7 @@ class Controller:
 
         Ticks are due on fixed deadlines, so a sleep that overshoots (about 7 ms on macOS) is taken
         out of the next wait instead of slowing every tick: sleeping for the period minus the tick's
-        own time ran the loop at about 24 Hz instead of 30. A loop more than one period behind (a
+        own time would run the loop at about 24 Hz instead of 30. A loop more than one period behind (a
         slow tick, or Run checks) starts counting again from now rather than ticking in a burst."""
         period = 1 / self.fps
         due = self.clock()
