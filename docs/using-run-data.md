@@ -26,7 +26,9 @@ The suspect frames hold bad actions in exactly the states where the policy fails
 
 ACT trains with an L1 loss and π0.5 and diffusion policies with an MSE loss. A negative weight turns "move toward this action" into "move away from it", which has no bound: the loss keeps falling as the predicted action moves further away, so training diverges instead of learning "not that".
 
-0 is right for the suspect range a rewind marks, because the operator chose it. The range without a rewind is a guess, the last `blame_s` (2.5 s) of frames where the policy drove, not counting waiting frames, where it sent no action. If the actual mistake was its last 0.5 s, the first 2 s were probably fine. Sirius gives such frames a small positive weight for that reason. Here, shortening `blame_s` or fixing the range in `so101 review --runs` is cleaner. Try a small weight only if review shows the window often catching good motion.
+0 is right for the suspect range a rewind marks, because the operator chose it. The range without a rewind is a guess, the last `blame_s` (2.5 s) of frames where the policy drove, not counting waiting frames, where it sent no action. If the actual mistake was its last 0.5 s, the first 2 s were probably fine. Sirius gives the 15 robot actions before each intervention a weight of 0 too. Here, shortening `blame_s` or fixing the range in `so101 review --runs` is cleaner than a small positive weight. Try one only if review shows the window often catching good motion.
+
+[`learning-from-corrections.md`](learning-from-corrections.md) covers the bounded ways to learn from these frames (a quality tag, pairwise losses such as FlowPRO's RPRO, and sampling-time guidance), and the ways to weight corrections, in more detail.
 
 ### Ways to use them
 
@@ -50,12 +52,12 @@ Every LeRobot policy trains on a `--with` build, because no `control.*` column s
 | --- | --- | --- |
 | HG-DAgger | `build --with corrections,human-attempts` | Built |
 | Filtered BC | `--with ...,policy-successes`: the policy's successes, minus suspect frames | Built. It can also reinforce the policy's own habits |
-| Intervention weighting (IWR, Sirius) | Corrections weighted up, the frames before them weighted down toward 0. `--keep-labels` already writes `control.label` | A custom weighter of about 50 lines. LeRobot's sample-weighting hook (`lerobot/utils/sample_weighting.py`) offers only `rabc` and `uniform` |
+| Intervention weighting (IWR, Sirius) | Corrections weighted up, the frames before them at 0. `--keep-labels` already writes `control.label` | A custom weighter of about 50 lines, registered by patching LeRobot, whose sample-weighting hook (`lerobot/utils/sample_weighting.py`) offers only `rabc` and `uniform`. ACT also needs a patched `forward` that returns a loss per sample, and a job runs only the code in its image |
 | RA-BC | A progress model's score per frame; frames that move backwards get 0 | In LeRobot (`lerobot/rewards/sarm`, `robometer`, `topreward`), after training or downloading a progress model |
 | HIL-SERL | Outcomes train a success classifier, then RL on the real arm with a human intervening | In LeRobot (`lerobot/rl`), but with its own actor and learner loop, separate from `serve`. Suits one precise task |
 | RECAP (π\*0.6) | Demos, corrections, and the policy's successes and failures, each step labelled good or bad by a learned value model | Not in LeRobot. The community versions are partial |
 
-The weighting hook works with π0.5: LeRobot's π0.5 computes a loss per sample.
+The weighting hook works with π0.5: LeRobot's π0.5 computes a loss per sample. LeRobot's ACT doesn't: the hook calls `policy(batch, reduction="none")`, and `ACTPolicy.forward` takes no `reduction` and returns one scalar.
 
 ## With π0.5
 
