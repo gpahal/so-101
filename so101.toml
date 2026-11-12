@@ -24,7 +24,8 @@ fps = 60
 # Max a follower joint may move per control step, in teleop, record, run and serve, the policy's
 # goals included: degrees, or percent of its range for the gripper. Smooths sudden jumps. run and
 # serve use the same limit as recording, because a lower one changes the arm's path. Set to 0 to
-# turn the limit off.
+# turn the limit off; a negative or non-numeric value stops every command, because LeRobot would move
+# each joint by it on every goal.
 max_relative_target = 10
 
 # Cameras. Commands find each camera by its USB vendor:product id (`usb_id`), so it doesn't matter

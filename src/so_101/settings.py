@@ -102,6 +102,20 @@ class ConfigError(RuntimeError):
     pass
 
 
+def _step_cap(value, path: Path) -> float:
+    """`[teleop] max_relative_target`, refused unless it's a finite number, 0 or more. LeRobot clamps
+    each goal to within the cap of where the arm is, so a negative cap moved every joint by it on
+    every goal, holds included: an arm at rest crept 10 degrees a tick."""
+    try:
+        cap = float(value)
+    except (TypeError, ValueError):
+        cap = math.nan
+    if isinstance(value, bool) or not math.isfinite(cap) or cap < 0:
+        raise ConfigError(f"[teleop] max_relative_target in {path} is {value!r}: set it to a number of degrees, "
+                          "0 or more, such as 10 (0 turns the limit off).")
+    return cap
+
+
 class PortNotFoundError(RuntimeError):
     def __init__(self, arm: Arm) -> None:
         super().__init__(
@@ -340,7 +354,7 @@ def _parse(path: Path) -> Settings:
     return Settings(
         follower=arm("follower"),
         leader=arm("leader"),
-        teleop=Teleop(fps=teleop.get("fps", 60), max_relative_target=float(teleop.get("max_relative_target", 0))),
+        teleop=Teleop(fps=teleop.get("fps", 60), max_relative_target=_step_cap(teleop.get("max_relative_target", 0), path)),
         cameras={name: camera(name, section) for name, section in data.get("cameras", {}).items()},
         run=Run(
             duration_s=run.get("duration_s", 30),

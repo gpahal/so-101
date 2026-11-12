@@ -16,6 +16,17 @@ class TeleopTest(ConfigTest):
         cap = settings.load().teleop.max_relative_target
         self.assertEqual(ensure_safe_goal_position({"elbow_flex": (25.0, 0.0)}, cap), {"elbow_flex": 10.0})
 
+    def test_a_negative_or_unusable_max_relative_target_is_refused(self) -> None:
+        # LeRobot clamps a goal to within the cap of where the arm is: -10 moved an unchanged goal 10.
+        self.assertEqual(ensure_safe_goal_position({"elbow_flex": (20.0, 20.0)}, -10.0), {"elbow_flex": 30.0})
+        for value in ("-10", "nan", "inf", '"ten"', "true"):
+            with self.subTest(value):
+                self.config.write_text(ARMS + f"\n[teleop]\nmax_relative_target = {value}\n")
+                with self.assertRaisesRegex(settings.ConfigError, "max_relative_target"):
+                    settings.load()
+        self.config.write_text(ARMS + "\n[teleop]\nmax_relative_target = 0\n")
+        self.assertEqual(settings.load().teleop.max_relative_target, 0.0, "0 turns the limit off")
+
 
 if __name__ == "__main__":
     unittest.main()
