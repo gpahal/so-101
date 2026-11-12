@@ -74,5 +74,28 @@ class LocalTest(unittest.TestCase):
             self.assertIn("holds a model of type act, not pi05", str(stop.exception))
 
 
+class PrivateTest(unittest.TestCase):
+    def test_nothing_is_uploaded_to_a_public_repo(self) -> None:
+        from huggingface_hub.errors import RepositoryNotFoundError
+
+        api = mock.Mock()
+        api.repo_info.return_value = mock.Mock(private=False)
+        with self.assertRaises(SystemExit) as stop:
+            cli.refuse_public(api, "gpahal/act_so101_block-container", "model", "train")
+        self.assertIn("is public, so nothing was uploaded", str(stop.exception))
+
+        api.repo_info.return_value = mock.Mock(private=True)
+        cli.refuse_public(api, "gpahal/act_so101_block-container", "model", "train")
+        api.repo_info.side_effect = RepositoryNotFoundError("missing", response=mock.Mock(status_code=404))
+        cli.refuse_public(api, "gpahal/act_so101_block-container", "model", "train")  # LeRobot makes it private
+
+    def test_the_built_dataset_never_goes_to_a_public_repo(self) -> None:
+        api = mock.Mock()
+        api.repo_info.return_value = mock.Mock(private=False)
+        with mock.patch("huggingface_hub.HfApi", return_value=api), self.assertRaises(SystemExit):
+            cli.push_dataset(Path("/data/train"), "gpahal/so101_block-container")
+        api.upload_folder.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

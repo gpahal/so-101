@@ -398,21 +398,34 @@ def cmd_backup(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     print(f"They go to the private dataset {repo}, under the same sessions/ and runs/ paths. Interrupted uploads resume.")
     api = HfApi()
     api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
-    # exist_ok keeps an existing repo as it is, and someone may have made it public.
-    if not api.repo_info(repo, repo_type="dataset").private:
-        sys.exit(f"{repo} on the Hub is public, so nothing was uploaded. Make it private, or delete it, and run backup again.")
+    refuse_public(api, repo, "dataset", "backup")
     api.upload_folder(repo_id=repo, repo_type="dataset", folder_path=folder, ignore_patterns=BACKUP_IGNORE)
     print(f"Backed up. To restore: uv run hf download {repo} --repo-type dataset --local-dir {folder}")
 
 
+def refuse_public(api, repo: str, repo_type: str, command: str) -> None:
+    """Exit unless the Hub repo `repo` is private or doesn't exist yet. `create_repo(private=True,
+    exist_ok=True)` keeps an existing repo as it is, and someone may have made it public."""
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    try:
+        private = api.repo_info(repo, repo_type=repo_type).private
+    except RepositoryNotFoundError:
+        return
+    if not private:
+        sys.exit(f"{repo} on the Hub is public, so nothing was uploaded. Make it private, or delete it, and run "
+                 f"{command} again.")
+
+
 def push_dataset(root: Path, repo_id: str) -> None:
-    """Upload a built dataset, replacing whatever an earlier build left in the repo."""
+    """Upload a built dataset, replacing whatever an earlier build left in the repo, which must be private."""
     from huggingface_hub import HfApi
     from huggingface_hub.errors import RevisionNotFoundError
     from lerobot.datasets.dataset_metadata import CODEBASE_VERSION
 
     api = HfApi()
     api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
+    refuse_public(api, repo_id, "dataset", "train")
     api.upload_folder(
         repo_id=repo_id, repo_type="dataset", folder_path=root, commit_message="so101 build",
         delete_patterns=["data/**", "meta/**", "videos/**"],
@@ -591,6 +604,10 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
               f"Nothing is uploaded: the model is saved in {output}.\n"
               f"To run it: uv run so101 run {task.name} --checkpoint {output}")
     else:
+        from huggingface_hub import HfApi
+
+        # The job pushes the model to this repo as it trains; LeRobot's private=true doesn't change an existing one.
+        refuse_public(HfApi(), policy, "model", "train")
         print(f"Uploading the training dataset to the private Hub dataset {task.dataset}...")
         push_dataset(root, task.dataset)
         timeout = recipe.job_timeout(steps, target)
