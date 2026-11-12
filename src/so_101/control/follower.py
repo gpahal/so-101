@@ -17,6 +17,17 @@ In Fault, a follower that may have lost power (it stopped answering, or a motor 
 goal until it answers again, then holds where it's found (`hold_in_fault`). Any other fault, such as
 a motor alarm, holds the last goal, which keeps a grip and keeps loaded joints from sagging.
 
+A servo can keep answering after its motor power is gone: its chip runs on what's left in the
+supply's capacitors, or on the USB board's signal line, while the motor goes limp and the arm falls.
+Holding the last goal then would leave each goal a step above the falling arm, and the servo drives
+back to it when the power returns. So the loop also reads every motor's voltage on every tick, after
+the restart marks, in one more bus read like theirs (`check_power`). Two reads in a row below
+POWER_LOW of the voltage measured at start (`measure_supply`), or a voltage alarm, is a power loss
+(`PowerLost`): from then on every goal
+is the measured pose, so a servo that gets its power back holds where the arm is. Once the voltage
+reads POWER_BACK of the start or more for POWER_BACK_S, the motors' torque is turned on where the arm
+is found, and the arm holds there.
+
 Goals and holds need no camera, so they reach the arm even while a camera reports itself
 disconnected (`Arm`), through the same step cap.
 """
@@ -44,6 +55,21 @@ GRIP_LOG_PCT = 20.0  # the gripper's load, in %, above which each motor read log
 # is most likely the protocol's checksum error: a garbled packet on the bus. It's logged and counted
 # as a motor_status event, never a fault.
 PROTECTION_BITS = sum(ERROR_BITS)
+# The voltage bit: the supply is outside the servo's limits (`min_voltage_limit`, 4.0 V by default).
+# It's a power loss (`check_power`), not a protection alarm that holds the last goal.
+VOLTAGE_BIT = 1
+# A supply below this fraction of the voltage measured at start, on two reads in a row, has lost
+# power: 9 V of a 12 V supply. One low read alone, as a dip under a stalled joint's load might be,
+# changes nothing.
+POWER_LOW = 0.75
+POWER_LOW_READS = 2
+# The supply is back once it reads this fraction of the start or more for POWER_BACK_S: a switch
+# turned back on ramps up over a few hundred milliseconds.
+POWER_BACK = 0.9
+POWER_BACK_S = 0.5
+SUPPLY_DROPPED = ("The follower's power dropped: {listed} V, where it read {reference:.1f} V at start. Its motors "
+                  "went limp, so the arm holds where it's measured, never where it was told to go, and holds "
+                  "there once the power is back. Check the arm's power switch, supply and cables.")
 TORQUE_LIMIT_CHANGED = ("The follower's torque_limit changed without a restart: {listed}, where serve set it one below "
                         "max_torque_limit. Something else changed it, such as the servo's own overload protection; it's left "
                         "as found. The arm holds its last goal: look for a joint straining against something, then "
@@ -76,6 +102,14 @@ class FollowerLost(Failure):
 
     def __init__(self, message: str, detail: str | None = None) -> None:
         super().__init__(message, "follower", detail)
+
+
+class PowerLost(Failure):
+    """The follower answers, but its supply dropped (`check_power`): its motors are limp. Every goal is
+    the measured pose until the power is back."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "follower")
 
 
 class Arm:
@@ -163,6 +197,11 @@ class Follower:
         self.unnamed_warning: str | None = None  # says how many, and the last, once there is one
         self.motors_read_at: float | None = None
         self.unblamed: str | None = None  # the last error of a hold that no device explains, logged once
+        self.reference: float | None = None  # the supply's voltage at start, the median of the motors' reads
+        self.low_reads = 0  # supply reads in a row below POWER_LOW of `reference`
+        self.unpowered: str | None = None  # SUPPLY_DROPPED, from a power loss until the power is back
+        self.back_since: float | None = None  # when the supply first read POWER_BACK again, while unpowered
+        self.volts: dict[str, float] = {}  # each motor's supply voltage, as last read
 
     @property
     def present(self) -> dict[str, float]:
@@ -178,7 +217,8 @@ class Follower:
         """Read the arm, its motors' restart marks and the cameras, and every `MOTORS_READ_S` the
         motors' temperatures and alarms. Raises FollowerLost when a motor restarted. With
         `attempt_open` every camera is required, and one that reports itself disconnected is a
-        Failure naming it; otherwise a camera's error goes in `read_errors`."""
+        Failure naming it; otherwise a camera's error goes in `read_errors`. Raises PowerLost when
+        the supply drops (`check_power`)."""
         if attempt_open:
             for name, camera in self.cameras().items():
                 if not camera.is_connected:
@@ -189,6 +229,7 @@ class Follower:
             observation = self._read_follower()
         self.arm.present = {key: float(observation[key]) for key in self.keys}
         self.check_marks()  # every tick, before any goal: a restarted motor's first goal re-arms it
+        self.check_power()  # and a motor without power must not be left a goal away from the arm
         now = self.clock()
         if self.previews is not None and self.previews.due(now):
             self.previews.put({key: observation[key] for key in self.inner.cameras if key in observation}, now)
@@ -258,7 +299,8 @@ class Follower:
             self.unnamed_warning = (f"Motor replies carried an alarm bit Feetech doesn't name {self.unnamed} "
                                     f"time{'s' if self.unnamed != 1 else ''} this run, last {listed}: most likely "
                                     "garbled messages on the bus. Not a protection: the arm carries on.")
-        statuses = {name: status & PROTECTION_BITS for name, status in statuses.items()}
+        # The voltage bit is `check_power`'s, which reads it on every tick.
+        statuses = {name: status & PROTECTION_BITS & ~VOLTAGE_BIT for name, status in statuses.items()}
         alarms = {name: Reply(0, status).errors() for name, status in statuses.items() if status}
         if alarms:
             listed = ", ".join(f"{name} ({', '.join(errors)})" for name, errors in alarms.items())
@@ -327,6 +369,68 @@ class Follower:
             listed = ", ".join(f"{name} reads {value}" for name, value in new.items())
             raise TorqueLimitChanged(TORQUE_LIMIT_CHANGED.format(listed=listed))
 
+    # --- Power -----------------------------------------------------------------------------------
+
+    def _read_supply(self) -> tuple[dict[str, float], dict[str, int]]:
+        """Each motor's supply voltage, in volts, and the alarm bits of its reply."""
+        bus = self.inner.bus._connected_bus
+        names = list(self.inner.bus.motors)
+        try:
+            replies = bus.sync_read_register_with_error(
+                [self.inner.bus.motors[name].id for name in names], "present_voltage", retries=2
+            )
+        except Exception as error:
+            raise FollowerLost(f"Reading the motors' voltage failed: {error}") from error
+        return ({name: value / 10 for name, (value, _) in zip(names, replies, strict=True)},
+                {name: status for name, (_, status) in zip(names, replies, strict=True)})
+
+    def measure_supply(self) -> None:
+        """Keep the supply's voltage at start, which `check_power` compares each read with."""
+        volts, _ = self._read_supply()
+        values = sorted(volts.values())
+        self.reference = values[len(values) // 2]
+
+    def check_power(self) -> None:
+        """Read every motor's supply voltage. Raise PowerLost on the second read in a row below
+        POWER_LOW of the start, or on a reply with the voltage bit, unless the power is already lost.
+        While it is, note when the supply reads POWER_BACK of the start again: `power_back` says
+        when it has for POWER_BACK_S."""
+        if self.reference is None:
+            return
+        volts, statuses = self._read_supply()
+        self.volts = volts
+        alarm = any(status & VOLTAGE_BIT for status in statuses.values())
+        self.low_reads = self.low_reads + 1 if min(volts.values()) < POWER_LOW * self.reference else 0
+        if alarm or self.low_reads >= POWER_LOW_READS:
+            self.back_since = None
+            if self.unpowered is None:
+                listed = ", ".join(f"{name} {v:.1f}" for name, v in volts.items())
+                self.unpowered = SUPPLY_DROPPED.format(listed=listed, reference=self.reference)
+                self.log("power", change="lost", volts=volts, reference=self.reference, alarm=alarm,
+                         pose=dict(self.present))
+                raise PowerLost(self.unpowered)
+        elif self.unpowered is not None:
+            if min(volts.values()) < POWER_BACK * self.reference:
+                self.back_since = None
+            elif self.back_since is None:
+                self.back_since = self.clock()
+
+    @property
+    def power_back(self) -> bool:
+        """The power was lost, and the supply has read POWER_BACK of the start for POWER_BACK_S."""
+        return (self.unpowered is not None and self.back_since is not None
+                and self.clock() - self.back_since >= POWER_BACK_S)
+
+    def _track(self) -> None:
+        """While the power is lost, aim every motor at where the arm is measured, so a servo whose
+        power comes back holds there. Once it's back, turn the torque on there explicitly."""
+        self.arm.send_action(dict(self.present))
+        if self.power_back:
+            self.inner.bus.enable_torque(num_retry=2)
+            self.log("power", change="back", volts=self.volts, reference=self.reference, pose=dict(self.present))
+            self.unpowered = self.back_since = None
+            self.low_reads = 0
+
     # --- Faults ----------------------------------------------------------------------------------
 
     def fault(self, error: BaseException, policy, hold: bool = True) -> tuple[str | None, str]:
@@ -335,7 +439,7 @@ class Follower:
         if any, and the message describing the error, kept in `read_errors` too. When the hold finds
         a restart or a changed torque_limit, the message says so as well."""
         device = self.blame(error)
-        self.lost = self.lost or self.is_lost(error)
+        self._lose(error)
         found = None
         if hold and not self.lost:
             try:
@@ -360,7 +464,9 @@ class Follower:
         After the follower was lost, it's read and marked again first, then its goal is set to its measured
         pose, and only then is its torque turned on: explicitly, rather than trusting the goal write
         to turn it on. A fault always closes the attempt, so no camera is required here: one that
-        fails is only noted in `read_errors`, as in `observe` with no attempt open. Nothing is raised
+        fails is only noted in `read_errors`, as in `observe` with no attempt open. While the power is
+        lost (`unpowered`), the arm is tracked rather than held: every goal is its measured pose, and
+        the torque is turned on there once the power is back (`_track`). Nothing is raised
         but a torque_limit found changed, once the arm has held, so the loop reports it as a fault of
         its own."""
         if self.lost:
@@ -370,6 +476,7 @@ class Follower:
                 self.arm.send_action(dict(self.present))  # where the arm is now, never the old goal
                 self.inner.bus.enable_torque(num_retry=2)
                 self.lost = False
+                self.log("follower_back", pose=dict(self.present))
             except Exception as error:  # the next tick tries again
                 self._note(error)
             return
@@ -379,6 +486,8 @@ class Follower:
                 self.observe(attempt_open=False)
             except TorqueLimitChanged:
                 raise
+            except PowerLost:  # `unpowered` is set: the arm is tracked below
+                pass
             except Exception as error:
                 self._note(error)
                 if not self.lost:  # `observe` may have stopped before it read the marks
@@ -389,7 +498,10 @@ class Follower:
             self._note(error)
         if not self.lost:
             try:
-                policy.hold(self.arm)
+                if self.unpowered is not None:
+                    self._track()  # never the old goal: the motors are limp
+                else:
+                    policy.hold(self.arm)
             except Exception as error:  # the next tick tries again
                 self._note(error)
         if changed is not None:
@@ -398,12 +510,18 @@ class Follower:
     def _note(self, error: BaseException) -> None:
         """Keep what a failed read or hold found: whether the follower may have lost power, and why
         its device failed. An error no device explains is logged, once until a different one comes."""
-        self.lost = self.lost or self.is_lost(error)
+        self._lose(error)
         if device := self.blame(error):
             self.read_errors[device] = self.describe(error, device)
         elif (text := self.describe(error, None)) != self.unblamed:
             self.unblamed = text
             logging.getLogger(__name__).error("Holding the arm in Fault hit an error: %s", text, exc_info=error)
+
+    def _lose(self, error: BaseException) -> None:
+        """Mark the follower lost if `error` means it may have lost power, logging the change."""
+        if not self.lost and self.is_lost(error):
+            self.lost = True
+            self.log("follower_lost", error=self.describe(error, "follower"))
 
     def is_lost(self, error: BaseException) -> bool:
         """Whether `error` means the follower may have lost power: it stopped answering, or a motor

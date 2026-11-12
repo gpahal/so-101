@@ -905,6 +905,69 @@ class LoopSafetyTest(RigTest):
 
         self.assertEqual(rig.goals()[sent:], [fell] * 3, "it holds where it fell, never the old goal")
 
+    def test_a_power_cut_the_servos_answer_through_never_pulls_the_arm_back(self) -> None:
+        # The servos' chips keep answering at 4 V while their motors are limp and the arm falls. When
+        # the power returns, each servo drives to the goal it last got: that must be where the arm fell.
+        def paused(rig: Rig) -> None:
+            rig.start_policy()
+            rig.command("pause")
+
+        def in_alarm_fault(rig: Rig) -> None:
+            rig.start_policy()
+            rig.motors.status["elbow_flex"] = 4  # overheat: a fault that holds the last goal
+            rig.tick(FPS + 1)
+            self.assertEqual(rig.status()["state"], "fault")
+
+        for name, setup in (("autonomous", Rig.start_policy), ("paused", paused), ("alarm", in_alarm_fault)):
+            with self.subTest(name):
+                rig = self.new_rig(f"power-{name}", recorded=True)
+                setup(rig)
+                held = rig.motors.present()
+                rig.motors.cut_motor_power()
+                fell = {motor: steps - 300 for motor, steps in held.items()}
+                rig.motors.move_by_hand(fell)
+                rig.tick(2)
+                status = rig.status()
+                self.assertEqual(status["state"], "fault")
+                if name != "alarm":
+                    self.assertIn("power dropped", status["fault"])
+                self.assertIn("power dropped", status["device_problems"]["follower"])
+                self.assertEqual([e["change"] for e in rig.events("power")], ["lost"])
+                self.assertFalse(rig.command("reset").accepted, "no Reset while the motors have no power")
+
+                sent = len(rig.goals())
+                rig.tick(FPS)
+                for goal in rig.goals()[sent:]:
+                    for motor, steps in fell.items():
+                        self.assertAlmostEqual(goal[motor], steps, delta=2, msg=f"{motor}: aimed where the arm is")
+
+                rig.motors.restore_motor_power()
+                rig.tick(FPS)
+                for motor, steps in fell.items():
+                    self.assertAlmostEqual(rig.motors.present()[motor], steps, delta=2,
+                                           msg=f"{motor} stays where it fell when the power returns")
+                self.assertEqual([e["change"] for e in rig.events("power")], ["lost", "back"])
+                self.assertTrue(rig.motors.torqued(), "its torque is on again, where the arm is")
+                if name != "alarm":
+                    self.assertTrue(rig.command("reset").accepted)
+                    rig.tick_until("resting")
+
+    def test_one_low_voltage_read_changes_nothing_and_a_voltage_alarm_is_a_power_loss(self) -> None:
+        rig = self.new_rig("dip", recorded=True)
+        rig.start_policy()
+        rig.motors.cut_motor_power(volts=8.0)  # one read under 9 V of a 12 V supply, as a dip might be
+        rig.tick()
+        rig.motors.restore_motor_power()
+        rig.tick(FPS)
+        self.assertEqual(rig.status()["state"], "autonomous")
+        self.assertEqual(rig.events("power"), [])
+
+        rig.motors.status["wrist_roll"] = 1  # the servo's own voltage alarm
+        rig.tick()
+        self.assertEqual(rig.status()["state"], "fault")
+        self.assertIn("power dropped", rig.status()["fault"])
+        self.assertTrue(rig.events("power")[0]["alarm"])
+
 
 class QuitTest(RigTest):
     """Where the arm can't get to rest, only y at the terminal, within 30 s of the warning, exits: no

@@ -93,7 +93,11 @@ class FakeMotors:
     The motors behave like the STS3215 around power: `power_off` turns their torque off and makes
     them silent, and writes to them go nowhere; `power_on` brings them back with torque off and
     their RAM at its power-on values. Writing a goal to a powered motor turns its torque on, so a
-    restarted motor drives to the first goal it gets.
+    restarted motor drives to the first goal it gets. `cut_motor_power` is the other way a power cut
+    can go: the servos' chips keep running and answering, at a low voltage, but their motors are
+    limp, so the arm stays where it's put (`move_by_hand`, as it falls). Their RAM, goal and torque
+    included, is kept, so when `restore_motor_power` brings the motors back, each drives to the goal
+    it last got.
     """
 
     def __init__(self, clock: FakeClock, calibration: dict[str, dict], positions: dict[str, int]):
@@ -115,6 +119,7 @@ class FakeMotors:
                 "max_torque_limit": 1000,  # EEPROM: what torque_limit becomes at power-on
                 "torque_limit": 1000,
                 "present_load": 0,  # magnitude in 0.1% units, direction in bit 10
+                "present_voltage": 120,  # 0.1 V units: a 12 V supply
             }
         self.goals: list[dict[str, int]] = []
         self.torque: list[tuple[bool, dict[str, int]]] = []
@@ -126,13 +131,14 @@ class FakeMotors:
         # a garbled packet: its torque stays on and a hand can't move it.
         self.ignore_torque_off: dict[str, int] = {}
         self.powered = True
+        self.motor_power = True  # the motors can move: off while `cut_motor_power` holds
         self.open = True
         self._last = clock()
 
     def _settle(self) -> None:
         elapsed, self._last = self.clock() - self._last, self.clock()
         for i, r in self.registers.items():
-            if r["torque_enable"]:
+            if r["torque_enable"] and self.motor_power:
                 gap = r["goal_position"] - r["present_position"]
                 move = max(-self.speed * elapsed, min(self.speed * elapsed, gap))
                 r["present_position"] = round(r["present_position"] + move)
@@ -167,6 +173,21 @@ class FakeMotors:
             r["torque_enable"] = 0
             r["torque_limit"] = r["max_torque_limit"]
         self.move_by_hand(positions)
+
+    def cut_motor_power(self, volts: float = 4.0) -> None:
+        """The supply drops but the servos' chips keep answering, reading `volts`: the motors go limp,
+        keeping their goal and torque setting."""
+        self._settle()
+        self.motor_power = False
+        for r in self.registers.values():
+            r["present_voltage"] = round(volts * 10)
+
+    def restore_motor_power(self, volts: float = 12.0) -> None:
+        """The supply is back: each motor with its torque on drives to the goal it last got."""
+        self._settle()
+        self.motor_power = True
+        for r in self.registers.values():
+            r["present_voltage"] = round(volts * 10)
 
     def power_cycle(self, positions: dict[str, int]) -> None:
         """The motors lose power and get it back, as in a brownout: see `power_on`."""

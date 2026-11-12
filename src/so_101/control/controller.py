@@ -186,6 +186,7 @@ class Controller:
         self._follower = Follower(robot, rollout.positions(robot, rest_pose), clock, self._say,
                                   self.previews, log=self.recorder.event)
         self._follower.mark()
+        self._follower.measure_supply()
         # The status as of the last tick, and the page in control then: replaced whole, in one
         # assignment, so another thread never reads one without the other.
         self._status: tuple[dict, str | None] = (self._build_status(), None)
@@ -515,7 +516,7 @@ class Controller:
         """Each required device: None when it is ok, or why it is missing and the fix."""
         read_errors = self._follower.read_errors
         problems = {device: self._presence.get(device) or read_errors.get(device) for device in self.required}
-        problems["follower"] = problems["follower"] or self._follower.alarm
+        problems["follower"] = problems["follower"] or self._follower.unpowered or self._follower.alarm
         return problems
 
     def _leader_reason(self) -> str | None:
