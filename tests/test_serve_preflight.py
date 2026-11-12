@@ -86,7 +86,7 @@ class ServePreflightTest(ConfigTest):
                                      policy_config=lambda revision, policy: {"chunk_size": 10, "input_features": {}},
                                      policy_for=lambda policy: "x/y",
                                      download_policy=download_policy)
-        ns = argparse.Namespace(task="test", policy="act", remote=False, revision=None, action_steps=None,
+        ns = argparse.Namespace(task="test", policy="act", remote=False, revision=None, checkpoint=None, action_steps=None,
                                 operator=None)
         out = io.StringIO()
         with mock.patch.object(serve, "policy_task", return_value=task), \

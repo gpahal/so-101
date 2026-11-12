@@ -151,7 +151,9 @@ def require_serve_env() -> None:
 
 
 def policy_name(info: dict) -> str:
-    """How the status names the policy, such as `pi05@main (cloud GPU)`."""
+    """How the status names the policy, such as `pi05@main (cloud GPU)`, or `act (local checkpoint)`."""
+    if info.get("checkpoint"):
+        return f"{info['type']} (local checkpoint)"
     name = f"{info['type']}@{info['revision']}"
     return f"{name} (cloud GPU)" if info["inference"] == "remote" else name
 

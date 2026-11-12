@@ -108,7 +108,8 @@ def run_manifest(
     image_sizes: dict[str, tuple[int, int]],
 ) -> dict:
     """Everything a `so101 serve` run ran with: a session's record, plus how the arm was driven and
-    `policy`: its type, repo, revision, commit, action steps, and whether it ran here or remotely. For a
+    `policy`: its type, repo, revision, commit, action steps, and whether it ran here or remotely; for a
+    model `train --target local` saved, `checkpoint` is its folder, and repo and revision are None. For a
     remote run, `so101-control` adds the checkpoint the server admitted it to (`artifact_identity`)."""
     manifest = session_manifest(s, task, cameras, report, note="")
     # run.json is never changed after the start, so it holds no finish time or attempt count: the

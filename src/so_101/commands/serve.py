@@ -27,8 +27,9 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     # pose. Only what's particular to this run goes to it, in run.json's contents (RUN_ENV).
     policy = {
         "type": ns.policy,
-        "repo": task.policy_for(ns.policy),
-        "revision": ns.revision or "main",
+        "repo": None if ns.checkpoint else task.policy_for(ns.policy),
+        "revision": None if ns.checkpoint else ns.revision or "main",
+        "checkpoint": str(setup.checkpoint) if ns.checkpoint else None,  # a model saved on this Mac
         "action_steps": setup.action_steps,
         "inference": "remote" if server else "local",
         "job": server.id if server else None,

@@ -209,7 +209,7 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - Checkpoints go to the model repo as they're saved. To continue a stopped run: `uv run lerobot-train --config_path=<you>/<policy>_so101_<task> --resume=true --job.target=<flavor>`.
    - Logs stream to the terminal. Ctrl+C stops watching but the job keeps running (`uv run hf jobs ps`, `uv run hf jobs logs <id>`).
    - The trained policy lands in the private repo `<you>/<policy>_so101_<task>`.
-   - `--target local` trains ACT on this Mac instead, which takes days at these settings.
+   - `--target local` trains ACT on this Mac instead, which takes days at these settings. Nothing is uploaded: the model is saved under `outputs/train/<policy>_so101_<task>_<time>/`, which `train` prints, and `run` and `serve` take that folder with `--checkpoint <folder>` in place of the Hub repo. It runs the last checkpoint saved there.
 6. **Run:** `uv run so101 run --display`, from the same rest pose with the block somewhere you recorded.
    - It downloads the checkpoint to `outputs/policies/`, captures each camera at the resolution it was trained on, and runs it on the Mac's GPU (`[run] device`). The policy reads both camera images and the six joint positions 30 times a second, and outputs six target joint positions. Keep a hand near the follower's power switch; Ctrl+C stops the run.
    - Every run records to its own folder, `outputs/rollouts/<policy>_<task>_<time>/`: the video and joint data in `dataset/`, and the terminal output in `run.log`. It prints where at the start and at the end, including after Ctrl+C.

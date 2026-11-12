@@ -1,6 +1,7 @@
 """The checks and LeRobot arguments `so101 run` and `so101 serve` share."""
 
 import argparse
+import json
 import sys
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -53,8 +54,11 @@ class PolicySetup:
 
 
 def policy_task(ns: argparse.Namespace) -> tasks.Task:
-    """The task `run` or `serve` drives. pi0.5 only runs on the cloud GPU, so it needs --remote."""
+    """The task `run` or `serve` drives. pi0.5 only runs on the cloud GPU, so it needs --remote. A local
+    --checkpoint runs on this Mac, from no Hub revision."""
     task = get_task(ns.task)
+    if ns.checkpoint and (ns.remote or ns.revision):
+        sys.exit("--checkpoint runs a model saved on this Mac, so it takes neither --remote nor --revision.")
     if ns.policy == "pi05" and not ns.remote:
         sys.exit(f"pi0.5 runs on a cloud GPU. Add --remote, after: uv run so101 server start {task.name} --policy pi05")
     return task
@@ -67,15 +71,16 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
     stop`, so it's never done here. With `serving`, for `serve`, the leader is checked too when it's
     plugged in, and its failures are only warnings, since only Teleop needs it, and the checks also
     fail on a bad rest pose or `[control]` setting."""
-    config = task.policy_config(ns.revision, ns.policy)
+    local = local_checkpoint(ns.checkpoint, ns.policy) if ns.checkpoint else None
+    config = json.loads((local / "config.json").read_text()) if local else task.policy_config(ns.revision, ns.policy)
     action_steps = resolve_action_steps(ns.action_steps, config)
     server = remote.require_server(task.name, ns.policy, ns.revision or "main", action_steps) if ns.remote else None
 
     # Capture each camera at the size the checkpoint was trained on.
     sizes = tasks.image_sizes(config)
     if set(sizes) != set(task.cameras):
-        repo = task.policy_for(ns.policy)
-        sys.exit(f"{repo} expects cameras {sorted(sizes)}, but the task records {sorted(task.cameras)}.")
+        model = local or task.policy_for(ns.policy)
+        sys.exit(f"{model} expects cameras {sorted(sizes)}, but the task records {sorted(task.cameras)}.")
     arms: tuple[settings.ArmName, ...] = ("follower",)
     if serving:
         try:
@@ -88,7 +93,7 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
                               control="FAIL" if serving else None, teleop_only=("leader",) if serving else (),
                               video=True)
     specs = [cam.lerobot_spec(width=sizes[cam.name][0], height=sizes[cam.name][1]) for cam in found]
-    checkpoint = None if server else task.download_policy(ns.revision)
+    checkpoint = None if server else local or task.download_policy(ns.revision)
     args = [
         f"--strategy.type={'base' if serving else 'episodic'}",
         # A remote server sets the action steps itself, and its client rejects --policy flags.
@@ -103,6 +108,22 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
         *([] if server else [f"--device={s.run.device}"]),
     ]
     return PolicySetup(task, action_steps, server, sizes, arms, found, report, checkpoint, args)
+
+
+def local_checkpoint(text: str, policy: str) -> Path:
+    """The model folder (`pretrained_model`, with config.json) under `text`: the folder `train
+    --target local` printed, which holds the last checkpoint, or a model folder itself."""
+    path = Path(text).expanduser()
+    for model in (path / "checkpoints" / "last" / "pretrained_model", path):
+        if (model / "config.json").is_file():
+            break
+    else:
+        sys.exit(f"--checkpoint {text}: no model there. Pass the folder `train --target local` printed, once it "
+                 "has saved a checkpoint, or a pretrained_model folder.")
+    found = json.loads((model / "config.json").read_text()).get("type")
+    if found != policy:
+        sys.exit(f"--checkpoint {text} holds a model of type {found}, not {policy}: pass --policy {found}.")
+    return model.resolve()
 
 
 def resolve_action_steps(requested: int | None, config: dict) -> int:

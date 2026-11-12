@@ -585,8 +585,11 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     elif start := default_base(ns.policy):
         also += f", starting from {start}"
     if target == "local":
-        args += [f"--dataset.repo_id=local/so101_{task.name}", f"--dataset.root={root}", f"--policy.device={s.run.device}"]
-        print(f"Training {ns.policy} on {kept} demos{also} for {steps:,} steps on this computer ({s.run.device}).")
+        local, output = local_train_args(s, task, ns.policy, root)
+        args += local
+        print(f"Training {ns.policy} on {kept} demos{also} for {steps:,} steps on this computer ({s.run.device}). "
+              f"Nothing is uploaded: the model is saved in {output}.\n"
+              f"To run it: uv run so101 run {task.name} --checkpoint {output}")
     else:
         print(f"Uploading the training dataset to the private Hub dataset {task.dataset}...")
         push_dataset(root, task.dataset)
@@ -602,6 +605,14 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         )
         print("Ctrl+C stops watching but leaves the job running; `uv run hf jobs ps` lists jobs.\n")
     lerobot("lerobot-train", [*args, *extra])
+
+
+def local_train_args(s: settings.Settings, task, policy: str, root: Path) -> tuple[list[str], Path]:
+    """lerobot-train's arguments for training on this Mac, and the folder the model is saved in. Nothing
+    is uploaded: LeRobot pushes the model to --policy.repo_id when training ends unless told not to."""
+    output = s.outputs_dir / "train" / f"{policy}_so101_{task.name}_{time.strftime('%Y%m%d-%H%M%S')}"
+    return [f"--dataset.repo_id=local/so101_{task.name}", f"--dataset.root={root}", f"--policy.device={s.run.device}",
+            "--policy.push_to_hub=false", f"--output_dir={output}"], output
 
 
 def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
@@ -697,6 +708,8 @@ def add_policy_flags(p: argparse.ArgumentParser, verb: str, remote_flag: bool) -
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help=f"which model to {verb} (default: act)")
     if remote_flag:
         p.add_argument("--remote", action="store_true", help="run the model on the cloud GPU `so101 server start` started")
+        p.add_argument("--checkpoint", metavar="DIR",
+                       help="a model `train --target local` saved on this Mac: the folder it printed (default: the Hub repo)")
 
 
 def main() -> None:

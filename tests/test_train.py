@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from so_101 import cli
+from so_101.commands.policy import local_checkpoint
 from so_101.settings import ConfigError
 
 
@@ -43,6 +44,34 @@ class BaseTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as stop:
                     cli.check_base("gpahal/act_so101_block-container", None, "pi05")
         self.assertIn("is a model of type act, not pi05", str(stop.exception))
+
+
+class LocalTest(unittest.TestCase):
+    def test_training_on_this_mac_uploads_nothing_and_saves_where_it_says(self) -> None:
+        settings = mock.Mock(outputs_dir=Path("/outputs"), run=mock.Mock(device="mps"))
+        task = mock.Mock()
+        task.name = "block-container"
+        args, output = cli.local_train_args(settings, task, "act", Path("/data/train"))
+        self.assertIn("--policy.push_to_hub=false", args, "LeRobot pushes the model by default")
+        self.assertIn(f"--output_dir={output}", args)
+        self.assertEqual(output.parent, Path("/outputs/train"))
+        self.assertTrue(output.name.startswith("act_so101_block-container_"))
+
+    def test_a_local_checkpoint_is_the_last_model_under_the_folder_train_printed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "act_so101_block-container_20261113-120000"
+            with self.assertRaises(SystemExit) as stop:
+                local_checkpoint(str(output), "act")
+            self.assertIn("no model there", str(stop.exception))
+
+            model = output / "checkpoints" / "last" / "pretrained_model"
+            model.mkdir(parents=True)
+            (model / "config.json").write_text(json.dumps({"type": "act"}))
+            self.assertEqual(local_checkpoint(str(output), "act"), model.resolve())
+            self.assertEqual(local_checkpoint(str(model), "act"), model.resolve())
+            with self.assertRaises(SystemExit) as stop:
+                local_checkpoint(str(output), "pi05")
+            self.assertIn("holds a model of type act, not pi05", str(stop.exception))
 
 
 if __name__ == "__main__":
