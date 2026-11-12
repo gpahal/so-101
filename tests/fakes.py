@@ -48,6 +48,17 @@ logging.getLogger("lerobot.robots.utils").setLevel(logging.ERROR)
 #   load and that it decodes with PyAV instead.
 logging.getLogger("lerobot.utils.import_utils").setLevel(logging.ERROR)
 
+# The recorder's streaming encoder queues 30 frames per camera and drops a frame when the queue stays
+# full for 0.1 s. The real loop feeds one frame every 33 ms, so that takes a stall of over a second.
+# The tests tick as fast as the CPU allows, so on a busy CI runner a 0.1 s stall of an encoder thread
+# dropped a frame, and the build then rightly left that attempt out. An unbounded queue (size 0)
+# never drops. The test of dropped frames sets the encoder's count itself.
+from lerobot.datasets import video_utils
+
+_encoder_init = video_utils.StreamingVideoEncoder.__init__
+video_utils.StreamingVideoEncoder.__init__ = lambda self, *args, **kwargs: _encoder_init(
+    self, *args, **{**kwargs, "queue_maxsize": 0})
+
 STEPS_PER_TURN = 4096
 MOTORS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 STS3215_MODEL = 777

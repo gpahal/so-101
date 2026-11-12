@@ -7,7 +7,7 @@
 ## Commands
 
 - `uv run python -m unittest discover -s tests` runs the tests without hardware, and CI runs them on every pull request.
-  - `tests/fakes.py` runs LeRobot's real follower and motor code over `FakeMotors` (rustypot 1.13 has no in-memory bus), with fake cameras and a scripted policy. Its `NoRecorder` stands in for the recorder in the controller tests that read no run from disk. It also turns down noisy logging and warnings; its comments say which, and how to see them while debugging.
+  - `tests/fakes.py` runs LeRobot's real follower and motor code over `FakeMotors` (rustypot 1.13 has no in-memory bus), with fake cameras and a scripted policy. Its `NoRecorder` stands in for the recorder in the controller tests that read no run from disk. It also turns down noisy logging and warnings; its comments say which, and how to see them while debugging. It makes the video encoder's frame queue unbounded, because the tests tick faster than real time and a full queue drops frames.
   - Control center tests submit a command, advance a tick and read the status. Assert on motor goals, the status and command results, never on private fields.
   - A LeRobot upgrade must pass them, because the controller uses LeRobot internals.
 - There is no linter or formatter. Without hardware, verify a change with the tests, `uv run python -m compileall -q src tests`, `--help` on each changed command, and `uv run python -c "from so_101 import settings; print(settings.load())"` for config changes.
