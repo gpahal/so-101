@@ -445,6 +445,37 @@ class ControllerTest(RigTest):
         for motor, steps in stopped.items():
             self.assertAlmostEqual(rig.leader_motors.present()[motor], steps, delta=25, msg=f"leader {motor}")
 
+    def test_a_quit_exits_only_once_the_leader_is_at_rest_too(self) -> None:
+        # Exiting turns the leader's motors off: one still on its way to rest would fall from there.
+        for how in ("quit", "esc_at_rest"):
+            with self.subTest(how):
+                rig = self.new_rig(f"leader-quit-{how}", recorded=True)
+                rig.start_policy()
+                rig.command("pause")
+                rig.teleop(0.5)
+                present = rig.leader_motors.present()
+                rig.leader_motors.move_by_hand({**present, "shoulder_lift": present["shoulder_lift"] + 400,
+                                                "wrist_flex": present["wrist_flex"] - 300})
+                rig.tick()
+                if how == "quit":
+                    rig.command("quit")
+                else:
+                    rig.command("reset", outcome="succeeded")
+                    rig.tick_until("resting")
+                    self.assertTrue(rig.leader_motors.torqued(), "the leader is still on its way")
+                    rig.command("quit")
+                for _ in range(20 * FPS):
+                    if rig.controller.done:
+                        break
+                    self.assertFalse(rig.controller.done)
+                    rig.tick()
+                self.assertTrue(rig.controller.done)
+                rig.controller.close()
+                for motor, steps in REST_STEPS.items():
+                    self.assertAlmostEqual(rig.leader_motors.present()[motor], steps, delta=25,
+                                           msg=f"leader {motor} reached rest before its motors turned off")
+                self.assertFalse(rig.leader_motors.torqued())
+
     def test_a_leader_motor_left_on_in_teleop_is_logged_and_turned_off(self) -> None:
         rig = self.new_rig("stuck", recorded=True)
         rig.start_policy()

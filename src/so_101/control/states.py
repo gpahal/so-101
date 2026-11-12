@@ -10,7 +10,9 @@ Fault is where a hardware, camera, motor-alarm or policy failure leaves the arm:
 is, the attempt is saved there, and only Reset and Run checks are allowed.
 
 Quitting never drops the arm mid-air. Quit ends the attempt and drives the arm to rest, then exits
-with the motors off; further Quits on the way are refused. At rest, Quit exits at once. Where the
+with the motors off; further Quits on the way are refused. At rest, Quit exits at once. Either way it
+waits for the leader's own move to rest, if one is running (LEADER_RESTED), since exiting turns its
+motors off and a leader dropped part of the way falls. Where the
 arm can't get to rest (in Fault, short of rest, or when that drive stops short) Quit never exits: it
 asks for confirmation, and only EXIT_HERE (y at the robot's terminal), sent while that confirmation
 is pending, exits where the arm is. The controller says whether one is pending: it lapses
@@ -69,6 +71,7 @@ class Event(StrEnum):
     TIME_LIMIT = "time_limit"  # the attempt has used its policy or its Teleop seconds
     LEADER_LOST = "leader_lost"  # the leader was unplugged or stopped answering
     LINK_LOST = "link_lost"  # the controlling page stopped polling or was hidden, with on_link_loss = "pause"
+    LEADER_RESTED = "leader_rested"  # the leader's move to rest ended: it arrived, stopped short or was lost
     FAULT = "fault"  # a hardware, camera, motor-alarm or policy failure
 
 
@@ -86,7 +89,7 @@ class Action(StrEnum):
     END_ATTEMPT = "end_attempt"  # the one way an attempt ends; see Transition.ended_by
     MOVE_TO_REST = "move_to_rest"  # Reset with no attempt open, after a fault or away from rest: the arm goes to rest
     CANCEL_END = "cancel_end"  # a pause during Returning: the attempt stays open, and so does the process
-    QUIT_AT_REST = "quit_at_rest"  # exit once the arm arrives at rest
+    QUIT_AT_REST = "quit_at_rest"  # exit once the arm, and the leader if it's moving there, arrive at rest
     # The arm can't get to rest: hold it, and ask for EXIT_HERE, pending for CONFIRM_S from now.
     CONFIRM_QUIT = "confirm_quit"
     CLOSE_ATTEMPT = "close_attempt"  # the arm arrived at rest, or a quit's drive stopped short: save the attempt
@@ -111,6 +114,7 @@ class Facts:
     confirm_pending: bool
     source: str | None  # where the command came from: terminal, page or signal
     at_rest: bool  # every joint is within rollout.TOLERANCE of the rest pose
+    leader_to_rest: bool  # the leader is on its way to rest, motors on: exiting now would drop it
     attempt_open: bool
     # Why a required device is missing, naming it and the fix: the follower, and the first of any
     # (follower first), or None when it's there.
@@ -273,7 +277,9 @@ def _quit(state: State, facts: Facts) -> Transition:
         return _refuse(state, "Already quitting. The arm is on its way to rest, and serve exits once it's there; "
                               "Pause cancels the quit.")
     if state is State.RESTING:
-        return Transition(state, (Action.EXIT,) if facts.at_rest else (Action.CONFIRM_QUIT,))
+        if not facts.at_rest:
+            return Transition(state, (Action.CONFIRM_QUIT,))
+        return Transition(state, (Action.QUIT_AT_REST,) if facts.leader_to_rest else (Action.EXIT,))
     if state is State.FAULT:
         # The follower may not answer, so the arm can't be driven to rest. One that doesn't, as when its
         # power is off, can't have its motors turned off either: exiting leaves the arm as it is, so no
@@ -311,7 +317,8 @@ def _arrived(state: State, facts: Facts) -> Transition:
     if state is State.REWINDING:
         return Transition(State.PAUSED, (Action.STOP_MOVE,))
     if state is State.RETURNING:
-        return Transition(State.RESTING, (Action.CLOSE_ATTEMPT, *((Action.EXIT,) if facts.quitting else ())))
+        exits = facts.quitting and not facts.leader_to_rest  # otherwise LEADER_RESTED exits
+        return Transition(State.RESTING, (Action.CLOSE_ATTEMPT, *((Action.EXIT,) if exits else ())))
     return _refuse(state, f"No move is running in {state}.")
 
 
@@ -361,6 +368,12 @@ def _link_lost(state: State, facts: Facts) -> Transition:
     return _refuse(state, f"The policy isn't driving in {state}.")
 
 
+def _leader_rested(state: State, facts: Facts) -> Transition:
+    if state is State.RESTING and facts.quitting and facts.at_rest:
+        return Transition(state, (Action.EXIT,))
+    return _refuse(state, "No quit is waiting for the leader.")
+
+
 def _fault(state: State, facts: Facts) -> Transition:
     if state is State.FAULT:
         return _refuse(state, "Already in Fault.")
@@ -386,6 +399,7 @@ _RULES = {
     Event.TIME_LIMIT: _time_limit,
     Event.LEADER_LOST: _leader_lost,
     Event.LINK_LOST: _link_lost,
+    Event.LEADER_RESTED: _leader_rested,
     Event.FAULT: _fault,
 }
 

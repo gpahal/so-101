@@ -310,7 +310,7 @@ The control center runs as a second process, `so101-control`, which `serve` star
 | `c` | Run checks: print `so101 check`'s report for the devices `serve` has open (see [Run checks and Check pose](#run-checks-and-check-pose)). Only at rest, paused or after a fault |
 | `o` | Check pose: print how far the follower is from the demos' start pose |
 | `h` or `?` | Print the keys |
-| Esc or Ctrl+C | End the attempt the same way, unlabelled, then exit once the arm is at rest, with the motors off. A SIGTERM does the same (see Stopping `serve` with `kill` below). Where the arm can't get to rest, it warns and asks for `y` instead of exiting |
+| Esc or Ctrl+C | End the attempt the same way, unlabelled, then exit once the arm is at rest, and the leader too when it's on its way there, with the motors off. A SIGTERM does the same (see Stopping `serve` with `kill` below). Where the arm can't get to rest, it warns and asks for `y` instead of exiting |
 | `y` | Only after Esc's warning, within 30 s: exit where the arm is, with the motors off, so support it first. The one way to exit where the arm can't get to rest (see Quitting below) |
 
 - **The page's Space toggles,** decided by the control loop against the state it has when it applies the key, not the state the page last saw: it pauses whatever is moving, and otherwise starts an attempt or resumes. A resume needs the arm stopped, and no toggle pressed, for at least 1 s, so a double press or a held key, meant to stop the arm, never starts it again. When a toggle refuses to resume for that reason, it says so; `r` resumes at once.

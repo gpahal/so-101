@@ -403,6 +403,8 @@ class Controller:
                 event = Event.TIME_LIMIT
         if event is not None:
             self._apply(event)
+        if self._quitting and self._state is State.RESTING and self.leader.to_rest is None:
+            self._apply(Event.LEADER_RESTED)  # a quit at rest waited for the leader: it's there, or gone
 
     def _drive(self, observation: dict, seconds: float) -> Driven:
         """Send this tick's goal, `seconds` after the last tick's. Raises LeaderLost when the leader
@@ -497,6 +499,7 @@ class Controller:
             confirm_pending=self._confirm_pending,
             source=source,
             at_rest=self.at_rest,
+            leader_to_rest=self.leader.to_rest is not None,
             attempt_open=attempt is not None,
             follower_missing=devices["follower"],
             follower_silent=self._follower.lost,
@@ -645,6 +648,8 @@ class Controller:
             self._say(shortfall)
         if self._state is not before:
             self._say(wording.announcement(self, ended_by, no_attempt), self._state.value)
+        if self._quitting and given is Event.ARRIVED and Action.EXIT not in transition.actions:
+            self._say(wording.WAIT_FOR_LEADER)
         if self._prompt is not None and Action.CLOSE_ATTEMPT in transition.actions:
             self._say(wording.ASK_OUTCOME.format(attempt=self._prompt))
         if Action.CONFIRM_QUIT in transition.actions:
@@ -701,6 +706,8 @@ class Controller:
                 self._quitting = False
             case Action.QUIT_AT_REST:
                 self._quitting = True
+                if self._state is State.RESTING:
+                    self._say(wording.WAIT_FOR_LEADER)
             case Action.CONFIRM_QUIT:
                 self._quitting = False
                 self._confirm_until = self.clock() + CONFIRM_S  # asked again: CONFIRM_S from now

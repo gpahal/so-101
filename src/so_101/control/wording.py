@@ -21,6 +21,8 @@ LEAVING_MOTORS = ("The follower isn't answering, so serve exits now and leaves i
                   "its power off.")
 # The announcement when a quit's drive to rest stops short, before SUPPORT_AND_QUIT.
 SHORT_OF_REST = "The arm holds where it stopped, short of rest."
+# A quit at rest waits for the leader: exiting turns its motors off, and it would fall part of the way.
+WAIT_FOR_LEADER = "The arm is at rest. serve exits once the leader gets there too; leave it be meanwhile."
 # The time-limit prompt's question; the terminal answers it with s, f or i at rest.
 ASK_OUTCOME = "How did attempt {attempt} go? s succeeded, f failed, i ignore it. No answer leaves it unlabelled."
 
