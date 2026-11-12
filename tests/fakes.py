@@ -122,6 +122,9 @@ class FakeMotors:
         self.writes: list[tuple[str, object]] = []
         self.status: dict[str, int] = {}  # motor -> the alarm bits in its replies
         self.failing = False
+        # motor -> how many torque-off writes it acknowledges without carrying out, as a servo may after
+        # a garbled packet: its torque stays on and a hand can't move it.
+        self.ignore_torque_off: dict[str, int] = {}
         self.powered = True
         self.open = True
         self._last = clock()
@@ -229,6 +232,9 @@ class FakeMotors:
             return {i: "no status packet" for i in ids}  # the motors that didn't answer, as rustypot reports them
         self._settle()
         for i in ids:
+            if not enabled and self.ignore_torque_off.get(self.names[i], 0) > 0:
+                self.ignore_torque_off[self.names[i]] -= 1
+                continue
             self.registers[i]["torque_enable"] = int(enabled)
         self.torque.append((enabled, self.present()))
         self.writes.append(("torque_enable", enabled))

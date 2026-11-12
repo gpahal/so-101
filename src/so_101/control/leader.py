@@ -8,6 +8,15 @@ Pause can cut it short; the controller frees it only once every joint is within 
 `Mirror` sends it the follower's goals during a rewind. `Leader` keeps the handover or mirror
 running, and dropping the leader ends either.
 
+When an attempt ends, or Reset drives the arm to rest with none open, the leader goes to the rest pose
+too (`Leader.to_rest`, a Handover aimed at the rest pose), then its motors turn off: it rests
+unpowered, as when it connects. Pause, a fault or a new move cuts it short where it is.
+
+Freeing the leader for Teleop reads each motor's torque back, and Teleop reads it again every
+`TORQUE_CHECK_S`: a motor whose torque stayed on, which a hand can't move, is logged as a
+`leader_torque` event and turned off again. The servo acknowledges a torque write it may not carry
+out, as after a garbled packet, so the write alone proves nothing.
+
 Losing the leader in Handover or Teleop pauses the follower where it is (`states.Event.LEADER_LOST`).
 Its pose is recorded every tick of an attempt while it's connected; a read that fails elsewhere only
 drops it (`Leader.pose_for_frame`).
@@ -27,6 +36,7 @@ from so_101.control.watch import INTERVAL_S
 # 8 s, 16 s), up to this. A connect blocks the loop for up to a second, so a leader that's listed but
 # broken mustn't be retried every 2 s. Unplugging it starts the wait over.
 LEADER_RETRY_MAX_S = 30.0
+TORQUE_CHECK_S = 1.0  # how often Teleop reads the leader's torque back: one bus read
 
 
 def capped(goal: dict[str, float], measured: dict[str, float],
@@ -51,13 +61,16 @@ class Leader:
     handover or rewind mirror driving it, if one is.
 
     `make()` makes a new, unconnected LeRobot leader (SO101Leader) in the follower's units.
-    `say(message)` tells the operator. `max_step` caps each goal sent to it (see `capped`)."""
+    `say(message)` tells the operator, and `log(type, **fields)` writes an event to the run's log.
+    `max_step` caps each goal sent to it (see `capped`)."""
 
     def __init__(self, make: Callable[[], object], clock: Callable[[], float],
-                 say: Callable[[str], None], max_step: float | dict[str, float] | None) -> None:
+                 say: Callable[[str], None], max_step: float | dict[str, float] | None,
+                 log: Callable[..., None] = lambda type_, **fields: None) -> None:
         self.make = make
         self.clock = clock
         self.say = say
+        self.log = log
         self.max_step = max_step
         self.arm = None  # the connected leader, or None
         self.problem: str | None = None  # why it isn't connected, when known
@@ -65,6 +78,8 @@ class Leader:
         self.wait_s = INTERVAL_S  # how long after a try the next one may come
         self.handover: Handover | None = None  # the handover running, if any
         self.mirror: Mirror | None = None  # the rewind's goals, mirrored to the leader while it runs
+        self.to_rest: Handover | None = None  # the leader's move to the rest pose, while the arm returns
+        self.torque_checked_at: float | None = None  # the last read of its torque in Teleop
 
     @property
     def connected(self) -> bool:
@@ -93,9 +108,33 @@ class Leader:
         self.call(lambda: self.arm.enable_torque())
         return pose
 
-    def free(self) -> None:
-        """Turn the leader's motors off, so a human can move it."""
+    def free(self, why: str = "teleop") -> None:
+        """Turn the leader's motors off, so a human can move it, and read each one's torque back (see
+        `check_free`). `why` goes in the event when a motor stayed on."""
         self.call(lambda: self.arm.disable_torque())
+        self.torque_checked_at = None
+        self.check_free(why)
+
+    def check_free(self, why: str = "teleop") -> None:
+        """Read the free leader's torque back, at most every TORQUE_CHECK_S after the first. A motor
+        still on, which a hand can't move, is logged as a `leader_torque` event with each motor's
+        torque and alarm bits, said once, and turned off again."""
+        now = self.clock()
+        if self.torque_checked_at is not None and now - self.torque_checked_at < TORQUE_CHECK_S:
+            return
+        self.torque_checked_at = now
+        bus = self.call(lambda: self.arm.bus)
+        names = list(bus.motors)
+        replies = self.call(lambda: bus._connected_bus.sync_read_register_with_error(
+            [bus.motors[name].id for name in names], "torque_enable", retries=2))
+        stuck = [name for name, (on, _) in zip(names, replies, strict=True) if on]
+        if not stuck:
+            return
+        motors = {name: {"torque": int(on), "status": f"0x{status:02x}"} for name, (on, status) in zip(names, replies)}
+        self.log("leader_torque", why=why, stuck=stuck, motors=motors)
+        self.say(f"The leader's {', '.join(stuck)} stayed on after its motors were turned off, so a hand couldn't "
+                 "move it: turning it off again.")
+        self.call(lambda: bus.disable_torque(stuck, num_retry=2))
 
     def send(self, goal: dict[str, float], measured: dict[str, float]) -> dict[str, float]:
         """Send `goal`, capped against `measured`, the leader's pose this tick. Returns the goal sent."""
@@ -196,9 +235,9 @@ class Leader:
         return pose
 
     def drop(self, reason: str | None) -> None:
-        """Forget the leader and close its port, ending any handover or mirror. Its motors turn off
-        if it still answers."""
-        self.handover = self.mirror = None
+        """Forget the leader and close its port, ending any handover, mirror or move to rest. Its
+        motors turn off if it still answers."""
+        self.handover = self.mirror = self.to_rest = None
         leader, self.arm = self.arm, None
         self.problem = reason
         self.tried_at = self.clock()
@@ -210,6 +249,33 @@ class Leader:
             pass  # the port is closed even when turning the motors off fails
         if reason:
             self.say(reason)
+
+    def start_to_rest(self, fps: float) -> None:
+        """Start the leader's move to the rest pose, if it's connected (see the module's docstring)."""
+        if self.connected:
+            self.handover = self.mirror = None
+            self.to_rest = Handover(self, fps, self.clock)
+
+    def step_to_rest(self, rest_pose: dict[str, float]) -> dict[str, float] | None:
+        """One step of the leader's move to `rest_pose`, if one is running. Returns its pose, for the
+        frame. On arrival, or once it stops short, its motors turn off. A leader that fails is
+        dropped; the arm carries on to rest without it."""
+        moving = self.to_rest
+        if moving is None or not self.connected:
+            return None
+        try:
+            arrived = moving.step(rest_pose)
+        except LeaderLost as lost:
+            self.drop(str(lost))
+            return None
+        if arrived is not None:
+            self.to_rest = None
+            if not arrived:
+                joint, gap = moving.gap(rest_pose)
+                self.say(f"The leader stopped short of rest: {joint.removesuffix('.pos')} is {gap:.0f} away. "
+                         "Its motors turn off where it is.")
+            self.ok(lambda: self.free("rest"))
+        return moving.pose
 
     def reason(self, may_connect: bool) -> str | None:
         """Why Teleop can't use the leader, or None when it is connected. `may_connect` is whether

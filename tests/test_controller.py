@@ -411,6 +411,58 @@ class ControllerTest(RigTest):
         self.assertFalse(status["allowed"]["teleop"])
         self.assertTrue(status["allowed"]["resume"], "the leader is optional")
 
+    def test_reset_sends_the_leader_to_rest_with_the_arm_and_then_turns_its_motors_off(self) -> None:
+        rig = self.new_rig("leader-rest", recorded=True)
+        rig.start_policy()
+        rig.command("pause")
+        rig.teleop(0.5)
+        moved = {**rig.leader_motors.present(), "shoulder_lift": rig.leader_motors.present()["shoulder_lift"] + 400,
+                 "wrist_flex": rig.leader_motors.present()["wrist_flex"] - 300}
+        rig.leader_motors.move_by_hand(moved)  # a hand has the leader away from rest
+        rig.tick()
+
+        rig.command("reset", outcome="succeeded")
+        self.assertTrue(rig.leader_motors.torqued(), "its motors turn on to drive it")
+        rig.tick_until("resting")
+        rig.tick(3 * FPS)  # it may arrive after the follower
+        for motor, steps in REST_STEPS.items():
+            self.assertAlmostEqual(rig.leader_motors.present()[motor], steps, delta=25, msg=f"leader {motor}")
+        self.assertFalse(rig.leader_motors.torqued(), "at rest it hangs free, as when it connects")
+        self.assertEqual(rig.events("leader_torque"), [])
+
+        # A Pause on the way stops it where it is, motors on, as it stops the arm.
+        rig.start_policy()
+        rig.command("pause")
+        rig.teleop(0.5)
+        rig.leader_motors.move_by_hand(moved)
+        rig.tick()
+        rig.command("reset", outcome="failed")
+        rig.tick(3)
+        rig.command("pause")
+        stopped = rig.leader_motors.present()
+        rig.tick(FPS)
+        self.assertTrue(rig.leader_motors.torqued())
+        for motor, steps in stopped.items():
+            self.assertAlmostEqual(rig.leader_motors.present()[motor], steps, delta=25, msg=f"leader {motor}")
+
+    def test_a_leader_motor_left_on_in_teleop_is_logged_and_turned_off(self) -> None:
+        rig = self.new_rig("stuck", recorded=True)
+        rig.start_policy()
+        rig.command("pause")
+        rig.leader_motors.ignore_torque_off = {"wrist_flex": 1}  # it acknowledges the torque-off, and stays on
+        rig.teleop(0.1)
+        self.assertFalse(rig.leader_motors.torqued(), "turned off again at once")
+        event = rig.events("leader_torque")[-1]
+        self.assertEqual((event["why"], event["stuck"]), ("teleop", ["wrist_flex"]))
+        self.assertEqual(event["motors"]["wrist_flex"], {"torque": 1, "status": "0x00"})
+
+        # Turned on again later in Teleop: found within a second.
+        rig.leader_motors.registers[4]["torque_enable"] = 1
+        rig.tick(FPS + 1)
+        self.assertEqual(rig.events("leader_torque")[-1]["stuck"], ["wrist_flex"])
+        self.assertFalse(rig.leader_motors.torqued())
+        self.assertEqual(rig.status()["state"], "teleop")
+
     def test_a_follower_error_goes_to_fault_and_holds_where_the_arm_is_found_when_it_answers(self) -> None:
         self.rig.start_policy()
         # Something blocks the pan, so the arm is short of its last goal when the bus fails.

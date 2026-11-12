@@ -180,7 +180,7 @@ class Controller:
         self._faulted = False
         self._checks = checks
         # The follower's step cap, which caps the leader's goals too.
-        self.leader = Leader(leader, clock, self._say, inner.config.max_relative_target)
+        self.leader = Leader(leader, clock, self._say, inner.config.max_relative_target, log=self.recorder.event)
         self._toggle = Toggle(clock)
         self._last_tick = clock()
         self._follower = Follower(robot, rollout.positions(robot, rest_pose), clock, self._say,
@@ -417,9 +417,12 @@ class Controller:
         if self._state is State.TELEOP:
             pose = self.leader.read()
             arm.send_action(pose)  # through max_relative_target, like every goal
+            self.leader.check_free()  # every TORQUE_CHECK_S: a motor left on is turned off again
             return Driven(leader_pose=pose)
         if self._state in (State.STARTING, State.RETURNING):
-            return Driven(event=_move_event(self._move.step(arm, present)))
+            event = _move_event(self._move.step(arm, present))
+            leader_pose = self.leader.step_to_rest(self.rest_pose) if self._state is State.RETURNING else None
+            return Driven(leader_pose=leader_pose, event=event)
         if self._state is State.REWINDING:
             arrived = self._rewind.step(arm, present, seconds)
             return Driven(leader_pose=self.leader.follow_mirror(arm.goal), event=_move_event(arrived))
@@ -427,6 +430,8 @@ class Controller:
         if self._state is State.HANDOVER:
             arrived = self.leader.handover.step(present)
             return Driven(leader_pose=self.leader.handover.pose, event=_move_event(arrived))
+        if self._state is State.RESTING:  # the leader may still be on its way to rest
+            return Driven(leader_pose=self.leader.step_to_rest(self.rest_pose))
         return Driven()
 
     def _fault(self, error: BaseException) -> None:
@@ -617,6 +622,8 @@ class Controller:
             self._open.step_in()
         if transition.state is not before:
             self._confirm_until = None  # the arm moves on, or faults: a pending confirmation lapses
+        if self._state not in (State.RETURNING, State.RESTING):
+            self.leader.to_rest = None  # Pause, a fault or a new move: the leader holds where it was sent
         if self._state is not before and self._state in (State.PAUSED, State.RESTING):
             self._toggle.stopped()  # TOGGLE waits TOGGLE_RESUME_AFTER_S from here to resume
         steps = [lambda action=action: self._carry_out(action, transition, outcome) for action in transition.actions]
@@ -654,6 +661,7 @@ class Controller:
                 self.recorder.start_attempt(self._attempt)
             case Action.MOVE_TO_REST:
                 self._move = rollout.Move(self.rest_pose, self.fps, self.clock)
+                self._leader_to_rest()
                 self._faulted = False
                 if outcome is not None:  # `states._reset` allows one only in Fault, which saved this attempt
                     self._label(outcome)
@@ -711,10 +719,8 @@ class Controller:
     def end_attempt(self, ended_by: str, outcome: str | None = None) -> None:
         """End the open attempt. Every ending comes through here: the state machine's END_ATTEMPT.
 
-        Stops the policy, records why the attempt ended, and drives the arm to rest (Returning). The
-        leader's torque stays as it is: a free leader (Teleop) stays free, and one held with its motors
-        on, which the operator was told they could let go of, stays held until the next handover
-        arrives or serve exits.
+        Stops the policy, records why the attempt ended, and drives the arm to rest (Returning), and
+        the leader with it, which then rests with its motors off (`Leader.to_rest`).
         The attempt closes when the arm arrives, and is saved then with its outcome, if it has one.
         A time limit's ending has none, so it asks for one then, as the status's `prompt`.
         A Pause before then cancels the ending and the outcome with it.
@@ -734,7 +740,14 @@ class Controller:
             return
         attempt.ended_by, attempt.outcome = ended_by, outcome
         self._move = rollout.Move(self.rest_pose, self.fps, self.clock)
+        self._leader_to_rest()
         self.policy.pause()
+
+    def _leader_to_rest(self) -> None:
+        """Send the leader to rest with the arm, telling whoever holds it to let go."""
+        if self.leader.connected:
+            self.leader.start_to_rest(self.fps)
+            self._say("The leader goes to rest too: let go of it.")
 
     def _close_attempt(self) -> None:
         """Save the open attempt, if one is, and drop it. It is dropped even when the save fails:
