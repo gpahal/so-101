@@ -14,7 +14,7 @@
 # Fields:
 #   prompt          The task text saved with each demo and given to the policy (required). ACT ignores it.
 #   fps             Control rate to record and run at (default 30).
-#   episodes        Demos to keep (default 50). ~50 for one pick-and-place, spread over 5+ start positions.
+#   episodes        Demos to keep (default 100). ~100 for one pick-and-place, spread over 5+ start positions.
 #   episode_time_s  Seconds per demo (default 20); press Right arrow or n to finish one early.
 #   reset_time_s    Seconds between demos to put the props back (default 10).
 #   cameras         Your cameras to record, named as in so101.toml (default: ["top", "wrist"]).
@@ -26,7 +26,7 @@ default = "block-container"
 
 [block-container]
 prompt = "Pick up the red block and put it in the cylindrical container"
-episodes = 50
+episodes = 100
 episode_time_s = 30
 reset_time_s = 15
 props = [
@@ -36,7 +36,7 @@ props = [
 ]
 setup = [
   "Top camera above the mat, fixed: don't move it between recording and running",
-  "Container stays in one spot, within easy reach and off the wall; move the block to a new spot every 10 demos (5 spots for 50)",
+  "Container stays in one spot, within easy reach and off the wall; record 12 demos at each of 5 spots and keep the best 10, then go round the spots again (100 kept)",
   "Start every demo from the same folded rest pose, and do the task the same way each time",
   "The policy learns the props' colours and the surface: if you change one, record new demos with it",
 ]

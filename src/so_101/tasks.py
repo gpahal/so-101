@@ -149,7 +149,7 @@ def load() -> dict[str, Task]:
                 prompt=t["prompt"],
                 cameras=tuple(t.get("cameras", ["top", "wrist"])),
                 fps=t.get("fps", 30),
-                episodes=t.get("episodes", 50),
+                episodes=t.get("episodes", 100),
                 episode_time_s=t.get("episode_time_s", 20),
                 reset_time_s=t.get("reset_time_s", 10),
                 props=t.get("props", []),

@@ -126,13 +126,13 @@ device = "mps"
 # start-up), rounded up to whole hours. Add a flavor's measured speed to use it.
 # steps_per_demo sets the steps from the demos kept after edits, so each demo is seen as often when
 # you add more. checkpoints sets how many get saved, whatever the length of the run.
-# Speeds measured in November 2026 on 50 demos (17,970 frames). They don't depend on the number of demos.
+# Speeds measured in November 2026 on 50 demos (17,970 frames). They don't depend on the number of demos:
+# ACT on 100 demos (57,723 frames) ran at 0.046 s a step on rtx-pro-6000.
 
 [train.act]
-# 100k steps and about 1.5 hours and $4 at 50 demos; 200k and about 3 hours and $8 at 100. An A100
-# takes 1.4x as long (about 2 hours and $5 at 50 demos) and an A10G 3.3x (4.5 hours and $5-7). ACT's
+# 200k steps and about 3 hours and $8 at 100 demos (the first run took 2 hours 35 minutes, about
+# $7). An A100 takes 1.4x as long (about 4 hours and $10) and an A10G 3.3x (about 10 hours). ACT's
 # error on unseen demos levels off early, so this length is cheap insurance rather than a known need.
-# Its learning rate is constant, so you can test the checkpoints along the way as well as the final one.
 job_target = "rtx-pro-6000"
 steps_per_demo = 2000
 batch_size = 8
@@ -144,8 +144,8 @@ rtx-pro-6000 = 0.05
 a100-large = 0.071
 
 [train.pi05]
-# 6k steps and about 5 hours and $14 at 50 demos; 12k and about 10 hours and $27 at 100. An A100
-# takes 1.6x as long (about 8 hours and $19 at 50 demos), and an A10G can't fit this batch size.
+# 12k steps and about 10 hours and $27 at 100 demos. An A100 takes 1.6x as long (about 16 hours and
+# $39), and an A10G can't fit this batch size.
 # 6k steps scored 27/40 at 50 demos in the recipe's source; longer runs haven't been tested on a robot.
 # Needs access to google/paligemma-3b-pt-224 on Hugging Face.
 job_target = "rtx-pro-6000"
