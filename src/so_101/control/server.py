@@ -81,6 +81,7 @@ import math
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -438,6 +439,14 @@ class ControlServer(ThreadingHTTPServer):
     def status(self, client: str | None = None) -> dict:
         return {**self.controller.status(client), "task": self.task, "server_warning": self.warning,
                 "server_id": self.id}
+
+    def handle_error(self, request, client_address) -> None:
+        """A caller that hung up mid-reply, as a phone does when it locks during a poll, ends only its
+        own request, quietly: printed, its traceback would land among the robot's terminal messages.
+        Any other error is printed as before."""
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -221,6 +221,23 @@ class CallerTest(unittest.TestCase):
         self.assertEqual(self.controller.commands, [], "no command reaches the controller")
 
 
+class HangUpTest(unittest.TestCase):
+    def test_a_caller_that_hangs_up_mid_reply_prints_nothing_and_other_errors_still_print(self) -> None:
+        page = Server(self, StubController())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for error in (BrokenPipeError(32, "Broken pipe"), ConnectionResetError(54, "Connection reset by peer"),
+                          ValueError("a real bug")):
+                try:
+                    raise error
+                except Exception:
+                    page.server.handle_error(None, ("100.64.0.2", 56353))
+        self.assertNotIn("Broken pipe", err.getvalue())
+        self.assertNotIn("Connection reset", err.getvalue())
+        self.assertIn("ValueError: a real bug", err.getvalue())
+        self.assertEqual(page.request("GET", "/status")[0], 200, "the server still answers")
+
+
 class UnsafeRouteTest(unittest.TestCase):
     """While a Tailscale route forwards raw connections to the port, or offers it through Funnel
     behind HTTPS (`route_warning`, checked every 5 s), every request is refused, even one that looks
