@@ -79,7 +79,8 @@ class Move:
 
 def drive_to(robot, target: dict[str, float], sleep=time.sleep, clock=time.monotonic, stopping=lambda: False) -> bool:
     """Move smoothly to `target` and keep commanding it until every joint is within TOLERANCE. Raise
-    StopRun as soon as `stopping()`: the arm holds where it was last sent."""
+    StopRun as soon as `stopping()`, so no attempt starts. The run then ends as any does: LeRobot's
+    teardown drives the arm on to the start pose (`return_to_initial_position`) and turns its motors off."""
     move = Move(target, clock=clock)
     while (arrived := move.step(robot)) is None:
         if stopping():
