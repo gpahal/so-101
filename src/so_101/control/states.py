@@ -163,9 +163,16 @@ def _fault_refusal(facts: Facts) -> str:
 NEEDS_DEVICES = frozenset({"resume", "rewind", "teleop"})
 
 
+# A quit at rest waits for the leader's move to rest: nothing starts meanwhile, or the quit, still under
+# way, would refuse every Esc for the whole attempt.
+WAITING_TO_QUIT = "Quitting: serve exits once the leader is at rest, so nothing starts now."
+
+
 def _resume(state: State, facts: Facts) -> Transition:
     if state is State.FAULT:
         return _refuse(state, _fault_refusal(facts))
+    if facts.quitting and state is State.RESTING:
+        return _refuse(state, WAITING_TO_QUIT)
     if facts.policy is not None and state in (State.RESTING, State.PAUSED, State.TELEOP):
         return _refuse(state, facts.policy)
     if state is State.RESTING:
@@ -210,6 +217,8 @@ def _pause(state: State, facts: Facts) -> Transition:
 def _teleop(state: State, facts: Facts) -> Transition:
     if state is State.FAULT:
         return _refuse(state, _fault_refusal(facts))
+    if facts.quitting and state is State.RESTING:
+        return _refuse(state, WAITING_TO_QUIT)
     if state is State.TELEOP:
         return _refuse(state, "Already in Teleop.")
     if state is State.HANDOVER:
@@ -280,6 +289,8 @@ def _quit(state: State, facts: Facts) -> Transition:
     # Esc, a doubled signal or a closed terminal must never turn the motors off with the arm raised.
     # The one exception is a silent follower in Fault, whose motors exiting leaves as they are.
     if facts.quitting:
+        if state is State.RESTING:
+            return _refuse(state, WAITING_TO_QUIT)
         return _refuse(state, "Already quitting. The arm is on its way to rest, and serve exits once it's there; "
                               "Pause cancels the quit.")
     if state is State.RESTING:
@@ -375,8 +386,9 @@ def _link_lost(state: State, facts: Facts) -> Transition:
 
 
 def _leader_rested(state: State, facts: Facts) -> Transition:
-    if state is State.RESTING and facts.quitting and facts.at_rest:
-        return Transition(state, (Action.EXIT,))
+    if state is State.RESTING and facts.quitting:
+        # Moved off rest while it waited, the arm can't exit there unasked: y at the terminal decides.
+        return Transition(state, (Action.EXIT,) if facts.at_rest else (Action.CONFIRM_QUIT,))
     return _refuse(state, "No quit is waiting for the leader.")
 
 

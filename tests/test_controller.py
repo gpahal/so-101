@@ -464,6 +464,10 @@ class ControllerTest(RigTest):
                     rig.tick_until("resting")
                     self.assertTrue(rig.leader_motors.torqued(), "the leader is still on its way")
                     rig.command("quit")
+                    # Nothing starts while the quit waits, or every later Esc would be refused as a quit under way.
+                    for command in ("resume", "teleop"):
+                        self.assertFalse(rig.command(command).accepted, command)
+                    self.assertFalse(rig.status()["allowed"]["resume"])
                 for _ in range(20 * FPS):
                     if rig.controller.done:
                         break
