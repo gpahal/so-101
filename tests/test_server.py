@@ -465,19 +465,30 @@ class ResolveBindTest(unittest.TestCase):
         self.assertIsNone(check(server.Bind(self.TS_IP), serve_status({}, tcp=to_ts)),
                           "within the tailnet, as the page on the Tailscale address already is")
         self.assertIsNone(check(server.Bind("127.0.0.1"), public), "it never reaches a page on 127.0.0.1")
+        # 0.0.0.0 reaches this Mac's loopback, so a forward there counts as one to 127.0.0.1.
+        anywhere = serve_status({}, tcp={"2222": {"TCPForward": "0.0.0.0:8101"}})
+        self.assertIn("`tailscale serve --tcp=2222 off`", check(https, anywhere))
 
-    def test_a_command_rechecks_the_routes_when_the_last_check_is_over_a_second_old(self) -> None:
-        # A route made after the last check refuses the command at once, not up to 5 s later.
-        answers = [None]
+    def test_a_command_never_waits_on_a_route_check(self) -> None:
+        # Pause is the software stop: a slow Tailscale CLI, on the route watch's own thread, mustn't hold it up.
+        checks = []
+
+        def slow_routes():
+            checks.append(time.monotonic())
+            if len(checks) > 1:
+                time.sleep(1.5)
+
         controller = StubController()
-        with mock.patch.object(server, "ROUTES_EVERY_S", 3600):
-            http = Server(self, controller, routes=lambda: answers[0])
-        answers[0] = "Tailscale Funnel forwards TCP port 2222 straight to the control page's port 8101."
-        with mock.patch.object(server, "ROUTES_FRESH_S", 0.0):
-            code, reply, _ = http.request("POST", "/command", body={"command": "pause"})
-        self.assertEqual(code, 403)
-        self.assertIn("TCP port 2222", reply["error"])
-        self.assertEqual(controller.commands, [])
+        with mock.patch.object(server, "ROUTES_EVERY_S", 0.01):
+            http = Server(self, controller, routes=slow_routes)
+            deadline = time.monotonic() + 5
+            while len(checks) < 2 and time.monotonic() < deadline:
+                time.sleep(0.005)  # until a slow check is under way
+            started = time.monotonic()
+            code, _, _ = http.request("POST", "/command", body={"command": "pause"})
+        self.assertEqual(code, 200)
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual([c["command"] for c in controller.commands], ["pause"])
 
 
 if __name__ == "__main__":

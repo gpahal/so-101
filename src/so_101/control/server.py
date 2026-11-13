@@ -50,10 +50,10 @@ while one does, nor while Funnel offers any route to the port. Off HTTPS, on 127
 for this Mac's browser only, and a request Serve or Funnel passed on is refused; `serve` won't start
 there at all while a TCP forward to the port exists. On the Tailscale address, a Funnel TCP forward
 to the port at any address but this Mac's loopback could reach the page from the public internet, so
-it is unsafe there. Routes can change while `serve` runs, so they are checked again every 5 s on a
-thread of the server's own (`route_warning`), and before a command whenever the last check is over
-ROUTES_FRESH_S (1 s) old, on the request's own thread. While an unsafe route exists, every request
-is refused with a message naming the route, until it's gone. A check that can't read Tailscale's
+it is unsafe there. Routes can change while `serve` runs, so they are checked again every
+ROUTES_EVERY_S (1 s) on a thread of the server's own (`route_warning`), never a request's, so no
+command, Pause included, waits on the Tailscale CLI. While an unsafe route exists, every request is
+refused with a message naming the route, until it's gone. A check that can't read Tailscale's
 status (the CLI timed out, or tailscaled didn't answer) keeps the last answer. The first check runs
 before the first request is served, and on 127.0.0.1 a first check that can't read the status, with
 a Tailscale CLI installed, refuses every request until a check reads it.
@@ -85,7 +85,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import Callable
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
@@ -123,12 +122,10 @@ ROUTE_APPEARED = ("{route}. Until it's gone, the control page refuses every requ
 # The first check, with a Tailscale CLI installed, couldn't read the status: a TCP forward may exist.
 ROUTES_UNREAD = ("The `tailscale` command is installed but gave no status to read, so the control page can't tell "
                  "whether a route forwards raw TCP to its port. It refuses every request until a check reads the "
-                 "status, every 5 s. Start Tailscale if it's stopped, or see why `tailscale serve status --json` fails.")
-# A command re-checks the routes first when the last check is older than this, so a route made since
-# can't pass a command for up to ROUTES_EVERY_S. One check runs the Tailscale CLI, about 50 ms.
-ROUTES_FRESH_S = 1.0
-# How often `serve` checks Tailscale's routes again, on the web server's own thread.
-ROUTES_EVERY_S = 5.0
+                 "status, every second. Start Tailscale if it's stopped, or see why `tailscale serve status --json` fails.")
+# How often `serve` checks Tailscale's routes again, on the web server's own thread: a route made since
+# the last check reaches the page for at most this long. Each check runs the Tailscale CLI.
+ROUTES_EVERY_S = 1.0
 # A request Serve or Funnel passed on, while the page listens on 127.0.0.1 without HTTPS.
 LOOPBACK_ONLY = ("This request came through Tailscale Serve or Funnel, but the control page listens on 127.0.0.1 for a "
                  "browser on this computer only (bind = \"127.0.0.1\" in so101.toml, or Tailscale wasn't running when "
@@ -255,7 +252,8 @@ def resolve_bind(control) -> Bind:
     found, routes = serve_routes(_tailscale("serve", "status", "--json") or "", control.port) or (None, [])
     warnings: list[str] = []
     if control.bind == "tailscale":
-        unsafe = [route for route in routes if route.tcp or route.funnel]
+        # A TCP forward to another address can't reach a page behind HTTPS, which listens on 127.0.0.1.
+        unsafe = [route for route in routes if (route.tcp and route.loopback) or route.funnel]
         if found and not unsafe:
             return Bind(LOOPBACK, https=found)
         if address := tailscale_ip():
@@ -266,7 +264,7 @@ def resolve_bind(control) -> Bind:
         instead = "" if control.bind == "tailscale" else ", or set bind = \"tailscale\" under [control] in so101.toml"
         raise ValueError(" ".join(TCP_ON_LOOPBACK.format(route=route, off=route.off, instead=instead)
                                   for route in tcp))
-    warnings += [WEB_ON_LOOPBACK.format(route=route, fix=route.fix) for route in routes]
+    warnings += [WEB_ON_LOOPBACK.format(route=route, fix=route.fix) for route in routes if not route.tcp]
     return Bind(LOOPBACK, warnings=tuple(warnings))
 
 
@@ -275,7 +273,7 @@ def route_warning(bind: Bind, port: int) -> str | None:
     forward to the port there, whose connections pass for this Mac's own browser, and behind HTTPS
     also Funnel on any route to it. On the Tailscale address: a Funnel TCP forward to the port at an
     address other than the loopback, which may be this one, open to the public internet. Asked again
-    every ROUTES_EVERY_S while `serve` runs, and before a command, as routes can change without it.
+    every ROUTES_EVERY_S while `serve` runs, as routes can change without it.
 
     Raises RuntimeError when the CLI gave no status it could read (it's absent, it timed out,
     tailscaled didn't answer): "no routes" then would lift a refusal while the route may still be there."""
@@ -334,6 +332,10 @@ def _dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# Targets a forward on this Mac reaches its own loopback through: 0.0.0.0 and :: connect locally on macOS.
+LOCAL_HOSTS = ("localhost", LOOPBACK, "0.0.0.0", "::", "::1")
+
+
 def _proxies_to(proxy, port: int, any_host: bool = False) -> bool:
     """Whether a Serve handler's Proxy, such as `http://127.0.0.1:8101`, is this computer's `port`
     on its loopback, or with `any_host`, `port` at any address."""
@@ -343,7 +345,7 @@ def _proxies_to(proxy, port: int, any_host: bool = False) -> bool:
         return int(proxy) == port
     try:
         target = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
-        return (any_host or target.hostname in ("localhost", LOOPBACK)) and target.port == port
+        return (any_host or target.hostname in LOCAL_HOSTS) and target.port == port
     except ValueError:
         return False
 
@@ -391,8 +393,6 @@ class ControlServer(ThreadingHTTPServer):
         self.id = secrets.token_hex(8)  # tells the page a restarted server from the one it watched
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
-        self._routes_lock = threading.Lock()  # one check at a time: the watch's, or a command's
-        self._routes_at = -math.inf  # when a check last read the routes, by time.monotonic
 
     @property
     def url(self) -> str:
@@ -424,26 +424,16 @@ class ControlServer(ThreadingHTTPServer):
         reads it. With no CLI there's no Tailscale, and no route can exist."""
         try:
             warning = self.routes()
-            self._routes_at = time.monotonic()
         except Exception:
             warning = ROUTES_UNREAD if _tailscale_cli() else None
         self.routes_checked(warning)
 
     def _watch_routes(self) -> None:
         while not self._stopping.wait(ROUTES_EVERY_S):
-            self.refresh_routes(0.0)
-
-    def refresh_routes(self, max_age: float) -> None:
-        """Check the routes again unless a check read them under `max_age` seconds ago. A check that
-        fails, or can't read the status, keeps the last answer."""
-        with self._routes_lock:
-            if time.monotonic() - self._routes_at < max_age:
-                return
             try:
                 warning = self.routes()
-            except Exception:
-                return
-            self._routes_at = time.monotonic()
+            except Exception:  # a check that fails, or can't read the status, keeps the last answer
+                continue
             self.routes_checked(warning)
 
     def routes_checked(self, warning: str | None) -> None:
@@ -539,7 +529,6 @@ class Handler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path != "/command":
             self._json(HTTPStatus.NOT_FOUND, {"error": f"No {self.path} here."})
             return
-        self.server.refresh_routes(ROUTES_FRESH_S)  # a route made since the last check refuses this command
         if (error := self._refuse_caller() or self._refuse_cross_site()) is not None:
             self._json(HTTPStatus.FORBIDDEN, {"error": error})
             return
