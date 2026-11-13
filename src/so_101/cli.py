@@ -481,6 +481,12 @@ POLICY_FLAGS = {
         # Publish a running average of the weights, with openpi's default decay.
         "--ema.type=constant",
         "--ema.decay=0.99",
+        # Compiled, a step takes 1.04 s on an H200 against 1.66 to 1.75 s, for the same loss at every
+        # logged step of 60 from one seed. It needs 120.7 GB against 82.4 GB, flat over 400 steps and a
+        # checkpoint save, which only an H200 has. Compiling takes about 4 minutes at the start.
+        # LeRobot's own mode, max-autotune, wasn't measured.
+        "--policy.compile_model=true",
+        "--policy.compile_mode=default",
     ],
 }
 # pi0.5's tokenizer. Its licence is accepted per Hugging Face account, and approval isn't instant.

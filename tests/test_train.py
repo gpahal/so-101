@@ -46,6 +46,7 @@ class BaseTest(unittest.TestCase):
         self.assertEqual(policy.empty_cameras, 0)  # a blank third camera only costs time
         self.assertTrue(config.dataset.image_transforms.enable)
         self.assertEqual((config.ema.type, config.ema.decay), ("constant", 0.99))
+        self.assertEqual((policy.compile_model, policy.compile_mode), (True, "default"))
 
     def test_a_base_must_be_a_hub_model_name(self) -> None:
         for text in ("act_so101_block-container", "gpahal/", "/act", "a/b/c", "gpahal/act@"):

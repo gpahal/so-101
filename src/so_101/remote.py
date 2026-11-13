@@ -77,10 +77,11 @@ RTC_HORIZON_S = RTC_REFILL_S
 #
 # Training keeps the weights in 32-bit, and LeRobot serves a model in the precision it was trained
 # in. Serve in bfloat16 instead: on an L4 a chunk took 0.36 s against 0.77 s in 32-bit, and the plans
-# differed by 0.09 degrees.
+# differed by 0.09 degrees. A model trained compiled would be served compiled too, so that is turned
+# off: the pin above is plain Python that must run at every step.
 #
 # LeRobot's server downloads the whole model repo, and training leaves its checkpoints there, about
-# 83 GB each for pi0.5. Download the model without them.
+# 72 GB each for pi0.5. Download the model without them.
 PI05_SERVER = '''\
 import torch
 from lerobot.configs import FeatureType
@@ -136,6 +137,7 @@ load = PI05Policy.from_pretrained.__func__
 def from_pretrained(cls, *args, config=None, **kwargs):
     if config is not None:
         config.dtype = torch.bfloat16
+        config.compile_model = False
     return load(cls, *args, config=config, **kwargs)
 
 

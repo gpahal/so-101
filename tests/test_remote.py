@@ -218,7 +218,7 @@ def run_server_script(policy_type: str, pin: bool) -> tuple[type, type, list[str
 
         @classmethod
         def from_pretrained(cls, path, *, config=None):
-            cls.loaded.append((path, config.dtype))
+            cls.loaded.append((path, config.dtype, config.compile_model))
             return cls()
 
     modeling.PI05Policy, modeling.PI05Pytorch = PI05Policy, model_class()
@@ -282,13 +282,13 @@ class Pi05ServerScriptTest(unittest.TestCase):
         self.assertEqual(policy_type.resolved, "/model")
         self.assertEqual(policy_type.downloads, [(("me/model",), {"revision": "main", "ignore_patterns": ["checkpoints/**"]})])
 
-    def test_a_model_trained_in_32_bit_is_served_in_bfloat16(self) -> None:
+    def test_a_model_trained_in_32_bit_and_compiled_is_served_in_bfloat16_uncompiled(self) -> None:
         for pin in (True, False):
             with self.subTest(pin=pin):
                 policy_type = run_server_script("pi05", pin)[1]
-                config = types.SimpleNamespace(dtype=torch.float32)  # as a 32-bit training run saves it
+                config = types.SimpleNamespace(dtype=torch.float32, compile_model=True)  # as such a run saves it
                 self.assertIsInstance(policy_type.from_pretrained("checkpoint", config=config), policy_type)
-                self.assertEqual(policy_type.loaded, [("checkpoint", torch.bfloat16)])
+                self.assertEqual(policy_type.loaded, [("checkpoint", torch.bfloat16, False)])
 
     def test_the_pin_follows_a_time_given_per_action_step(self) -> None:
         # Trained real-time chunking gives each step of the chunk its own time.
