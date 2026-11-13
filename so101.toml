@@ -228,3 +228,29 @@ port = 8101
 # sees, at a sixth of the cameras' 30 fps, so previews over Tailscale stay light on a phone. When
 # the control loop falls under 95% of the task's fps, previews drop to half this rate, then stop.
 preview_fps = 5
+
+# `uv sync --extra sim`, then `uv run so101 sim build`: a simulated twin of the default task, worked out
+# from its demos. Rebuild after recording new demos, or after changing anything here. Every setting is
+# optional and in metres or kilograms; the defaults are in DEFAULTS in src/so_101/sim/build.py. Measure
+# the ones marked "measure" for accuracy: the demos can't show them.
+[sim]
+# The block: a LEGO DUPLO 2x2 brick by default, 31.8 mm square and 19.2 mm tall under its studs.
+# block_width = 0.0318
+# block_height = 0.0192
+# block_mass = 0.0055  # measure: kitchen scales
+# The jar. Without jar_diameter, its diameter and the height of its tinted band are fitted to the top
+# camera's frames, and its height is the band plus jar_rim_height of clear neck.
+# jar_diameter = 0.064  # measure
+# jar_height = 0.063  # measure
+# jar_tint_height = 0.05
+# jar_mass = 0.03  # measure
+# How far the mat's top is above the surface the arm's base stands on; negative if the base stands on
+# something higher than the mat. The joint offsets are fitted so that every demo's grasp lands on the
+# mat, so a wrong value here tilts the fitted arm. "fit" fits it from how big the block looks to the
+# top camera instead, which matched the arm's outline worse on the first 100 demos (6.0 px against 3.8).
+# mat_height = 0.003  # measure
+# How the block and the jar slide on the mat. `so101 sim physics` fits this from recorded pushes;
+# setting it here wins.
+# table_friction = 0.6
+# How far the floor is below the table top. Only the wrist camera's view past the table's edge uses it.
+# floor_below = 0.74

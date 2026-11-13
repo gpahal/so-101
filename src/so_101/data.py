@@ -17,11 +17,16 @@
                         A kill during a later save can tear dataset/meta/, which every episode
                         shares; readers fall back to this copy, so it costs only that save's attempt
         labels.toml     review decisions (outcomes, suspect frames); the only file edited later
+      nudges/<YYYYmmdd-HHMMSS>/dataset/   pushes recorded by `so101 sim nudge` to fit the sim's
+                        friction; never trained on
 
 Sessions and runs are append-only: `so101 review` writes only edits.toml, and `so101 review --runs`
 only each run's labels.toml. Runs sit beside the sessions, never among them, so a policy's attempts
 reach a build only through `so101 build --with`, which reads the runs and their labels.toml and
 rebuilds when they change.
+
+The simulated twin `so101 sim build` makes from `train/` is not here but in the repo, in `sims/<task>/`
+beside so101.toml (`sim_dir`).
 """
 
 import hashlib
@@ -46,6 +51,11 @@ if TYPE_CHECKING:
 LABELS_FILE = "labels.toml"
 # Beside a run's dataset: the recorder's copy of the dataset's metadata after each finished save.
 META_COPY_DIR = "meta-copy"
+
+
+def sim_dir(s: Settings, task: "Task") -> Path:
+    """A task's simulated twin. Kept in the repo, since it's small and fitting it again gives a different fit."""
+    return s.path.parent / "sims" / task.name
 
 
 def task_dir(s: Settings, task: "Task") -> Path:

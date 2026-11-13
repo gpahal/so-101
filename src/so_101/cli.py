@@ -23,6 +23,8 @@ from so_101.check import narrow_joints_warning, preflight
 from so_101.commands.policy import policy_setup, policy_task, resolve_action_steps
 from so_101.commands.runs import cmd_runs
 from so_101.commands.serve import cmd_serve
+from so_101.commands.sim import ACTIONS as SIM_ACTIONS
+from so_101.commands.sim import cmd_sim
 from so_101.console import filter_stderr, run_lerobot
 from so_101.devices import apply_camera_controls, find_camera, video_devices
 from so_101.report import Report
@@ -750,7 +752,8 @@ def add_policy_flags(p: argparse.ArgumentParser, verb: str, remote_flag: bool) -
 
 def main() -> None:
     command = next((arg for arg in sys.argv[1:] if not arg.startswith("-")), None)
-    if command in VIDEO_COMMANDS:
+    # `sim nudge` records too; the other `sim` actions encode nothing.
+    if command in VIDEO_COMMANDS or sys.argv[1:3] == ["sim", "nudge"]:
         svtshim.ensure()  # first: it restarts this process, which must happen before stderr is filtered
     filter_stderr()
     parser = argparse.ArgumentParser(
@@ -770,6 +773,19 @@ def main() -> None:
     p = sub.add_parser("scan", help="ping the motors on each bus at every baud rate (read-only)")
     p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
     p.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("sim", help="build a simulated twin of a task from its demos, and try policies in it")
+    p.add_argument("action", choices=SIM_ACTIONS)
+    add_task(p)
+    p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="for check and eval: which model (default: act, the only one that runs on this Mac)")
+    p.add_argument("--revision", help="for check and eval: which version of the model: a Hub tag or commit (default: the newest)")
+    p.add_argument("--checkpoint", metavar="DIR", help="for check and eval: a model `train --target local` saved on this Mac (default: the Hub repo)")
+    p.add_argument("--episodes", type=int, help="for replay: the first so many demos (default: all). For nudge: pushes to record (default 3). For eval: attempts (default 10)")
+    p.add_argument("--action-steps", type=int, help="for eval: actions to carry out before predicting again (default: the model's trained value)")
+    p.add_argument("--limit", type=float, help="for replay and eval: the per-step movement limit (default: max_relative_target in so101.toml)")
+    p.add_argument("--refit-cameras", action="store_true", help="for build: fit the cameras and the joint offsets again, after moving a camera or recalibrating")
+    p.add_argument("--refit-motors", action="store_true", help="for build: fit the motors to the real follower again")
+    p.set_defaults(fn=cmd_sim, forwards=True)  # eval passes the rest to lerobot-eval, nudge to lerobot-record
 
     p = sub.add_parser("pose", help="compare the follower's current pose with the demos' start pose, or save it as the rest pose (reads the motors only)")
     add_task(p)
