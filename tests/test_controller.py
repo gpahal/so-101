@@ -147,11 +147,12 @@ class Rig:
         self.tick_until("resting")
 
     def fault(self) -> None:
-        """The follower stops answering for a tick, and answers again a second later, still in Fault."""
+        """The follower stops answering for a tick, then answers again, and is held where it is once its
+        reads have settled (1 s), still in Fault."""
         self.motors.failing = True
         self.tick()
         self.motors.failing = False
-        self.tick(FPS)
+        self.tick(2 * FPS)
         check.assertEqual(self.status()["state"], "fault")
 
     def in_fault(self) -> None:
@@ -580,8 +581,11 @@ class ControllerTest(RigTest):
         sent = len(self.rig.goals())
         found = self.rig.motors.present()
         self.assertNotEqual(found, last_goal, "the pan never reached its last goal")
-        self.rig.tick(FPS)
-        self.assertEqual(self.rig.goals()[sent:], [found] * FPS, "the arm holds where it's found, never the old goal")
+        self.rig.tick(2 * FPS)
+        held = self.rig.goals()[sent:]
+        self.assertTrue(held, "held once its reads settled")
+        self.assertLessEqual(len(held), FPS, "no goal for the first second after it answers again")
+        self.assertEqual(held, [found] * len(held), "the arm holds where it's found, never the old goal")
         self.assertEqual(self.rig.status()["allowed"],
                          {"resume": False, "pause": False, "rewind": False, "teleop": False, "reset": True,
                           "check": True, "pose": False})
@@ -963,8 +967,11 @@ class LoopSafetyTest(RigTest):
         self.assertEqual(status["state"], "fault")
         self.assertIn("lost power or restarted", status["fault"])
         self.assertEqual(rig.goals()[sent:], [], "no goal on the tick that found the restart")
-        rig.tick(3)
-        self.assertEqual(rig.goals()[sent:], [fell] * 3, "it holds where it fell")
+        rig.tick(2 * FPS)
+        held = rig.goals()[sent:]
+        self.assertTrue(held, "held once its reads settled")
+        self.assertLessEqual(len(held), FPS, "no goal for the first second")
+        self.assertEqual(held, [fell] * len(held), "it holds where it fell")
         self.assertEqual(rig.motors.present(), fell, "the arm never moved toward the old goal")
         rig.tick(FPS)
         self.assertEqual(rig.status()["state"], "fault", "the new mark doesn't clear the fault: Reset does")
@@ -987,12 +994,12 @@ class LoopSafetyTest(RigTest):
         self.assertEqual(rig.goals()[sent:], [], "no goal while the follower is silent")
         rig.motors.power_on(fell)
         written = len(rig.motors.writes)
-        rig.tick()
-        self.assertEqual(rig.motors.writes[written:], [("goal_position", fell), ("torque_enable", True)],
-                         "aimed where it fell before its torque is on")
-        rig.tick(2)
-
-        self.assertEqual(rig.goals()[sent:], [fell] * 3, "it holds where it fell, never the old goal")
+        rig.tick(2 * FPS)
+        writes = rig.motors.writes[written:]
+        self.assertEqual(writes[:2], [("goal_position", fell), ("torque_enable", True)],
+                         "nothing until its reads settled, then aimed where it fell before its torque is on")
+        self.assertEqual(writes[2:], [("goal_position", fell)] * (len(writes) - 2),
+                         "it holds where it fell, never the old goal")
 
     def test_a_power_cut_the_servos_answer_through_never_pulls_the_arm_back(self) -> None:
         # The servos' chips keep answering at 4 V while their motors are limp and the arm falls. When
@@ -1043,6 +1050,73 @@ class LoopSafetyTest(RigTest):
                 if name != "alarm":
                     self.assertTrue(rig.command("reset").accepted)
                     rig.tick_until("resting")
+
+    def test_a_follower_that_answers_with_wrong_positions_while_starting_up_gets_no_torque_until_its_reads_settle(
+            self) -> None:
+        rig = self.new_rig("boot", recorded=True)
+        rig.start_policy()
+        fell = {motor: steps - 300 for motor, steps in rig.goals()[-1].items()}
+        rig.motors.power_off()
+        rig.tick(3)
+        self.assertEqual(rig.status()["state"], "fault")
+
+        # The servos answer again, but for 0.3 s each position reads off by this arm's homing offsets, as
+        # the first read after switching the arm back on did on 2026-11-13.
+        offsets = {"shoulder_pan": 494, "shoulder_lift": 525, "elbow_flex": -478, "wrist_flex": -485,
+                   "wrist_roll": -57, "gripper": -17}
+        start, written = rig.clock(), len(rig.motors.writes)
+        rig.motors.power_on(fell, boot_s=0.3, boot_shift=offsets)
+        rig.tick(3)
+        refused = rig.command("reset")
+        self.assertFalse(refused.accepted, "no Reset, and so no goal, while the reads settle")
+        self.assertIn("steady for 1 s", refused.reason)
+        for _ in range(3 * FPS):
+            if rig.events("follower_back"):
+                break
+            rig.tick()
+        [back] = rig.events("follower_back")
+
+        self.assertGreaterEqual(rig.clock() - start, 1.3 - 1e-6, "1 s of agreeing reads after the last wrong one")
+        self.assertEqual(rig.motors.writes[written:], [("goal_position", fell), ("torque_enable", True)],
+                         "nothing written until it settled, then aimed where it fell before its torque is on")
+        self.assertEqual(rig.motors.present(), fell, "the arm never moved")
+        for motor, value in rig.units(fell).items():
+            self.assertAlmostEqual(back["pose"][motor], value, places=6)
+        rig.holds(FPS, "it holds where it fell")
+        self.assertTrue(rig.command("reset").accepted)
+
+    def test_a_switched_off_arm_gets_its_torque_back_only_after_its_supply_has_read_normal_for_1_s(self) -> None:
+        # As on 2026-11-13: the servos answer for a moment at 6 V, then go silent; switched back on, they
+        # answer before the supply is back to normal.
+        rig = self.new_rig("switched-off", recorded=True)
+        rig.start_policy()
+        fell = {motor: steps - 300 for motor, steps in rig.motors.present().items()}
+        rig.motors.cut_motor_power(volts=6.0)
+        rig.motors.move_by_hand(fell)
+        rig.tick(2)
+        self.assertIn("power dropped", rig.status()["fault"])
+        rig.motors.power_off()
+        rig.tick(3)
+        self.assertEqual(rig.events("follower_lost")[0]["type"], "follower_lost")
+
+        written = len(rig.motors.writes)
+        rig.motors.power_on(fell)  # its chips answer, the supply still reads 6 V
+        rig.tick(2 * FPS)
+        self.assertEqual(rig.motors.writes[written:], [], "nothing written while the supply reads low")
+        self.assertEqual(rig.events("follower_back"), [])
+        rig.motors.restore_motor_power()
+        start = rig.clock()
+        for _ in range(3 * FPS):
+            if rig.events("follower_back"):
+                break
+            rig.tick()
+
+        self.assertGreaterEqual(rig.clock() - start, 1.0 - 1e-6, "1 s with the supply normal")
+        self.assertEqual(rig.motors.writes[written:], [("goal_position", fell), ("torque_enable", True)])
+        self.assertEqual([e["change"] for e in rig.events("power")], ["lost", "back"], "the power loss ends with it")
+        rig.holds(FPS, "it holds where it fell")
+        self.assertEqual(rig.motors.present(), fell, "the arm never moved")
+        self.assertTrue(rig.command("reset").accepted)
 
     def test_one_low_voltage_read_changes_nothing_and_a_voltage_alarm_is_a_power_loss(self) -> None:
         rig = self.new_rig("dip", recorded=True)
@@ -1308,7 +1382,7 @@ class ArmsTest(RigTest):
         rig.motors.failing = True
         rig.tick(2)
         rig.motors.failing = False
-        rig.tick(3)
+        rig.tick(2 * FPS)  # marked again once its reads have settled
         self.assertEqual(gripper["torque_limit"], 300, "a timeout never re-marks a changed limit")
 
         # Lowered again while the follower was lost: left as found too, and reported.
@@ -1316,7 +1390,7 @@ class ArmsTest(RigTest):
         rig.tick(2)
         gripper["torque_limit"] = 200
         rig.motors.failing = False
-        rig.tick(3)
+        rig.tick(2 * FPS)
         self.assertEqual(gripper["torque_limit"], 200, "never written over, whatever value it was found at")
         self.assertIn("gripper reads 200", rig.status()["fault"])
         elbow = rig.motors.registers[MOTORS.index("elbow_flex") + 1]

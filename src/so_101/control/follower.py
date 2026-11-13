@@ -14,8 +14,12 @@ fault of its own, which holds the last goal and leaves the value as found. The l
 marks on every tick, before any goal goes out: about 1.5 ms of a 33 ms tick.
 
 In Fault, a follower that may have lost power (it stopped answering, or a motor restarted) gets no
-goal until it answers again, then holds where it's found (`hold_in_fault`). Any other fault, such as
-a motor alarm, holds the last goal, which keeps a grip and keeps loaded joints from sagging.
+goal until it answers again and its reads have settled, then holds where it's found
+(`hold_in_fault`). A servo that is still starting up can answer with a wrong position: on this arm
+the first read after switching the power back on was off by each motor's homing offset, about 40°
+on four joints. So it gets no write that could turn its torque on until its reads have agreed, and
+its supply has read normal, for RESTART_SETTLE_S. Any other fault, such as a motor alarm, holds the
+last goal, which keeps a grip and keeps loaded joints from sagging.
 
 A servo can keep answering after its motor power is gone: its chip runs on what's left in the
 supply's capacitors, or on the USB board's signal line, while the motor goes limp and the arm falls.
@@ -67,6 +71,16 @@ POWER_LOW_READS = 2
 # over a few hundred milliseconds. It counts from POWER_LOW, not a higher mark, because a supply
 # holding a loaded pose reads lower than at start, at rest, and must still count as back.
 POWER_BACK_S = 0.5
+# A follower that answers again after it was lost gets its torque back only once its reads have agreed
+# for RESTART_SETTLE_S: each motor within RESTART_STEADY_STEPS of the read before (1.8°), and the supply
+# not low. On 2026-11-13 the first read after switching the arm back on lacked each motor's homing
+# offset (pan 481 steps off, its offset 494), and a read 0.58 s later was right. 1 s is about twice
+# that. A wrong first read differs from the next by the offset, so it restarts the wait; an offset
+# under 20 steps can't move the arm more than 1.8°. The arm is limp meanwhile, as it is in any restart.
+RESTART_SETTLE_S = 1.0
+RESTART_STEADY_STEPS = 20
+FOLLOWER_SETTLING = ("The follower answers again. serve waits until its readings have been steady for 1 s before "
+                     "turning its torque on, because a servo that is starting up can report a wrong position.")
 SUPPLY_DROPPED = ("The follower's power dropped: {listed} V, where it read {reference:.1f} V at start. Its motors "
                   "went limp, so the arm holds where it's measured, never where it was told to go, and holds "
                   "there once the power is back. Check the arm's power switch, supply and cables.")
@@ -208,6 +222,9 @@ class Follower:
         self.unpowered: str | None = None  # SUPPLY_DROPPED, from a power loss until the power is back
         self.back_since: float | None = None  # when the reads stopped being low, while unpowered
         self.volts: dict[str, float] = {}  # each motor's supply voltage, as last read
+        # While lost and answering again: the last read in raw steps, and when the reads started agreeing
+        self.steady_steps: dict[str, int] | None = None
+        self.steady_since: float | None = None
 
     @property
     def present(self) -> dict[str, float]:
@@ -485,25 +502,35 @@ class Follower:
         Every hold in Fault goes through here. The arm and its motors' restart marks are read before the hold,
         so a power cut or a restart is caught before it resends the old goal. A failure that doesn't
         mean the follower is lost, such as a motor alarm, is noted and the arm holds all the same.
-        After the follower was lost, it's read and marked again first, then its goal is set to its measured
-        pose, and only then is its torque turned on: explicitly, rather than trusting the goal write
-        to turn it on. A fault always closes the attempt, so no camera is required here: one that
-        fails is only noted in `read_errors`, as in `observe` with no attempt open. While the power is
+        After the follower was lost, it gets no write until its reads have settled (`_settled`), then
+        it's marked again, its goal is set to its measured pose, and only then is its torque turned
+        on: explicitly, rather than trusting the goal write to turn it on. A power loss before it
+        went silent ends there too, with its `power` back event. A fault always closes the attempt,
+        so no camera is required here: one that fails is only noted in `read_errors`, as in
+        `observe` with no attempt open. While the power is
         lost (`unpowered`), the arm is tracked rather than held: every goal is its measured pose, and
         the torque is turned on there once the power is back (`_track`). Nothing is raised
         but a torque_limit found changed, once the arm has held, so the loop reports it as a fault of
         its own."""
         if self.lost:
             try:
-                self.read_joints()
+                if not self._settled():
+                    return
                 self.mark()
                 connect.hold_where_it_is(self.inner.bus)  # where the arm is now, never the old goal, read back
                 self.read_joints()
                 self.arm.goal = dict(self.present)
                 self.inner.bus.enable_torque(num_retry=2)
                 self.lost = False
+                self.steady_steps = self.steady_since = None
+                if self.unpowered is not None:  # `_settled` found the supply normal for RESTART_SETTLE_S
+                    self.log("power", change="back", volts=self.volts, reference=self.reference,
+                             pose=dict(self.present))
+                    self.unpowered = self.back_since = None
+                    self.low_reads = 0
                 self.log("follower_back", pose=dict(self.present))
-            except Exception as error:  # the next tick tries again
+            except Exception as error:  # the next tick tries again, and the wait starts over
+                self.steady_steps = self.steady_since = None
                 self._note(error)
             return
         changed = None
@@ -532,6 +559,33 @@ class Follower:
                 self._note(error)
         if changed is not None:
             raise changed
+
+    def _settled(self) -> bool:
+        """While the follower is lost: read its joints and supply, writing nothing, and say whether the
+        reads have agreed for RESTART_SETTLE_S. Agreeing means each motor within RESTART_STEADY_STEPS
+        of the read before, and the supply not low (`check_power`'s rule). A read that disagrees starts
+        the wait over from itself; a low supply starts it over from the next read. Until it has
+        settled the follower counts as missing (FOLLOWER_SETTLING), so Reset sends it no goal either.
+        Raises while it doesn't answer."""
+        steps = self.inner.bus.sync_read("Present_Position", normalize=False, num_retry=2)
+        self.arm.present = pose_from_steps(self.inner.bus, steps)
+        self.silent = False
+        self.read_errors["follower"] = FOLLOWER_SETTLING
+        low = False
+        if self.reference is not None:
+            self.volts, statuses = self._read_supply()
+            low = (any(status & VOLTAGE_BIT for status in statuses.values())
+                   or min(self.volts.values()) < POWER_LOW * self.reference)
+        agrees = self.steady_steps is not None and all(
+            abs(value - self.steady_steps[motor]) <= RESTART_STEADY_STEPS for motor, value in steps.items())
+        now = self.clock()
+        if low:
+            self.steady_steps = self.steady_since = None
+            return False
+        if not agrees or self.steady_since is None:
+            self.steady_since = now
+        self.steady_steps = steps
+        return now - self.steady_since >= RESTART_SETTLE_S
 
     def _note(self, error: BaseException) -> None:
         """Keep what a failed read or hold found: whether the follower may have lost power, and why

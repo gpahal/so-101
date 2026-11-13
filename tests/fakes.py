@@ -97,7 +97,10 @@ class FakeMotors:
     can go: the servos' chips keep running and answering, at a low voltage, but their motors are
     limp, so the arm stays where it's put (`move_by_hand`, as it falls). Their RAM, goal and torque
     included, is kept, so when `restore_motor_power` brings the motors back, each drives to the goal
-    it last got.
+    it last got. `power_on` can also bring them back still starting up for `boot_s`, answering with
+    each position off by `boot_shift`, as this arm's servos read without their homing offset just
+    after the power came back. Goals written meanwhile are kept as written, so a goal copied from such
+    a read drives the motor that far once its torque is on.
     """
 
     def __init__(self, clock: FakeClock, calibration: dict[str, dict], positions: dict[str, int]):
@@ -136,6 +139,8 @@ class FakeMotors:
         self.ignore_torque_off: dict[str, int] = {}
         self.powered = True
         self.motor_power = True  # the motors can move: off while `cut_motor_power` holds
+        self.boot_until = clock()  # until then, position reads are off by `boot_shift`
+        self.boot_shift: dict[str, int] = {}
         self.open = True
         self._last = clock()
 
@@ -168,11 +173,13 @@ class FakeMotors:
         for r in self.registers.values():
             r["torque_enable"] = 0
 
-    def power_on(self, positions: dict[str, int]) -> None:
+    def power_on(self, positions: dict[str, int], boot_s: float = 0.0, boot_shift: dict[str, int] | None = None) -> None:
         """The power comes back: torque off, SRAM back to its power-on values, and the arm wherever
-        it fell to (`positions`)."""
+        it fell to (`positions`). For `boot_s` each position reads `boot_shift` steps off."""
         self._settle()
         self.powered = True
+        self.boot_until = self.clock() + boot_s
+        self.boot_shift = dict(boot_shift or {})
         for r in self.registers.values():
             r["torque_enable"] = 0
             r["torque_limit"] = r["max_torque_limit"]
@@ -212,17 +219,23 @@ class FakeMotors:
             raise ValueError(f"no register named '{name}'")
         return name.lower()
 
+    def _read(self, motor_id: int, name: str) -> int:
+        value = self.registers[motor_id].get(name, 0)
+        if name == "present_position" and self.clock() < self.boot_until:
+            value += self.boot_shift.get(self.names[motor_id], 0)
+        return value
+
     def read_register_with_error(self, motor_id: int, name: str, retries: int = 0) -> tuple[int, int]:
         name = self._register(name)
         self._answer([motor_id])
         self._settle()
-        return self.registers[motor_id].get(name, 0), self.status.get(self.names[motor_id], 0)
+        return self._read(motor_id, name), self.status.get(self.names[motor_id], 0)
 
     def sync_read_register_with_error(self, ids: list[int], name: str, retries: int = 0) -> list[tuple[int, int]]:
         name = self._register(name)
         self._answer(ids)
         self._settle()
-        return [(self.registers[i].get(name, 0), self.status.get(self.names[i], 0)) for i in ids]
+        return [(self._read(i, name), self.status.get(self.names[i], 0)) for i in ids]
 
     def sync_read_register(self, ids: list[int], name: str, retries: int = 0) -> list[int]:
         return [value for value, _ in self.sync_read_register_with_error(ids, name, retries)]
