@@ -14,43 +14,43 @@ def build(controller, refusals: dict[str, str | None]) -> dict:
     """The status as of now. `refusals` is the state machine's answer for each command: None when
     it's allowed, else why not (`states.allowed`)."""
     c = controller
-    attempt = c._open
-    closed = c._closed
+    attempt = c.open_attempt
+    closed = c.closed_attempt
     shown = attempt or closed  # the page shows how the attempt closed last went, until the next opens
-    devices = {**c._devices(), "leader": c._leader_reason()}  # the leader is optional
+    devices = {**c.devices(), "leader": c.leader_reason()}  # the leader is optional
     return {
-        "state": c._state.value,
-        "attempt": c._attempt,
+        "state": c.state.value,
+        "attempt": c.attempt_number,
         "attempt_open": attempt is not None,
         "elapsed_s": round(c.clock() - attempt.started, 1) if attempt is not None else None,
         "policy_s": round(attempt.spent["attempt_limit_s"], 1) if attempt is not None else None,
         "limit_s": c.control.attempt_limit_s,
         "teleop_s": round(attempt.spent["human_limit_s"], 1) if attempt is not None else None,
-        "rewind_available_s": round(c._rewind_available(), 1) if attempt is not None else None,
+        "rewind_available_s": round(c.rewind_available(), 1) if attempt is not None else None,
         "rewind_s": c.control.rewind_s,
         "human_limit_s": c.control.human_limit_s,
         "policy": c.policy_name,
         "allowed": {command: reason is None for command, reason in refusals.items()},
         "refusals": {command: reason for command, reason in refusals.items() if reason is not None},
         "ending": attempt.ended_by if attempt is not None else None,
-        "confirm_quit": c._confirm_pending,  # y at the terminal now exits where the arm is
+        "confirm_quit": c.confirm_pending,  # y at the terminal now exits where the arm is
         "last_attempt": {"attempt": closed.number, "ended_by": closed.ended_by, "outcome": closed.outcome,
                          "saved": closed.episode is not None} if closed else None,
         "devices": {device: "missing" if reason else "ok" for device, reason in devices.items()},
         "device_problems": {device: reason for device, reason in devices.items() if reason},
-        "fault": c._fault_error if c._state is State.FAULT else None,
-        "warnings": [warning for warning in (c._follower.hot, c._follower.gripper_tripped, c._follower.unnamed_warning,
-                                             c._pace.behind) if warning],
-        "previews": {"fps": c.previews.fps if c.previews else 0, "note": c._pace.preview_note},
-        "prompt": c._prompt,  # the attempt a time limit ended, waiting for its outcome, or None
+        "fault": c.fault_error if c.state is State.FAULT else None,
+        "warnings": [warning for warning in (c.follower.hot, c.follower.gripper_tripped, c.follower.unnamed_warning,
+                                             c.pace.behind) if warning],
+        "previews": {"fps": c.previews.fps if c.previews else 0, "note": c.pace.preview_note},
+        "prompt": c.prompt,  # the attempt a time limit ended, waiting for its outcome, or None
         "operator": c.operator,
         "controller": c.link.who if c.link.client is not None else None,
         "you_have_control": None,  # per page: `seen_by` answers it
         "link_lost": c.link.lost,
         "last_event": c.recorder.tail.last_id,
         "timeline": [{**run, "s": round(run["s"], 1)} for run in (shown.timeline if shown else [])],
-        "label": {"current": shown.label if shown else None, "refusal": c._label_reason()},
-        "summary": summary(c._attempts),
+        "label": {"current": shown.label if shown else None, "refusal": c.label_reason()},
+        "summary": summary(c.saved_attempts),
     }
 
 

@@ -112,9 +112,9 @@ def _transition(controller, name: str, options: dict, source: str) -> Result:
     outcome = options.get("outcome")
     if outcome is not None and outcome not in OUTCOMES:
         return Result(name, False, f"Unknown outcome {outcome!r}: use {', '.join(OUTCOMES)}.")
-    if "for_attempt" in options and (reason := stale_sheet(options["for_attempt"], controller._attempt)):
+    if "for_attempt" in options and (reason := stale_sheet(options["for_attempt"], controller.attempt_number)):
         return Result(name, False, reason)
-    transition = controller._apply(Command(name), outcome=outcome, source=source)
+    transition = controller.apply(Command(name), outcome=outcome, source=source)
     return Result(name, transition.accepted, transition.refused)
 
 
@@ -162,19 +162,19 @@ def intake(controller, name: str, source: str, client: str | None, who: str | No
     else:
         result = _control(controller, name, source, client, who)
         if result is None and name == TOGGLE:
-            state = controller._state
-            name, result = controller._toggle.press(step(state, Command.PAUSE, controller._facts()).accepted,
+            state = controller.state
+            name, result = controller.toggle.press(step(state, Command.PAUSE, controller.facts()).accepted,
                                                     state in (State.PAUSED, State.RESTING))
             via = {"via": TOGGLE}  # logged as the pause or resume it became
         if result is None:
             if name == "outcome":
-                result = controller._answer(options)
+                result = controller.answer(options)
             elif name == "label":
-                result = controller._label_step_in(options)
+                result = controller.label_step_in(options)
             elif name in TRANSITIONS:
                 result = _transition(controller, name, options, source)
             elif name in TOOLS:
-                result = controller._tool(Tool(name))
+                result = controller.run_tool(Tool(name))
             else:
                 result = Result(name, False, f"Unknown command {name!r}.")
     page = {"who": who} if source == "page" else {}
@@ -189,8 +189,8 @@ def _hidden(controller, name: str, source: str, client: str | None) -> Result:
     link = controller.link
     if source != "page" or client is None or client != link.client:
         return Result(name, False, "Only the page in control reports whether it's in sight.")
-    if link.hide(step(controller._state, Event.LINK_LOST, controller._facts()).accepted):
-        controller._apply(Event.LINK_LOST)
+    if link.hide(step(controller.state, Event.LINK_LOST, controller.facts()).accepted):
+        controller.apply(Event.LINK_LOST)
     return Result(name, True)
 
 

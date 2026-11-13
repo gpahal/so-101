@@ -50,23 +50,23 @@ def announcement(controller, ended_by: str | None, no_attempt: bool) -> str:
     """What the state the controller just entered is called, for the operator. `ended_by` is why
     the open attempt is ending, if it is. `no_attempt` is whether no attempt was open as it entered it."""
     c = controller
-    if c._state is State.RESTING and c._confirm_pending:
+    if c.state is State.RESTING and c.confirm_pending:
         return SHORT_OF_REST
-    if no_attempt and c._state in SAYS_NO_ATTEMPT:
-        return SAYS_NO_ATTEMPT[c._state] if c._state is State.RETURNING or c.at_rest else AWAY_FROM_REST
-    return SAYS[c._state].format(attempt=c._attempt, ended_by=ended_by, fault=c._fault_error)
+    if no_attempt and c.state in SAYS_NO_ATTEMPT:
+        return SAYS_NO_ATTEMPT[c.state] if c.state is State.RETURNING or c.at_rest else AWAY_FROM_REST
+    return SAYS[c.state].format(attempt=c.attempt_number, ended_by=ended_by, fault=c.fault_error)
 
 
 def confirm_message(controller, announced: bool) -> str:
     """Why the arm can't go to rest before exiting, and what to do. `announced` is whether a new
     state was just announced, which said where the arm is."""
     c = controller
-    if c._state is State.FAULT:
+    if c.state is State.FAULT:
         return (f"The arm can't drive to rest after a fault: the follower may not answer. Reset drives it to rest "
                 f"once it does. {SUPPORT_AND_QUIT}")
     if announced:
         return f"Reset drives it to rest. {SUPPORT_AND_QUIT}"
-    joint, off = rollout.farthest(c._follower.present, c.rest_pose)
+    joint, off = rollout.farthest(c.follower.present, c.rest_pose)
     return (f"The arm isn't at rest: {joint.removesuffix('.pos')} is {off:.0f} away. Reset drives it to rest. "
             f"{SUPPORT_AND_QUIT}")
 
@@ -74,22 +74,22 @@ def confirm_message(controller, announced: bool) -> str:
 def shortfall(controller) -> str:
     """Where the move the controller is running stopped short, and what holds now."""
     c = controller
-    present = c._follower.present
-    if c._state is State.HANDOVER:
+    present = c.follower.present
+    if c.state is State.HANDOVER:
         key, off = c.leader.handover.gap(present)
         return (f"The leader couldn't line up with the follower: {key.removesuffix('.pos')} is {off:.0f} away. "
                 "Paused, with both arms held. Let go of the leader, then press Teleop again.")
-    if c._state is State.REWINDING:
-        key, off = rollout.farthest(present, c._rewind.target)
+    if c.state is State.REWINDING:
+        key, off = rollout.farthest(present, c.running_rewind.target)
         return (f"The rewind stopped short: {key.removesuffix('.pos')} is {off:.0f} away from the pose it went "
                 f"back to, after {REWIND_SETTLE_S:g} s of trying. Paused there.")
-    key, off = rollout.farthest(present, c._move.target)
+    key, off = rollout.farthest(present, c.scripted_move.target)
     joint = key.removesuffix(".pos")
-    if c._state is State.STARTING:
+    if c.state is State.STARTING:
         return (f"The arm can't reach the demos' start pose: {joint} is {off:.0f} away. Paused rather than "
                 "starting the policy from the wrong pose.")
-    if c._open is None:  # a move to rest with no attempt open: after a fault, or from a stop away from rest
+    if c.open_attempt is None:  # a move to rest with no attempt open: after a fault, or from a stop away from rest
         return f"The arm stopped short of rest: {joint} is {off:.0f} away. It holds there, with no attempt open."
-    if c._quitting:
-        return f"The arm stopped short of rest: {joint} is {off:.0f} away. Attempt {c._attempt} is saved there."
+    if c.quitting:
+        return f"The arm stopped short of rest: {joint} is {off:.0f} away. Attempt {c.attempt_number} is saved there."
     return f"The arm stopped short of rest: {joint} is {off:.0f} away. The attempt stays open."
