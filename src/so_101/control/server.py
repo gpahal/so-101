@@ -48,10 +48,12 @@ no Serve or Funnel route forwards raw TCP to the port (`--tcp` or `--tls-termina
 connections arrive with no Serve headers, like this Mac's own. So the page never goes behind HTTPS
 while one does, nor while Funnel offers any route to the port. Off HTTPS, on 127.0.0.1, the page is
 for this Mac's browser only, and a request Serve or Funnel passed on is refused; `serve` won't start
-there at all while a TCP forward to the port exists. Routes can change while `serve` runs, so they
-are checked again every 5 s on a thread of the server's own (`route_warning`). While a TCP forward
-reaches the page on 127.0.0.1, or behind HTTPS Funnel offers any route to it, every request is
-refused with a message naming the route, until it's gone. A check that can't read Tailscale's
+there at all while a TCP forward to the port exists. On the Tailscale address, a Funnel TCP forward
+to the port at any address but this Mac's loopback could reach the page from the public internet, so
+it is unsafe there. Routes can change while `serve` runs, so they are checked again every 5 s on a
+thread of the server's own (`route_warning`), and before a command whenever the last check is over
+ROUTES_FRESH_S (1 s) old, on the request's own thread. While an unsafe route exists, every request
+is refused with a message naming the route, until it's gone. A check that can't read Tailscale's
 status (the CLI timed out, or tailscaled didn't answer) keeps the last answer. The first check runs
 before the first request is served, and on 127.0.0.1 a first check that can't read the status, with
 a Tailscale CLI installed, refuses every request until a check reads it.
@@ -83,6 +85,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
@@ -121,6 +124,9 @@ ROUTE_APPEARED = ("{route}. Until it's gone, the control page refuses every requ
 ROUTES_UNREAD = ("The `tailscale` command is installed but gave no status to read, so the control page can't tell "
                  "whether a route forwards raw TCP to its port. It refuses every request until a check reads the "
                  "status, every 5 s. Start Tailscale if it's stopped, or see why `tailscale serve status --json` fails.")
+# A command re-checks the routes first when the last check is older than this, so a route made since
+# can't pass a command for up to ROUTES_EVERY_S. One check runs the Tailscale CLI, about 50 ms.
+ROUTES_FRESH_S = 1.0
 # How often `serve` checks Tailscale's routes again, on the web server's own thread.
 ROUTES_EVERY_S = 5.0
 # A request Serve or Funnel passed on, while the page listens on 127.0.0.1 without HTTPS.
@@ -199,6 +205,7 @@ class Route:
     funnel: bool  # open to the public internet
     tcp: bool  # raw TCP connections, with no Serve headers; otherwise a web route, whose requests carry them
     off: str = ""  # for a TCP route: the command that removes it
+    loopback: bool = True  # it forwards to localhost or 127.0.0.1; a TCP route may name any address
 
     def __str__(self) -> str:
         public = ", open to the public internet" if self.funnel else ""
@@ -255,7 +262,7 @@ def resolve_bind(control) -> Bind:
             warnings = [(TCP_FORWARD if route.tcp else FUNNEL).format(route=route, off=route.off) for route in unsafe]
             return Bind(address, dns_name=tailscale_name(), warnings=tuple(warnings))
         warnings = [NO_TAILSCALE]
-    if tcp := [route for route in routes if route.tcp]:
+    if tcp := [route for route in routes if route.tcp and route.loopback]:
         instead = "" if control.bind == "tailscale" else ", or set bind = \"tailscale\" under [control] in so101.toml"
         raise ValueError(" ".join(TCP_ON_LOOPBACK.format(route=route, off=route.off, instead=instead)
                                   for route in tcp))
@@ -264,18 +271,20 @@ def resolve_bind(control) -> Bind:
 
 
 def route_warning(bind: Bind, port: int) -> str | None:
-    """What makes a request without a Tailscale login unsafe now, from Tailscale's routes to `port`,
-    or None. Only a page on 127.0.0.1 has such routes: a TCP forward to the port, whose connections
-    pass for this Mac's own browser, and behind HTTPS also Funnel on any route to it. Asked again
-    every ROUTES_EVERY_S while `serve` runs, as routes can change without it.
+    """What makes a request unsafe now, from Tailscale's routes to `port`, or None. On 127.0.0.1: a TCP
+    forward to the port there, whose connections pass for this Mac's own browser, and behind HTTPS
+    also Funnel on any route to it. On the Tailscale address: a Funnel TCP forward to the port at an
+    address other than the loopback, which may be this one, open to the public internet. Asked again
+    every ROUTES_EVERY_S while `serve` runs, and before a command, as routes can change without it.
 
     Raises RuntimeError when the CLI gave no status it could read (it's absent, it timed out,
     tailscaled didn't answer): "no routes" then would lift a refusal while the route may still be there."""
-    if bind.address != LOOPBACK:
-        return None
     if (status := serve_routes(_tailscale("serve", "status", "--json") or "", port)) is None:
         raise RuntimeError("Tailscale gave no `tailscale serve status --json` to read.")
-    risky = [route for route in status[1] if route.tcp or (bind.https and route.funnel)]
+    if bind.address == LOOPBACK:
+        risky = [route for route in status[1] if (route.tcp and route.loopback) or (bind.https and route.funnel)]
+    else:
+        risky = [route for route in status[1] if route.tcp and route.funnel and not route.loopback]
     return " ".join(ROUTE_APPEARED.format(route=route, fix=route.fix) for route in risky) or None
 
 
@@ -299,13 +308,15 @@ def serve_routes(out: str, port: int) -> tuple[str | None, list[Route]] | None:
         tcp = _dict(config.get("TCP"))
         for tcp_port, entry in tcp.items():
             entry = _dict(entry)
-            if not _proxies_to(entry.get("TCPForward"), port):
+            # Any address counts: a forward to this Mac's Tailscale address reaches a page bound there.
+            if not _proxies_to(entry.get("TCPForward"), port, any_host=True):
                 continue
             funnel = any(hostport.rsplit(":", 1)[-1] == str(tcp_port) and allowed is True
                          for hostport, allowed in public.items())
             flag = "--tls-terminated-tcp" if entry.get("TerminateTLS") else "--tcp"
             routes.append(Route(port, str(tcp_port), funnel, tcp=True,
-                                off=f"tailscale {'funnel' if funnel else 'serve'} {flag}={tcp_port} off"))
+                                off=f"tailscale {'funnel' if funnel else 'serve'} {flag}={tcp_port} off",
+                                loopback=_proxies_to(entry.get("TCPForward"), port)))
         for hostport, site in _dict(config.get("Web")).items():
             handlers = _dict(_dict(site).get("Handlers"))
             to_port = [path for path, handler in handlers.items() if _proxies_to(_dict(handler).get("Proxy"), port)]
@@ -323,15 +334,16 @@ def _dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _proxies_to(proxy, port: int) -> bool:
-    """Whether a Serve handler's Proxy, such as `http://127.0.0.1:8101`, is this computer's `port`."""
+def _proxies_to(proxy, port: int, any_host: bool = False) -> bool:
+    """Whether a Serve handler's Proxy, such as `http://127.0.0.1:8101`, is this computer's `port`
+    on its loopback, or with `any_host`, `port` at any address."""
     if not isinstance(proxy, str) or not proxy:
         return False
     if proxy.isdigit():
         return int(proxy) == port
     try:
         target = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
-        return target.hostname in ("localhost", LOOPBACK) and target.port == port
+        return (any_host or target.hostname in ("localhost", LOOPBACK)) and target.port == port
     except ValueError:
         return False
 
@@ -379,6 +391,8 @@ class ControlServer(ThreadingHTTPServer):
         self.id = secrets.token_hex(8)  # tells the page a restarted server from the one it watched
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
+        self._routes_lock = threading.Lock()  # one check at a time: the watch's, or a command's
+        self._routes_at = -math.inf  # when a check last read the routes, by time.monotonic
 
     @property
     def url(self) -> str:
@@ -410,16 +424,26 @@ class ControlServer(ThreadingHTTPServer):
         reads it. With no CLI there's no Tailscale, and no route can exist."""
         try:
             warning = self.routes()
+            self._routes_at = time.monotonic()
         except Exception:
             warning = ROUTES_UNREAD if _tailscale_cli() else None
         self.routes_checked(warning)
 
     def _watch_routes(self) -> None:
         while not self._stopping.wait(ROUTES_EVERY_S):
+            self.refresh_routes(0.0)
+
+    def refresh_routes(self, max_age: float) -> None:
+        """Check the routes again unless a check read them under `max_age` seconds ago. A check that
+        fails, or can't read the status, keeps the last answer."""
+        with self._routes_lock:
+            if time.monotonic() - self._routes_at < max_age:
+                return
             try:
                 warning = self.routes()
-            except Exception:  # a check that fails, or can't read the status, keeps the last answer
-                continue
+            except Exception:
+                return
+            self._routes_at = time.monotonic()
             self.routes_checked(warning)
 
     def routes_checked(self, warning: str | None) -> None:
@@ -515,6 +539,7 @@ class Handler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path != "/command":
             self._json(HTTPStatus.NOT_FOUND, {"error": f"No {self.path} here."})
             return
+        self.server.refresh_routes(ROUTES_FRESH_S)  # a route made since the last check refuses this command
         if (error := self._refuse_caller() or self._refuse_cross_site()) is not None:
             self._json(HTTPStatus.FORBIDDEN, {"error": error})
             return
@@ -589,7 +614,9 @@ class Handler(BaseHTTPRequestHandler):
     def _who(self) -> str:
         """How the status and the events name the caller of a request `_refuse_caller` let through:
         behind HTTPS its Tailscale login when it came through Serve, which strips any copy the caller
-        sent, otherwise "this Mac", so a local program can't name another user. Off HTTPS, its address."""
+        sent, otherwise "this Mac". Off HTTPS, its address. A program on this Mac can send Serve's
+        headers itself and so name any login: this Mac needs no login to press the buttons anyway, so
+        the name is a label in the event log, not proof of who pressed them."""
         if self.server.https:
             return self._login() if self._through_serve() else THIS_MAC
         return self.client_address[0]

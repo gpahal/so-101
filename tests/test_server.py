@@ -458,6 +458,27 @@ class ResolveBindTest(unittest.TestCase):
         self.assertIsNone(check(server.Bind(self.TS_IP), tcp),
                           "a route to localhost never reaches the Tailscale address")
 
+        # A Funnel TCP forward to the Tailscale address reaches a page listening there, from the internet.
+        to_ts = {"2222": {"TCPForward": f"{self.TS_IP}:8101"}}
+        public = serve_status({}, funnel={f"{TS_NAME}:2222": True}, tcp=to_ts)
+        self.assertIn("`tailscale funnel --tcp=2222 off`", check(server.Bind(self.TS_IP), public))
+        self.assertIsNone(check(server.Bind(self.TS_IP), serve_status({}, tcp=to_ts)),
+                          "within the tailnet, as the page on the Tailscale address already is")
+        self.assertIsNone(check(server.Bind("127.0.0.1"), public), "it never reaches a page on 127.0.0.1")
+
+    def test_a_command_rechecks_the_routes_when_the_last_check_is_over_a_second_old(self) -> None:
+        # A route made after the last check refuses the command at once, not up to 5 s later.
+        answers = [None]
+        controller = StubController()
+        with mock.patch.object(server, "ROUTES_EVERY_S", 3600):
+            http = Server(self, controller, routes=lambda: answers[0])
+        answers[0] = "Tailscale Funnel forwards TCP port 2222 straight to the control page's port 8101."
+        with mock.patch.object(server, "ROUTES_FRESH_S", 0.0):
+            code, reply, _ = http.request("POST", "/command", body={"command": "pause"})
+        self.assertEqual(code, 403)
+        self.assertIn("TCP port 2222", reply["error"])
+        self.assertEqual(controller.commands, [])
+
 
 if __name__ == "__main__":
     unittest.main()
