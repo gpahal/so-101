@@ -9,108 +9,35 @@ gripper comes from where it sees that block and jar, and its own jaws.
 import json
 import warnings
 from dataclasses import dataclass
-from functools import cached_property
 from pathlib import Path
 
 import cv2
 import mujoco
 import numpy as np
-import pandas as pd
 from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
-from torchcodec.decoders import VideoDecoder
 
 from so_101.sim import arm
 from so_101.sim.camera import HEIGHT, WIDTH, Lens, look_through, rotation, rotation_quat, to_camera
-from so_101.sim.env import GROUP_BLOCK, BlockContainerEnv, table_points
+from so_101.sim.arm import GRASP_DEPTH, TIPS_ABOVE_MAT, held_block
+from so_101.sim.demos import FPS, Demos
+from so_101.sim.env import GROUP_BLOCK, BlockContainerEnv, jar_outline, table_points
+from so_101.sim.looks import blob, pale, red_blob, red_mask, whole, wrist_jar_mask
 
-FPS = 30
-# Where a held block's centre sits above the midpoint of the jaw tips, towards the gripper, in metres, and
-# how far above the mat that midpoint is when the jaws close on a block lying flat. From the wrist
-# camera's frames of grasps: the tips reach just past the middle of the block's sides.
-GRASP_DEPTH = 0.006
-TIPS_ABOVE_MAT = 0.006
-
-
-@dataclass
-class Demos:
-    """A LeRobot dataset on disk, with what each episode's joints and videos show."""
-
-    root: Path
-
-    @cached_property
-    def frames(self) -> pd.DataFrame:
-        files = sorted(self.root.glob("data/*/*.parquet"))
-        return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
-
-    @cached_property
-    def episodes(self) -> pd.DataFrame:
-        files = sorted(self.root.glob("meta/episodes/*/*.parquet"))
-        return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
-
-    @cached_property
-    def _decoders(self) -> dict:
-        return {}
-
-    @cached_property
-    def _tracks(self) -> dict[int, tuple[np.ndarray, np.ndarray]]:
-        return {
-            int(episode): (np.stack(rows["observation.state"]).astype(np.float64), np.stack(rows["action"]).astype(np.float64))
-            for episode, rows in self.frames.groupby("episode_index")
-        }
-
-    def __len__(self) -> int:
-        return len(self.episodes)
-
-    def image(self, episode: int, seconds: float, camera: str = "top") -> np.ndarray:
-        row = self.episodes.iloc[episode]
-        key = f"videos/observation.images.{camera}"
-        path = (
-            self.root / "videos" / f"observation.images.{camera}"
-            / f"chunk-{int(row[key + '/chunk_index']):03d}" / f"file-{int(row[key + '/file_index']):03d}.mp4"
-        )  # fmt: skip
-        decoder = self._decoders.setdefault(str(path), VideoDecoder(str(path)))
-        at = float(row[key + "/from_timestamp"]) + seconds
-        return decoder.get_frames_played_at([at]).data[0].permute(1, 2, 0).numpy()
-
-    def frame(self, episode: int, index: int, camera: str = "top") -> np.ndarray:
-        """A frame by its number. Half a frame in, because a time on the boundary can give the frame before,
-        which for a demo's first frame is the end of the previous demo."""
-        return self.image(episode, (index + 0.5) / FPS, camera)
-
-    def episode(self, episode: int) -> tuple[np.ndarray, np.ndarray]:
-        """The follower's readings and the commands sent to it, one row per frame."""
-        return self._tracks[episode]
-
-    def grasp_and_release(self, episode: int) -> tuple[int, int] | None:
-        """The frame the gripper has settled on the block, and the frame it starts to let go. None if the
-        demo holds nothing.
-
-        A hold shows as squeezing: the gripper is told to close further than it does, and stays put.
-        """
-        state, action = self.episode(episode)
-        grip, command = state[:, 5], action[:, 5]
-        squeezing = (command < grip - 1.5) & (grip > 5) & (np.abs(np.gradient(grip)) < 0.6)
-        best, start, gap = (0, 0), None, 0
-        for index, held in enumerate(np.r_[squeezing, np.zeros(6, bool)]):
-            if held:
-                start, gap = index if start is None else start, 0
-            elif start is not None:
-                gap += 1
-                if gap > 4:  # a few frames of slack don't end a hold
-                    end = index - gap + 1
-                    if end - start > best[1] - best[0]:
-                        best = (start, end)
-                    start = None
-        if best[1] - best[0] < 15:
-            return None
-        return best[0] + 3, best[1]
+# How many ticks older than the joints saved with it a top camera picture is taken to be while the camera
+# is being fitted, before `camera_timing` can measure it: what it measured on the first 100 demos. Fitting
+# on still frames alone needs no guess, but leaves too few poses: the outline then fitted 5.4 px out, not 3.8.
+TOP_DELAY_GUESS = 3
+# Degrees a second under which the arm counts as still: the wrist camera's delay isn't known, so its fits
+# use only frames where it can't matter.
+STILL = 5.0
 
 
 def calm_frame(state: np.ndarray, index: int, window: int = 12, limit: float = 20.0) -> int | None:
     """The frame near `index` where the arm moves least, or None if it's moving faster than `limit`
     degrees a second all through the window. A camera's picture is a few ticks older than the joints'
-    readings saved with it, which only matters while the arm moves."""
+    readings saved with it, which only matters while the arm moves: at 20 degrees a second and 3 ticks,
+    the jaws are a centimetre from where the picture shows them."""
     speed = np.abs(np.gradient(state[:, :5], axis=0)).max(axis=1) * FPS
     first, last = max(index - window, 0), min(index + window + 1, len(state))
     calmest = first + int(np.argmin(speed[first:last]))
@@ -126,43 +53,6 @@ def held_demos(demos: Demos) -> dict[int, tuple[int, int]]:
 def split(episodes: list[int]) -> tuple[list[int], list[int]]:
     """Every fourth demo is held back, for `so101 sim score` to check a fit on demos it didn't see."""
     return [e for i, e in enumerate(episodes) if i % 4 != 2], [e for i, e in enumerate(episodes) if i % 4 == 2]
-
-
-# What things look like in the real frames.
-
-
-def blob(mask: np.ndarray, min_area: int) -> tuple[np.ndarray, int, np.ndarray] | None:
-    """Centre, area and bounding box of a mask's largest patch."""
-    count, _, stats, centres = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
-    if count < 2:
-        return None
-    largest = 1 + int(np.argmax(stats[1:, 4]))
-    if stats[largest, 4] < min_area:
-        return None
-    return centres[largest], int(stats[largest, 4]), stats[largest, :4]
-
-
-def red_mask(image: np.ndarray) -> np.ndarray:
-    """The block: redder than it is green or blue, even on its dull, shaded sides, and not the table's
-    orange or the jar's amber, which have about half as much green as red."""
-    a = image.astype(np.int16)
-    mask = (a[..., 0] - np.maximum(a[..., 1], a[..., 2]) > 25) & (a[..., 0] > 55) & (a[..., 0] > 2.1 * a[..., 1])
-    return cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
-
-
-def red_blob(image: np.ndarray, min_area: int = 60) -> tuple[np.ndarray, int, np.ndarray] | None:
-    return blob(red_mask(image), min_area)
-
-
-def pale(image: np.ndarray) -> np.ndarray:
-    """The arm's printed parts: light and grey."""
-    a = image.astype(np.int16)
-    return (a.min(axis=2) > 105) & ((a.max(axis=2) - a.min(axis=2)) < 40)
-
-
-def whole(box, margin: int = 2) -> bool:
-    """A bounding box that isn't cut off by the picture's edge."""
-    return bool(box[0] > margin and box[1] > margin and box[0] + box[2] < WIDTH - margin and box[1] + box[3] < HEIGHT - margin)
 
 
 # The top camera and the arm's joint offsets.
@@ -186,19 +76,6 @@ def arm_region(dark: np.ndarray) -> np.ndarray:
 
 def arm_mask(image: np.ndarray, region: np.ndarray) -> np.ndarray:
     return cv2.morphologyEx((pale(image) & region).astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
-
-
-def held_block_local(jaw_angles: np.ndarray, depth: float = GRASP_DEPTH) -> np.ndarray:
-    """A held block's centre in the gripper's axes: `depth` from the jaw tips' midpoint, towards the gripper."""
-    local = np.array([arm.between_jaws_local(angle) for angle in np.atleast_1d(jaw_angles)])
-    return local * (1 - depth / np.linalg.norm(local, axis=1, keepdims=True))
-
-
-def held_block(units: arm.Units, states: np.ndarray, depth: float = GRASP_DEPTH) -> np.ndarray:
-    """Where a block held by the jaws is, in the arm's axes, for each row of follower readings."""
-    qpos = units.to_qpos(np.atleast_2d(states))
-    rotations, positions = arm.gripper_poses(qpos)
-    return positions + np.einsum("nij,nj->ni", rotations, held_block_local(qpos[:, 5], depth))
 
 
 @dataclass
@@ -265,6 +142,7 @@ def top_fit_data(demos: Demos, episodes: list[int], held: dict[int, tuple[int, i
             mask = arm_mask(demos.frame(episode, index), region)
             if mask.sum() < 300:
                 continue
+            index = max(index - TOP_DELAY_GUESS, 0)  # the joints the picture shows
             ys, xs = np.nonzero(mask)
             pick = rng.choice(len(xs), 120, replace=len(xs) < 120)
             states.append(state[index])
@@ -277,7 +155,7 @@ def top_fit_data(demos: Demos, episodes: list[int], held: dict[int, tuple[int, i
         hold, let_go = held[episode]
         state = demos.episode(episode)[0]
         carried = {calm_frame(state, int(index), window=6) for index in np.linspace(hold + 20, let_go - 3, 6)} - {None}
-        sightings = [(index, hold, True) for index in (0, 5, 10)] + [(index, index, False) for index in sorted(carried) if hold + 10 < index < let_go]
+        sightings = [(index, hold, True) for index in (0, 5, 10)] + [(index, index - TOP_DELAY_GUESS, False) for index in sorted(carried) if hold + 10 < index < let_go]
         for index, pose_index, on_mat in sightings:
             seen = red_blob(demos.frame(episode, index))
             if seen is not None and whole(seen[2]):
@@ -493,17 +371,6 @@ def clean_plate(demos: Demos, episodes: list[int], view: ArmView, jar_masks: dic
     return cv2.inpaint(plate, never.astype(np.uint8), 6, cv2.INPAINT_TELEA)
 
 
-def jar_outline(pose, lens: Lens, xy, jar: dict, table_height: float, top: float | None = None) -> np.ndarray:
-    """The pixels a standing jar's wall covers from a camera, up to `top` metres (default: all of it)."""
-    angles = np.linspace(0, 2 * np.pi, 48, endpoint=False)
-    circle = np.c_[jar["radius"] * np.cos(angles) + xy[0], jar["radius"] * np.sin(angles) + xy[1]]
-    rings = np.concatenate([np.c_[circle, np.full(len(circle), table_height + height)] for height in (0.0, jar["height"] if top is None else top)])
-    pixels = lens.project(to_camera(rings, pose))
-    mask = np.zeros((lens.height, lens.width), np.uint8)
-    cv2.fillConvexPoly(mask, cv2.convexHull(np.round(pixels).astype(np.int32)), 1)
-    return mask > 0
-
-
 def jar_pixels(image: np.ndarray, near: np.ndarray, reach: float = 85.0) -> np.ndarray:
     """The jar in a top camera frame: its amber, with the dark thread round its neck filled in. `near` is
     a pixel on it, and nothing further than `reach` pixels from there counts, which leaves out the table."""
@@ -678,18 +545,6 @@ def jar_surface(jar: dict, count: int = 240, seed: int = 0) -> np.ndarray:
     return np.c_[jar["radius"] * np.cos(angle), jar["radius"] * np.sin(angle), rng.uniform(0, jar["tint_height"], count)]
 
 
-def wrist_jar_mask(image: np.ndarray) -> np.ndarray:
-    """The jar's tinted wall in a wrist frame: its largest amber patch. The wrist camera sees it far more
-    vivid than the top camera does."""
-    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-    amber = (hsv[..., 0] >= 12) & (hsv[..., 0] <= 30) & (hsv[..., 1] >= 70) & (hsv[..., 2] >= 90)
-    amber = cv2.morphologyEx(amber.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(amber)
-    if count < 2:
-        return np.zeros(amber.shape, bool)
-    return labels == 1 + int(np.argmax(stats[1:, 4]))
-
-
 @dataclass
 class WristFit:
     """What `fit_wrist_camera` compares a candidate wrist camera with: frames before grasps, each with
@@ -736,7 +591,7 @@ def wrist_fit_data(demos: Demos, held: dict, episodes: list[int], units: arm.Uni
         flat = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1.0]])
         world = {"block": faces @ flat.T + [x, y, table_height + block["height"] / 2], "jar": wall + [*starts[episode]["jar"], table_height]}
         for moment in (0.0, 0.35, 0.6, 0.8, 0.95):
-            index = calm_frame(state[: hold - 5], int((hold - 6) * moment))
+            index = calm_frame(state[: hold - 5], int((hold - 6) * moment), limit=STILL)
             if index is None:
                 continue
             image = demos.frame(episode, index, "wrist")
@@ -794,6 +649,81 @@ def fit_wrist_camera(data: WristFit, report=print) -> dict:
         "lens": Lens(x[6], x[7], x[8]).to_scene(),
         "errors": {f"{name}_px": round(float((found[f"{name}_stray"].mean() + found[f"{name}_missed"].mean()) / 2), 2) for name in ("jaws", "block", "jar") if f"{name}_stray" in found},
     }
+
+
+def blocks_by_wrist(env, demos: Demos, held: dict, layouts: list[dict], reach: float = 0.012, report=print) -> tuple[float, float]:
+    """Move each demo's block to where the wrist camera saw it, and return the median move in millimetres
+    and the median distance left between the real and drawn block in the wrist camera's frames, in pixels.
+
+    The top camera and the arm's joints place a block a few millimetres apart, and it's the arm that has
+    to grasp it. In frames where the arm is still, the block is moved across the mat until the drawn
+    block's centre in the wrist camera's picture is where the real one's is. Each layout's `by_wrist` then
+    holds that place, and its `seen` the place the top camera gave. No block moves further than `reach`.
+    """
+    moves, left = [], []
+    for layout in layouts:
+        episode = layout["episode"]
+        state = demos.episode(episode)[0]
+        hold = held[episode][0]
+        layout["seen"] = list(layout.get("seen", layout["block"]))
+        frames = {calm_frame(state[: hold - 5], int((hold - 6) * moment), limit=STILL) for moment in (0.0, 0.3, 0.5, 0.7, 0.85, 0.95)} - {None}
+        sightings = []
+        for frame in sorted(frames):
+            found = red_blob(demos.frame(episode, frame, "wrist"), 300)
+            if found is not None and whole(found[2], 6):
+                sightings.append((frame, found[0]))
+        if not sightings:
+            continue
+        place = np.array(layout["seen"][:2], dtype=np.float64)
+
+        def centres(xy):
+            """Where the drawn block's centre is in each sighting's picture, None where it's cut off."""
+            drawn = []
+            for frame, _ in sightings:
+                env.set_joints(state[frame])
+                env.set_block(xy, layout["seen"][2])
+                mujoco.mj_forward(env._model, env.data)
+                shapes = env.segment("wrist", GROUP_BLOCK)
+                rows, columns = np.nonzero(shapes >= 0)
+                box = (columns.min(), rows.min(), np.ptp(columns), np.ptp(rows)) if len(rows) > 300 else None
+                drawn.append(np.array([columns.mean(), rows.mean()]) if box is not None and whole(box, 6) else None)
+            return drawn
+
+        for _ in range(3):
+            here = centres(place)
+            aside, ahead = centres(place + [0.002, 0.0]), centres(place + [0.0, 0.002])
+            rows_a, rows_b = [], []
+            for (_, real), now, dx, dy in zip(sightings, here, aside, ahead):
+                if now is None or dx is None or dy is None:
+                    continue
+                rows_a.append(np.column_stack([(dx - now) / 0.002, (dy - now) / 0.002]))  # pixels per metre the block moves
+                rows_b.append(real - now)
+            if not rows_a:
+                break
+            step, *_ = np.linalg.lstsq(np.concatenate(rows_a), np.concatenate(rows_b), rcond=None)
+            place = place + step
+            away = place - layout["seen"][:2]
+            if np.linalg.norm(away) > reach:
+                place = np.array(layout["seen"][:2]) + away * reach / np.linalg.norm(away)
+        left += [float(np.linalg.norm(real - now)) for (_, real), now in zip(sightings, centres(place)) if now is not None]
+        moves.append(float(np.linalg.norm(place - layout["seen"][:2])) * 1000)
+        layout["by_wrist"] = [round(float(place[0]), 4), round(float(place[1]), 4), layout["seen"][2]]
+    return float(np.median(moves)), float(np.median(left))
+
+
+def replays_into_jar(env, demos: Demos, layouts: list[dict], place: str) -> int:
+    """How many demos' real commands, replayed, leave the block in the jar when each block starts at its
+    layout's `place`: `seen` by the top camera, or `by_wrist`."""
+    count = 0
+    for layout in layouts:
+        state, action = demos.episode(layout["episode"])
+        env.reset(seed=0, options={"joints": state[0], "block": layout.get(place, layout["seen"]), "jar": layout["jar"]})
+        for command in action:
+            env.apply(command)
+        for _ in range(45):  # let it settle
+            env.apply(action[-1])
+        count += env.block_in_jar()
+    return count
 
 
 def jaw_yaw(units: arm.Units, state: np.ndarray) -> float:
@@ -908,6 +838,7 @@ def place_for_frame(env, demos: Demos, held: dict, layout: dict, episode: int, f
     """Put the arm, block and jar where they really were at a demo's frame: the block on the mat, in the
     jaws, or in the jar. `layout` is the demo's entry in the scene's `starts`."""
     state = demos.episode(episode)[0]
+    env.photo_from(layout)  # as an attempt started from this demo's layout would
     env.set_joints(state[frame])
     env.set_jar(layout["jar"])
     hold, let_go = held.get(episode, (len(state), len(state)))

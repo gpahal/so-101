@@ -137,6 +137,7 @@ def scene_files(folder: Path) -> dict:
         "colours": {"top": colours, "wrist": colours},
         "softness": {"top": 0.8, "wrist": 0.8},
         "starts": [{"episode": 0, "block": [0.27, 0.0, 0.1], "jar": [0.37, -0.01], "grasp": [0.27, 0.0]}],
+        "episodes": [0],
     }  # fmt: skip
     (folder / "scene.json").write_text(json.dumps(scene))
     return scene
@@ -278,6 +279,99 @@ class EnvTest(unittest.TestCase):
         picture = self.env.render_camera("top")
         np.testing.assert_array_equal(picture[470, 630], [90, 90, 90])
         self.assertGreater(int(picture[int(v.mean()), int(u.mean()), 0]), int(picture[int(v.mean()), int(u.mean()), 1]) + 40)
+
+
+class OneDemo:
+    """A stand-in for the built demos: one episode that reaches out, closes on a block and holds it, whose
+    cameras show one flat colour each."""
+
+    TOP, WRIST = (0, 255, 0), (0, 0, 255)
+
+    def __init__(self, start_pose: list[float]) -> None:
+        reach = np.array([5.0, 20.0, 5.0, 65.0, -2.0, 30.0])
+        state = np.linspace(np.asarray(start_pose, dtype=np.float64), reach, 30)
+        held = np.tile(np.r_[reach[:5], 19.0], (40, 1))
+        self.state = np.concatenate([state, held])
+        self.action = self.state.copy()
+        self.action[30:, 5] = 14.0  # told to close further than the block lets it
+
+    def episode(self, episode: int) -> tuple[np.ndarray, np.ndarray]:
+        return self.state, self.action
+
+    def grasp_and_release(self, episode: int) -> tuple[int, int]:
+        return 33, 70
+
+    def frame(self, episode: int, index: int, camera: str = "top") -> np.ndarray:
+        return np.full((480, 640, 3), self.TOP if camera == "top" else self.WRIST, np.uint8)
+
+
+@unittest.skipIf(SKIP, SKIP)
+class PhotoTest(unittest.TestCase):
+    """Drawing from the demos' real frames. The stand-in demo's frames are one colour, so a pixel taken
+    from a real frame has exactly that colour, and a rendered one doesn't."""
+
+    def setUp(self) -> None:
+        from so_101.sim.env import BlockContainerEnv
+
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.scene = scene_files(Path(folder.name))
+        self.demo = OneDemo(self.scene["start_pose"])
+        self.env = BlockContainerEnv(scene_dir=folder.name)
+        self.addCleanup(self.env.close)
+        self.env.reset(seed=0, options={"start": 0})
+        self.env.use_photos(self.demo)
+
+    def place(self, frame: int) -> None:
+        import mujoco
+
+        self.env.reset(seed=0, options={"start": 0, "joints": self.demo.state[frame]})
+        mujoco.mj_forward(self.env._model, self.env.data)
+
+    def test_the_top_cameras_arm_is_drawn_from_the_nearest_real_frame(self) -> None:
+        self.place(20)
+        picture = self.env.render_camera("top")
+        shapes = self.env.segment("top")
+        arm_pixels = cv2.erode(((shapes >= 0) & self.env.is_arm[shapes.clip(0)]).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        self.assertGreater(arm_pixels.sum(), 5000)
+        from_frame = (picture[arm_pixels] == OneDemo.TOP).all(axis=1)
+        self.assertGreater(from_frame.mean(), 0.97)
+        # Away from the arm, the picture is still the real background.
+        np.testing.assert_array_equal(picture[470, 630], [90, 90, 90])
+
+    def test_the_block_and_jar_come_from_the_demos_first_frame_until_the_block_moves(self) -> None:
+        self.place(0)
+        top = self.scene["cameras"]["top"]
+        lens = Lens.from_scene(top["lens"])
+        block = lens.project(to_camera(np.array([[0.27, 0.0, 0.013]]), top["pose"]))[0].astype(int)
+        jar = lens.project(to_camera(np.array([[0.37, -0.01, 0.03]]), top["pose"]))[0].astype(int)
+        picture = self.env.render_camera("top")
+        np.testing.assert_array_equal(picture[block[1], block[0]], OneDemo.TOP)
+        np.testing.assert_array_equal(picture[jar[1], jar[0]], OneDemo.TOP)
+        self.assertTrue(self.env.block_untouched())
+        # Once the block has moved it's drawn, red, where it now lies, and the photo of it is gone.
+        self.env.set_block([0.2, -0.1], 0.0)
+        import mujoco
+
+        mujoco.mj_forward(self.env._model, self.env.data)
+        self.assertFalse(self.env.block_untouched())
+        picture = self.env.render_camera("top")
+        np.testing.assert_array_equal(picture[block[1], block[0]], [90, 90, 90])
+        moved = lens.project(to_camera(np.array([[0.2, -0.1, 0.013]]), top["pose"]))[0].astype(int)
+        self.assertGreater(int(picture[moved[1], moved[0], 0]), int(picture[moved[1], moved[0], 1]) + 40)
+        np.testing.assert_array_equal(picture[jar[1], jar[0]], OneDemo.TOP)
+
+    def test_the_wrist_cameras_view_is_drawn_from_the_nearest_real_frame(self) -> None:
+        self.place(20)
+        picture = self.env.render_camera("wrist")
+        from_frame = (picture == OneDemo.WRIST).all(axis=2)
+        self.assertGreater(from_frame.mean(), 0.9)
+
+    def test_without_demos_everything_is_rendered(self) -> None:
+        self.env.arm_photos = self.env.wrist_photos = None
+        self.place(20)
+        for camera, colour in (("top", OneDemo.TOP), ("wrist", OneDemo.WRIST)):
+            self.assertFalse((self.env.render_camera(camera) == colour).all(axis=2).any())
 
 
 if __name__ == "__main__":

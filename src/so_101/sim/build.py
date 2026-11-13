@@ -231,6 +231,13 @@ def build(
     scene["fits"]["wrist"] = wrist
     fit.save_json(scene_path, scene)
 
+    env = sim_env.BlockContainerEnv(scene_dir=str(out))
+    env.reset(seed=0)
+    moved, left = fit.blocks_by_wrist(env, demos, held, scene["starts"])
+    env.close()
+    scene["fits"]["block"] |= {"wrist_move_mm": round(moved, 1), "wrist_px": round(left, 1)}
+    fit.save_json(scene_path, scene)
+
     timing = kept.get("timing")
     if timing is None or refit_cameras:
         report("Measuring how far behind the joints each camera's picture is...")
@@ -250,7 +257,20 @@ def build(
     env = sim_env.BlockContainerEnv(scene_dir=str(out), max_relative_target=teleop_limit)
     env.reset(seed=0)
     error = fit.tracking_error(env, demos, held, held_back[:: max(1, len(held_back) // 6)])
+    # Where does each demo's block start: where the top camera saw it, or where the wrist camera did? The two
+    # are a few millimetres apart, and the arm has to grasp it, so whichever lets more of the real demos'
+    # commands put it in the jar.
+    into_jar = {place: fit.replays_into_jar(env, demos, [layout for layout in scene["starts"] if layout["episode"] in fit_on], place) for place in ("seen", "by_wrist")}
     env.close()
+    chosen = max(into_jar, key=into_jar.get)
+    for layout in scene["starts"]:
+        layout["block"] = layout.get(chosen, layout["seen"])
+    scene["fits"]["block"] |= {"placed": chosen, "replays_into_jar": into_jar}
+    report(
+        f"Blocks: the wrist camera saw them {scene['fits']['block']['wrist_move_mm']:.1f} mm (median) from where the top camera did. Replaying "
+        f"{len(fit_on)} demos puts {into_jar['seen']} in the jar from the top camera's places and {into_jar['by_wrist']} from the wrist "
+        f"camera's, so each block starts where the {'top' if chosen == 'seen' else 'wrist'} camera saw it."
+    )
     scene["fits"]["joint_error"] = [round(float(e), 2) for e in error]
     report("Joint error on demos the motors weren't fitted to: " + ", ".join(f"{e:.1f}" for e in error))
     scene = _match_colours(scene, out, demos, held, fit_on, report)

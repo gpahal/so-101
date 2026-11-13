@@ -14,6 +14,7 @@ from so_101.console import run_lerobot
 from so_101.tasks import get_task
 
 SCENE_DIR_ENV = "SO101_SIM_SCENE"  # `so_101.sim.env.SCENE_DIR_ENV`, which imports MuJoCo
+DEMOS_DIR_ENV = "SO101_SIM_DEMOS"  # `so_101.sim.env.DEMOS_DIR_ENV`
 CAMERAS = ("top", "wrist")
 ACTIONS = ("build", "replay", "score", "nudge", "physics", "check", "eval")
 
@@ -75,8 +76,12 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     demos, scene = data.train_root(s, task), data.sim_dir(s, task)
     if ns.action != "build" and not (scene / "scene.json").is_file():
         sys.exit(f"No scene yet. Run `uv run so101 sim build {task.name}` first.")
-    if ns.action not in ("eval", "physics"):  # those only need the scene
+    if ns.action != "physics":  # which only needs the scene
         source.ensure_demos(demos, scene)
+    if ns.action != "build" and (demos / "meta" / "info.json").is_file():
+        # With the demos here, the sim draws the arm and the wrist camera's view from their real frames.
+        # Not while building: the colours a build matches are the ones drawn without them.
+        os.environ[DEMOS_DIR_ENV] = str(demos.resolve())
     limit = s.teleop.max_relative_target if ns.limit is None else ns.limit
     if ns.action == "build":
         try:

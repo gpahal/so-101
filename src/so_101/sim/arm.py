@@ -171,3 +171,23 @@ def printed_points(qpos: np.ndarray) -> np.ndarray:
     """`printed_surface` in the arm's axes for many poses: one row of points per pose."""
     surface = printed_surface()
     return np.concatenate([np.einsum("nij,pj->npi", rotations, surface[name]) + positions[:, None] for name, (rotations, positions) in link_poses(qpos).items()], axis=1)
+
+
+# Where a held block's centre sits above the midpoint of the jaw tips, towards the gripper, in metres, and
+# how far above the mat that midpoint is when the jaws close on a block lying flat. From the wrist
+# camera's frames of grasps: the tips reach just past the middle of the block's sides.
+GRASP_DEPTH = 0.006
+TIPS_ABOVE_MAT = 0.006
+
+
+def held_block_local(jaw_angles: np.ndarray, depth: float = GRASP_DEPTH) -> np.ndarray:
+    """A held block's centre in the gripper's axes: `depth` from the jaw tips' midpoint, towards the gripper."""
+    local = np.array([between_jaws_local(angle) for angle in np.atleast_1d(jaw_angles)])
+    return local * (1 - depth / np.linalg.norm(local, axis=1, keepdims=True))
+
+
+def held_block(units: Units, states: np.ndarray, depth: float = GRASP_DEPTH) -> np.ndarray:
+    """Where a block held by the jaws is, in the arm's axes, for each row of follower readings."""
+    qpos = units.to_qpos(np.atleast_2d(states))
+    rotations, positions = gripper_poses(qpos)
+    return positions + np.einsum("nij,nj->ni", rotations, held_block_local(qpos[:, 5], depth))

@@ -13,6 +13,7 @@ the wall, the floor, the jar, the block and the jaws.
 
 import json
 import os
+import sys
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -24,12 +25,14 @@ import numpy as np
 from gymnasium import spaces
 
 from so_101.sim.arm import JAW_BODIES, JOINT_NAMES, JOINTS, Units, arm_xml
-from so_101.sim.camera import HEIGHT, WIDTH, Lens, rotation_quat
+from so_101.sim.camera import HEIGHT, WIDTH, Lens, rotation_quat, to_camera
 
 CAMERAS = ("top", "wrist")
 # Which rendering group each thing is in, so each camera and each fit can draw just what it needs.
 GROUP_SCENE, GROUP_BASE, GROUP_ARM, GROUP_HIDDEN, GROUP_BLOCK, GROUP_JAR = range(6)
 SCENE_DIR_ENV = "SO101_SIM_SCENE"
+# The built demos' folder. With it, the top camera's arm is drawn from the demos' real frames (`photo`).
+DEMOS_DIR_ENV = "SO101_SIM_DEMOS"
 TASK = "so101_block_container"
 FPS = 30
 # Physics steps per control tick: 0.002 s each. The block weighs a few grams and the jaws close hard, and
@@ -37,8 +40,7 @@ FPS = 30
 SUBSTEPS = 16
 # The pinhole pictures drawn before the lens bends them, as a multiple of the cameras' 640 x 480. Larger,
 # so the bent picture's centre, which the lens magnifies, still has a rendered pixel for each real one.
-# The wrist camera's lens is the wider, so it needs the larger picture.
-RENDER_SCALE = {"top": 1.5, "wrist": 2.0}
+RENDER_SCALE = {"top": 1.5, "wrist": 1.5}
 JAR_SEGMENTS = 32
 WRIST_CAMERA_PARTS = ("wrist_camera_pcb", "wrist_camera_lens")
 GLOW = 0.6
@@ -63,6 +65,16 @@ LEROBOT_SIM = {
     "action_names": JOINT_NAMES,
     "robot_type": "so_follower",
 }
+
+
+def _warn(message: str) -> None:
+    """MuJoCo's warnings, without the one about depth precision that macOS's OpenGL draws on every depth
+    picture: its default handler would also write each to MUJOCO_LOG.TXT in the working folder."""
+    if "ARB_clip_control" not in message:
+        print(f"MuJoCo: {message}", file=sys.stderr, flush=True)
+
+
+mujoco.set_mju_user_warning(_warn)
 
 
 def yaw_quat(yaw: float) -> np.ndarray:
@@ -98,6 +110,17 @@ def table_points(table: dict) -> np.ndarray:
     ys = y1 - (np.arange(columns) + 0.5) * table["texel"]
     grid_y, grid_x = np.meshgrid(ys, xs)
     return np.dstack([grid_x, grid_y, np.full_like(grid_x, table["height"])])
+
+
+def jar_outline(pose, lens: Lens, xy, jar: dict, table_height: float, top: float | None = None) -> np.ndarray:
+    """The pixels a standing jar's wall covers from a camera, up to `top` metres (default: all of it)."""
+    angles = np.linspace(0, 2 * np.pi, 48, endpoint=False)
+    circle = np.c_[jar["radius"] * np.cos(angles) + xy[0], jar["radius"] * np.sin(angles) + xy[1]]
+    rings = np.concatenate([np.c_[circle, np.full(len(circle), table_height + height)] for height in (0.0, jar["height"] if top is None else top)])
+    pixels = lens.project(to_camera(rings, pose))
+    mask = np.zeros((lens.height, lens.width), np.uint8)
+    cv2.fillConvexPoly(mask, cv2.convexHull(np.round(pixels).astype(np.int32)), 1)
+    return mask > 0
 
 
 def build_model(scene: dict, scene_dir: Path) -> mujoco.MjModel:
@@ -248,6 +271,7 @@ class BlockContainerEnv(gym.Env):
     def __init__(
         self,
         scene_dir: str | None = None,
+        demos_dir: str | None = None,
         start: int | None = None,
         jitter: float = 1.0,
         episode_length: int = 900,
@@ -255,10 +279,14 @@ class BlockContainerEnv(gym.Env):
         settle_success_steps: int = 15,
     ):
         """`start` picks one demo's block and jar positions; without it each reset draws one at random.
-        `jitter` scales the small random shift added to it, 3 mm and 3 degrees at 1."""
+        `jitter` scales the small random shift added to it, 3 mm and 3 degrees at 1. `demos_dir` is the
+        built demos' folder (default: SO101_SIM_DEMOS): with it the top camera's arm is drawn from their
+        real frames, and without it from the arm model alone."""
         super().__init__()
         self.scene_dir = Path(scene_dir or os.environ[SCENE_DIR_ENV])
         self.scene = json.loads((self.scene_dir / "scene.json").read_text())
+        self.demos_dir = demos_dir or os.environ.get(DEMOS_DIR_ENV)
+        self.arm_photos = self.wrist_photos = None
         self.task = TASK
         self.task_description = self.scene["prompt"]
         self.fps = FPS
@@ -283,6 +311,9 @@ class BlockContainerEnv(gym.Env):
         self._resting = 0
         self._pending: list[np.ndarray] = []
         self._taken: dict[str, list[tuple[int, np.ndarray]]] = {name: [] for name in CAMERAS}
+        self._photo: dict | None = None
+        self._block_start = np.zeros(7)
+        self._backdrop: tuple | None = None
 
     def _ensure_world(self) -> None:
         """Build on first use, so each process that renders owns its GL context."""
@@ -327,6 +358,18 @@ class BlockContainerEnv(gym.Env):
         self.top_shapes = self._option(GROUP_BASE, GROUP_ARM, GROUP_BLOCK)
         self.jar_only = self._option(GROUP_JAR)
         self.top_with_jar = self._option(GROUP_ARM, GROUP_BLOCK, GROUP_JAR)
+        self.arm_only = self._option(GROUP_ARM)
+        if self.demos_dir and (Path(self.demos_dir) / "meta" / "info.json").is_file():
+            from so_101.sim.demos import Demos
+
+            self.use_photos(Demos(Path(self.demos_dir)))
+
+    def use_photos(self, demos) -> None:
+        """Draw the arm in the top camera, and the wrist camera's whole view, from these demos' real frames."""
+        from so_101.sim.photo import ArmPhotos, WristPhotos
+
+        self.arm_photos = ArmPhotos(demos, self.scene, self._model)
+        self.wrist_photos = WristPhotos(demos, self.scene, self._model)
 
     @staticmethod
     def _option(*groups: int) -> mujoco.MjvOption:
@@ -395,6 +438,22 @@ class BlockContainerEnv(gym.Env):
         """Put the arm at follower readings, with no physics. Call `mj_forward` afterwards."""
         self.data.qpos[self.qadr] = self.units.to_qpos(values)
 
+    def set_joints_of(self, data: mujoco.MjData, values: np.ndarray) -> None:
+        """Put another copy of the world's arm at follower readings, ready to draw."""
+        data.qpos[:] = self.data.qpos
+        data.qpos[self.qadr] = self.units.to_qpos(values)
+        mujoco.mj_kinematics(self._model, data)
+        mujoco.mj_camlight(self._model, data)
+
+    def depth_of(self, data: mujoco.MjData, name: str, option: mujoco.MjvOption) -> np.ndarray:
+        """How far along a camera's view each pixel's surface is, in metres, far beyond the scene for none."""
+        renderer = self.renderers[name]
+        renderer.enable_depth_rendering()
+        renderer.update_scene(data, camera=self._mj_camera(name), scene_option=option)
+        depth = renderer.render()
+        renderer.disable_depth_rendering()
+        return cv2.remap(depth, *self.maps[name], cv2.INTER_NEAREST, borderValue=1e9)
+
     def block_pose(self) -> tuple[np.ndarray, np.ndarray]:
         return self.data.xpos[self.block_body].copy(), self.data.xmat[self.block_body].reshape(3, 3).copy()
 
@@ -434,14 +493,15 @@ class BlockContainerEnv(gym.Env):
 
     # Drawing.
 
-    def _pass(self, name: str, option: mujoco.MjvOption, shapes: bool = False, cover: np.ndarray | None = None):
+    def _pass(self, name: str, option: mujoco.MjvOption, shapes: bool = False, cover: np.ndarray | None = None, data: mujoco.MjData | None = None):
         """One pinhole picture from a camera, bent through its lens: its colours, or with `shapes` which
         geom each pixel shows, -1 for none. With `cover`, which geoms count, it also returns how much of
-        each pixel those geoms cover, between 0 and 1: a smooth edge to draw them over a photo with."""
+        each pixel those geoms cover, between 0 and 1: a smooth edge to draw them over a photo with.
+        `data` draws another copy of the world than the one being simulated."""
         renderer = self.renderers[name]
         if shapes:
             renderer.enable_segmentation_rendering()
-        renderer.update_scene(self.data, camera=self._mj_camera(name), scene_option=option)
+        renderer.update_scene(self.data if data is None else data, camera=self._mj_camera(name), scene_option=option)
         image = renderer.render()
         if not shapes:
             return cv2.remap(image, *self.maps[name], cv2.INTER_LINEAR)
@@ -479,33 +539,98 @@ class BlockContainerEnv(gym.Env):
         option = self._option(*groups) if groups else self.top_shapes if name == "top" else self.options[name]
         return self._pass(name, option, shapes=True)
 
-    def jar_shift(self) -> np.ndarray:
-        """How far, in the top camera's pixels, the jar stands from where its photo was taken."""
-        jar = self.scene["jar"]
+    def _top_pixel(self, point) -> np.ndarray:
         camera = self._model.camera("top").id
-        lens = self.lenses["top"]
-        middle = np.array([0.0, 0.0, jar["height"] / 2])
-        now = self.jar_pose()[0] + middle
-        home = np.array([*self.scene["cameras"]["top"]["jar"]["xy"], self.table_height]) + middle
-        position, rotation = self.data.cam_xpos[camera], self.data.cam_xmat[camera].reshape(3, 3)
-        return lens.project((now - position) @ rotation) - lens.project((home - position) @ rotation)
+        return self.lenses["top"].project((np.asarray(point) - self.data.cam_xpos[camera]) @ self.data.cam_xmat[camera].reshape(3, 3))
+
+    def jar_shift(self, photo_xy) -> np.ndarray:
+        """How far, in the top camera's pixels, the jar stands from where it stood for a photo of it."""
+        middle = np.array([0.0, 0.0, self.scene["jar"]["height"] / 2])
+        return self._top_pixel(self.jar_pose()[0] + middle) - self._top_pixel(np.array([*photo_xy, self.table_height]) + middle)
+
+    def photo_from(self, layout: dict | None) -> None:
+        """Take the block's and jar's pixels from this demo's first real frame from now on, or with None
+        go back to drawing them. Leaves the block lying where that demo's lay."""
+        if layout is None or self.arm_photos is None:
+            self._photo = None
+        elif self._photo is None or self._photo["episode"] != layout["episode"]:
+            self._photo = self._start_photo(layout)
+        if self._photo is not None:
+            self.set_block(layout["block"][:2], layout["block"][2])
+            mujoco.mj_forward(self._model, self.data)
+            self._block_start = self.data.qpos[self.block_qadr : self.block_qadr + 7].copy()
+        self._backdrop = None
+
+    def _start_photo(self, layout: dict) -> dict:
+        """A demo's first top camera frame, with which of its pixels are its jar and its block. Called
+        before the block and jar are placed, since it draws the block where the demo's lay."""
+        soft = lambda mask, grow: cv2.GaussianBlur(cv2.dilate(mask.astype(np.uint8), np.ones((grow, grow), np.uint8)).astype(np.float32), (0, 0), 1.2)[..., None]  # noqa: E731
+        top = self.scene["cameras"]["top"]
+        seen = layout.get("seen", layout["block"])  # where the top camera saw it, which is where its pixels are
+        self.set_block(seen[:2], seen[2])
+        mujoco.mj_forward(self._model, self.data)
+        block = self._pass("top", self._option(GROUP_BLOCK), shapes=True) >= 0
+        self.set_block(layout["block"][:2], layout["block"][2])
+        mujoco.mj_forward(self._model, self.data)
+        return {
+            "frame": self.arm_photos.demos.frame(layout["episode"], 0).astype(np.float32),
+            "jar": soft(jar_outline(top["pose"], self.lenses["top"], layout["jar"], self.scene["jar"], self.table_height), 7),
+            "block": soft(block, 9),  # wide enough for its soft shadow on the mat
+            "jar_xy": layout["jar"],
+            "block_at": self.data.xpos[self.block_body].copy(),
+            "episode": layout["episode"],
+        }
+
+    def block_untouched(self) -> bool:
+        """The block still lies where it was put at the start, to within a millimetre and half a degree."""
+        now = self.data.qpos[self.block_qadr : self.block_qadr + 7]
+        return bool(np.linalg.norm(now[:3] - self._block_start[:3]) < 0.001 and abs(now[3:] @ self._block_start[3:]) > 0.99999)
 
     def backdrop(self) -> np.ndarray:
-        """The top camera's real picture with the real jar where the simulated one stands."""
-        shift = self.jar_shift()
-        move = np.float32([[1, 0, shift[0]], [0, 1, shift[1]]])
-        cover = cv2.warpAffine(self.jar_cover, move, (self.width, self.height))[..., None]
-        photo = cv2.warpAffine(self.jar_photo, move, (self.width, self.height))
-        return self.plate * (1 - cover) + photo * cover
+        """The top camera's real picture with the real jar where the simulated one stands, and with the
+        real block too while a demo's first frame supplies them and the block lies untouched. A photo is
+        moved by whole pixels, which keeps it as sharp as it was taken."""
+
+        def moved(image, shift):
+            return cv2.warpAffine(image, np.float32([[1, 0, shift[0]], [0, 1, shift[1]]]), (self.width, self.height), flags=cv2.INTER_NEAREST)
+
+        if self._photo is None:
+            shift = np.round(self.jar_shift(self.scene["cameras"]["top"]["jar"]["xy"]))
+            key = (*shift, False)
+            if self._backdrop is None or self._backdrop[0] != key:
+                cover = moved(self.jar_cover, shift)[..., None]
+                self._backdrop = (key, self.plate * (1 - cover) + moved(self.jar_photo, shift) * cover)
+            return self._backdrop[1]
+        photo, untouched = self._photo, self.block_untouched()
+        jar_shift = np.round(self.jar_shift(photo["jar_xy"]))
+        block_shift = np.round(self._top_pixel(self.data.xpos[self.block_body]) - self._top_pixel(photo["block_at"])) if untouched else np.zeros(2)
+        key = (*jar_shift, *block_shift, untouched)
+        if self._backdrop is None or self._backdrop[0] != key:
+            cover = moved(photo["jar"], jar_shift)[..., None]
+            picture = self.plate * (1 - cover) + moved(photo["frame"], jar_shift) * cover
+            if untouched:
+                cover = moved(photo["block"], block_shift)[..., None]
+                picture = picture * (1 - cover) + moved(photo["frame"], block_shift) * cover
+            self._backdrop = (key, picture)
+        return self._backdrop[1]
 
     def render_camera(self, name: str) -> np.ndarray:
         self._colour(name)
         if name == "wrist":
-            return self._soften(self._pass(name, self.options[name]), name)
+            image = self._soften(self._pass(name, self.options[name]), name)
+            if self.wrist_photos is not None:
+                image = self.wrist_photos.paint(self, self._pass(name, self.options[name], shapes=True), self.depth_of(self.data, name, self.options[name]), image)
+            return image
         standing = self.jar_upright()
+        # What the real picture already shows: the arm's base, and the block while a demo's frame supplies it.
+        photographed = self.is_base | self.is_block if standing and self._photo is not None and self.block_untouched() else self.is_base
         image = self._pass(name, self.options[name] if standing else self.top_with_jar).astype(np.float32)
-        shapes, cover = self._pass(name, self.top_shapes if standing else self.top_with_jar, shapes=True, cover=~self.is_base)
-        drawn = (shapes >= 0) & ~self.is_base[shapes.clip(0)]
+        shapes, cover = self._pass(name, self.top_shapes if standing else self.top_with_jar, shapes=True, cover=~photographed)
+        drawn = (shapes >= 0) & ~photographed[shapes.clip(0)]
+        image = self._soften(image, name)
+        if self.arm_photos is not None:
+            image, beside = self.arm_photos.paint(self, shapes, self.depth_of(self.data, name, self.top_shapes if standing else self.top_with_jar), image)
+            cover = np.maximum(cover, beside)
         if standing:
             if (drawn & self._jar_from_top()).any():
                 # Where the jar's wall is in front of the arm or block, the real jar shows instead: nearly
@@ -519,7 +644,7 @@ class BlockContainerEnv(gym.Env):
         else:
             background = self.plate.astype(np.float32)
         cover = cover[..., None]
-        return (background * (1 - cover) + self._soften(image, name) * cover).clip(0, 255).astype(np.uint8)
+        return (background * (1 - cover) + image * cover).clip(0, 255).astype(np.uint8)
 
     def _soften(self, image: np.ndarray, name: str) -> np.ndarray:
         """How soft the real camera's images are, measured from its frames by `so101 sim build`."""
@@ -563,9 +688,14 @@ class BlockContainerEnv(gym.Env):
         if not exact and self.jitter:
             block += self.np_random.normal(0, 1, 3) * np.array([0.003, 0.003, np.radians(3.0)]) * self.jitter
             jar += self.np_random.normal(0, 0.003, 2) * self.jitter
+        # The demo this layout is from, if any: its first real frame then supplies the block's and jar's pixels.
+        source = next((entry for entry in starts if np.allclose(entry["block"], options.get("block", layout["block"])) and np.allclose(entry["jar"], options.get("jar", layout["jar"]))), None)
+        self.photo_from(source)
         self.set_block(block[:2], float(block[2]))
         self.set_jar(jar)
         mujoco.mj_forward(self._model, self.data)
+        self._block_start = self.data.qpos[self.block_qadr : self.block_qadr + 7].copy()
+        self._backdrop = None
         self._steps, self._resting = 0, 0
         self._pending.clear()
         self._taken = {name: [] for name in CAMERAS}
