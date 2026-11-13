@@ -339,8 +339,10 @@ class Follower:
     def mark(self) -> None:
         """Set each motor's torque_limit one below its max_torque_limit, the mark `check_marks` looks for,
         and keep each max_torque_limit. A motor restart copies max_torque_limit back, so the mark tells a
-        restart apart. A motor whose torque_limit still reads the value `check_marks` reported as
-        changed keeps it: only a restart, which reads max_torque_limit, is marked again."""
+        restart apart. Marking again, after the follower was lost, only a motor whose torque_limit
+        reads the mark or its max_torque_limit, a restart, is written: any other value was changed by
+        something else, such as the servo's protection, and is left as found. One `check_marks`
+        hadn't reported yet is reported on the next tick."""
         bus = self.inner.bus._connected_bus
         ids = {name: motor.id for name, motor in self.inner.bus.motors.items()}
         try:
@@ -348,15 +350,17 @@ class Follower:
                       zip(ids, bus.sync_read_register(list(ids.values()), "max_torque_limit", retries=2), strict=True)}
             marks = {name: max(value - 1, 0) for name, value in maxima.items()}
             kept = {}
-            if self.changed:
+            if self.marks:  # marking again: never over a value something else set
                 found = zip(ids, bus.sync_read_register(list(ids.values()), "torque_limit", retries=2), strict=True)
-                kept = {name: int(value) for name, value in found if self.changed.get(name) == int(value)}
+                kept = {name: int(value) for name, value in found if int(value) not in (marks[name], maxima[name])}
             if marking := [name for name in ids if name not in kept]:
                 bus.sync_write_register([ids[name] for name in marking], "torque_limit",
                                         [marks[name] for name in marking], retries=2)
         except Exception as error:
             raise FollowerLost(f"Setting the motors' restart marks failed: {error}") from error
-        self.marks, self.maxima, self.changed = marks, maxima, kept
+        # A kept value `check_marks` reported stays reported; any other it reports next.
+        self.marks, self.maxima = marks, maxima
+        self.changed = {name: value for name, value in kept.items() if self.changed.get(name) == value}
 
     def check_marks(self) -> None:
         """Raise FollowerLost when a motor's torque_limit is back at its max_torque_limit: it lost power or

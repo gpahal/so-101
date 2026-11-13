@@ -1310,6 +1310,15 @@ class ArmsTest(RigTest):
         rig.motors.failing = False
         rig.tick(3)
         self.assertEqual(gripper["torque_limit"], 300, "a timeout never re-marks a changed limit")
+
+        # Lowered again while the follower was lost: left as found too, and reported.
+        rig.motors.failing = True
+        rig.tick(2)
+        gripper["torque_limit"] = 200
+        rig.motors.failing = False
+        rig.tick(3)
+        self.assertEqual(gripper["torque_limit"], 200, "never written over, whatever value it was found at")
+        self.assertIn("gripper reads 200", rig.status()["fault"])
         elbow = rig.motors.registers[MOTORS.index("elbow_flex") + 1]
         self.assertEqual(elbow["torque_limit"], elbow["max_torque_limit"] - 1, "the others keep their mark")
 
