@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 from serial.tools import list_ports
 
-from so_101 import data
+from so_101 import connect, data
 from so_101.devices import CameraLookup, find_camera, get_control, set_controls, uvc_util, video_devices
 from so_101 import settings
 from so_101.report import Report
@@ -317,6 +317,9 @@ def check_calibration(report: Report, arm: Arm, bus: "SerialMotorsBus") -> None:
         )
         return
     positions = bus.sync_read("Present_Position", normalize=False, num_retry=2)
+    if arm.name == "follower":
+        check_follower_limits(report, arm, bus, positions)
+        return
     outside = [
         f"{m} at {p} (range {cal.range_min}-{cal.range_max})"
         for m, p in positions.items()
@@ -327,6 +330,32 @@ def check_calibration(report: Report, arm: Arm, bus: "SerialMotorsBus") -> None:
                     fix=f"a horn or gear may have slipped; {fix}")
     else:
         report.ok(group, f"calibration matches the motors ({arm.calibration_file.name})")
+
+
+def check_follower_limits(report: Report, arm: Arm, bus: "SerialMotorsBus", positions: dict[str, int]) -> None:
+    """Every command that connects the follower aims a joint past its limits at the limit, so the torque
+    pulls it back in, and refuses one more than `connect.OVERSHOOT_MAX_STEPS` past (`connect.hold_where_it_is`).
+    The motors store the file's ranges as their limits, which `check_calibration` has just compared."""
+    limits = {m: (bus.calibration[m].range_min, bus.calibration[m].range_max) for m in positions}
+    past = connect.past_limits(positions, limits)
+    far = {m: n for m, n in past.items() if n > connect.OVERSHOOT_MAX_STEPS}
+    near = {m: n for m, n in past.items() if n <= connect.OVERSHOOT_MAX_STEPS}
+    if far:
+        report.fail(
+            arm.name,
+            f"joints too far past their calibrated limits to connect: {connect.describe_past(far, limits, positions)}",
+            fix="with the motors off, move each back inside its range by hand; if it reads past again, "
+                f"a horn or gear may have slipped: `uv run so101 calibrate {arm.name}`",
+        )
+    elif near:
+        report.warn(
+            arm.name,
+            f"joints resting past their calibrated limits: {connect.describe_past(near, limits, positions)}",
+            fix="connecting turns the torque on there and pulls each back to its limit, a twitch of that many steps; "
+                "to avoid it, rest the arm a little away from that stop",
+        )
+    else:
+        report.ok(arm.name, f"calibration matches the motors ({arm.calibration_file.name})")
 
 
 # --- Cameras --------------------------------------------------------------------------------------

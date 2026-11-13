@@ -713,6 +713,7 @@ def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     if ns.policy not in s.remote:
         sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
     recipe = s.remote[ns.policy]
+    remote.refuse_action_steps(ns.policy, ns.action_steps)
     config = task.policy_config(ns.revision, ns.policy)
     remote.start_server(
         repo=task.policy_for(ns.policy),
@@ -737,7 +738,8 @@ def add_task(p: argparse.ArgumentParser) -> None:
 
 def add_policy_flags(p: argparse.ArgumentParser, verb: str, remote_flag: bool) -> None:
     """Which model a command drives or serves, and how; `verb` goes in --policy's help."""
-    p.add_argument("--action-steps", type=int, help="actions to carry out before predicting again (default: the model's trained value)")
+    p.add_argument("--action-steps", type=int, help="actions to carry out before predicting again (default: the model's trained value; "
+                   "not for pi0.5 on the cloud GPU, which uses real-time chunking)")
     p.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help=f"which model to {verb} (default: act)")
     if remote_flag:

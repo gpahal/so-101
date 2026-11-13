@@ -88,7 +88,8 @@ class FakeMotors:
     ("goal_position", goal) and ("torque_enable", enabled). While `failing` is set, every read times
     out, as when the bus stops answering. `status` gives a motor's alarm bits, which every reply from it
     carries, as an overload's 32. A motor with its torque off stays where it is put, as a
-    hand leaves it: set it with `move_by_hand`.
+    hand leaves it: set it with `move_by_hand`, even past its position limits. A goal written past
+    them is stored as the limit, as the STS3215 stores it.
 
     The motors behave like the STS3215 around power: `power_off` turns their torque off and makes
     them silent, and writes to them go nowhere; `power_on` brings them back with torque off and
@@ -264,7 +265,10 @@ class FakeMotors:
     def _write(self, motor_id: int, name: str, value: int) -> None:
         if not self.powered:
             return
-        self.registers[motor_id][name] = int(value)
+        register = self.registers[motor_id]
+        if name == "goal_position":  # the STS3215 stores a goal past its position limits as the limit
+            value = min(max(int(value), register["min_position_limit"]), register["max_position_limit"])
+        register[name] = int(value)
         if name == "goal_position":
             self.registers[motor_id]["torque_enable"] = 1  # as the STS3215 does
 

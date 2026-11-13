@@ -182,12 +182,12 @@ job_timeout = "1h"
 # encoder steps (0-4095), the same for every task. Pick a folded pose that stays put with the power
 # off, move the arm there by hand, and save it with `uv run so101 pose --save-rest`, which replaces
 # the rest_pose and rest_pose_calibration lines below with the ones it saves.
-rest_pose = { shoulder_pan = 2049, shoulder_lift = 845, elbow_flex = 3025, wrist_flex = 2864, wrist_roll = 2039, gripper = 857 }
+rest_pose = { shoulder_pan = 2026, shoulder_lift = 853, elbow_flex = 3032, wrist_flex = 2725, wrist_roll = 2026, gripper = 870 }
 # The first 12 hex digits of the follower calibration file's SHA-256 when rest_pose was saved, which
 # `pose --save-rest` writes. Recalibrating changes where each step count puts a joint, so `serve`
 # refuses to start when the calibration file no longer matches, or when this line is missing:
 # save the rest pose again. `so101 check` only warns about either.
-rest_pose_calibration = "3b1efd26e3ea"
+rest_pose_calibration = "3aceb365a7e9"
 # Seconds of the arm's actual motion each Rewind plays back, newest first, in real time. Short
 # enough to undo only the mistake; press Rewind again to go back another rewind_s, never past the
 # start of the attempt.
