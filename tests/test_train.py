@@ -29,6 +29,24 @@ class BaseTest(unittest.TestCase):
         self.assertIsNone(cli.default_base("act"))
         self.assertEqual(cli.default_base("pi05"), "lerobot/pi05_base")
 
+    def test_pi05s_flags_train_the_whole_model_with_32_bit_weights(self) -> None:
+        # Parsed by LeRobot's own training config, so a renamed or mistyped flag fails here, not in a paid job.
+        import draccus
+        import lerobot.policies  # noqa: F401  registers the policy types
+        import torch
+        from lerobot.configs.train import TrainPipelineConfig
+
+        config = draccus.parse(TrainPipelineConfig, args=[
+            "--policy.type=pi05", "--dataset.repo_id=x/y", "--policy.push_to_hub=false", *cli.policy_flags("pi05", None)])
+        policy = config.policy
+        self.assertEqual((policy.train_expert_only, policy.freeze_vision_encoder), (False, False))
+        # bfloat16 weights can't hold an update under 1/512 of a weight: only the arithmetic may be bfloat16.
+        self.assertEqual((policy.dtype, config.accelerator.mixed_precision), (torch.float32, "bf16"))
+        self.assertTrue(policy.gradient_checkpointing)
+        self.assertEqual(policy.empty_cameras, 0)  # a blank third camera only costs time
+        self.assertTrue(config.dataset.image_transforms.enable)
+        self.assertEqual((config.ema.type, config.ema.decay), ("constant", 0.99))
+
     def test_a_base_must_be_a_hub_model_name(self) -> None:
         for text in ("act_so101_block-container", "gpahal/", "/act", "a/b/c", "gpahal/act@"):
             with self.subTest(text=text), self.assertRaises(ConfigError):

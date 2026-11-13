@@ -455,14 +455,32 @@ POLICY_FLAGS = {
     "act": [],
     "pi05": [
         "--policy.pretrained_path=lerobot/pi05_base",
-        # Train only the action model: on SO-101 this scored 130/200, against 4/110 with LoRA adapters.
-        "--policy.train_expert_only=true",
-        "--policy.freeze_vision_encoder=true",
+        # Train the whole model, as Physical Intelligence's and LeRobot's own pi0.5 recipes do. The first
+        # recipe here trained only the action model, and after 12k steps its plans were 2.6 degrees from
+        # the demos it was trained on, against 0.83 degrees for ACT.
+        "--policy.train_expert_only=false",
+        "--policy.freeze_vision_encoder=false",
+        # Without it this batch ran out of an H200's 141 GB.
         "--policy.gradient_checkpointing=true",
-        # 32-bit took 30 s a step on an A100, against 4.6 s for this.
-        "--policy.dtype=bfloat16",
-        # The model has three camera slots and this kit has two cameras.
-        "--policy.empty_cameras=1",
+        # Keep the weights in 32-bit and do the arithmetic in bfloat16. `--policy.dtype=bfloat16` keeps
+        # the weights themselves in bfloat16, where an update under 1/512 of a weight rounds away: after
+        # that 12k-step run, 92% of the action model's 575M bfloat16 weights, and every one that started
+        # at 0.01 or more, were bit for bit the base model's. 32-bit arithmetic as well took 30 s a step
+        # on an A100.
+        "--policy.dtype=float32",
+        "--accelerator.mixed_precision=bf16",
+        # No `--policy.empty_cameras=1` for the model's third camera slot. It adds a blank image the
+        # model is masked from reading, so it changes nothing the model learns: on 8 demo frames the
+        # loss differed by 1e-7 and the actions by 0.0001 degrees with and without it. It does cost a
+        # third of the vision model's work and 256 of the 968 tokens: 2.33 s a step against 1.7 s.
+        # LeRobot's random brightness, contrast, colour, sharpness, shifts and rotations of up to 5
+        # degrees, at most 3 per frame. openpi always trains with augmentation of this kind. The first
+        # model saw only the demos' light: under light that blew out 41% of the top camera's pixels it
+        # held the block in 4 of 8 attempts, against 9 of 10 under the demos' light.
+        "--dataset.image_transforms.enable=true",
+        # Publish a running average of the weights, with openpi's default decay.
+        "--ema.type=constant",
+        "--ema.decay=0.99",
     ],
 }
 # pi0.5's tokenizer. Its licence is accepted per Hugging Face account, and approval isn't instant.
@@ -725,6 +743,7 @@ def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
         action_steps=resolve_action_steps(ns.action_steps, config),
         target=ns.target or recipe.job_target,
         timeout=ns.timeout or recipe.job_timeout,
+        pin_unused_actions=recipe.pin_unused_actions,
     )
 
 

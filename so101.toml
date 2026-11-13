@@ -145,19 +145,33 @@ rtx-pro-6000 = 0.05
 a100-large = 0.071
 
 [train.pi05]
-# 12k steps and about 10 hours and $27 at 100 demos. An A100 takes 1.6x as long (about 16 hours and
-# $39), and an A10G can't fit this batch size.
-# 6k steps scored 27/40 at 50 demos in the recipe's source; longer runs haven't been tested on a robot.
+# 300 steps per demo is 30k steps at 100 demos, the length of Physical Intelligence's and LeRobot's
+# own pi0.5 fine-tunes. The recipe (`POLICY_FLAGS` in src/so_101/cli.py) trains the whole model from
+# lerobot/pi05_base with 32-bit weights, bfloat16 arithmetic, image augmentation and averaged weights.
+# It uses about 87 GB of GPU memory at this batch size, so it needs an H200 or an RTX PRO 6000.
+# An H200 measured 1.67 to 1.74 s a step: 30k steps take about 15 hours and $74. An RTX PRO 6000
+# measured 4.03 s a step, against 2.33 s on the H200, when the recipe still had a blank third camera:
+# about 34 hours and $94 at most.
+# Compiling the model (`--policy.compile_model=true --policy.compile_mode=default`) measured 1.05 s
+# a step on the H200 but 135 of its 141 GB, so it isn't used.
+# The first recipe trained only the action model with bfloat16 weights, for 120 steps per demo. That
+# model completes the task under the demos' light and fails under other light; cli.py says why the
+# recipe changed. This recipe hasn't been tested on a robot yet.
 # Needs access to google/paligemma-3b-pt-224 on Hugging Face.
-job_target = "rtx-pro-6000"
-steps_per_demo = 120
+job_target = "h200"
+steps_per_demo = 300
 batch_size = 32
 num_workers = 12
-checkpoints = 2
+# A checkpoint of this recipe is about 83 GB in the model repo: the 32-bit model, its averaged copy,
+# and the optimizer's and the average's state, each a multiple of the model's 16.6 GB. Three of them
+# need a Hugging Face plan with more than the free 100 GB of private storage (Pro has 1 TB), and
+# LeRobot stops the run if an upload fails. They are saved every 10k steps at 100 demos, so a run
+# that stops early loses 5 hours at most. The finished model is the 16.6 GB of averaged weights.
+checkpoints = 3
 
 [train.pi05.seconds_per_step]
-rtx-pro-6000 = 2.9
-a100-large = 4.6
+h200 = 1.75
+rtx-pro-6000 = 4.1
 
 # `uv run so101 server start <task> --policy <policy>`, then `uv run so101 run <task> --policy <policy>
 # --remote`: run a model on a Hugging Face Jobs GPU while the arm and cameras stay on this Mac.
@@ -171,6 +185,15 @@ job_timeout = "1h"
 [remote.pi05]
 job_target = "l4x1"
 job_timeout = "1h"
+# pi0.5 has 32 action columns and this arm uses 6. Training never taught the model where to move the
+# other 26, and LeRobot's sampler lets them drift, which makes the 6 real ones wobble. true gives the
+# model those columns as it saw them in training. On 24 demo frames on an L4 that made the planned
+# motion 3 times smoother (0.73 to 0.23 degrees per step squared; the demos measure 0.11) with the
+# same error against the demos and the same 0.41 s per chunk. On the arm the shoulder lift changed
+# direction 15 and 16 times in two attempts with it, against 54 to 88 in three without. false serves
+# LeRobot's sampler unchanged, to compare. `run` and `serve` refuse a server started with the
+# other value, so stop and start the server after changing it.
+pin_unused_actions = true
 
 # `uv run so101 serve [task]`: the control center, a web page for supervising the follower from a
 # phone or laptop over Tailscale. `serve` checks every setting here before it starts, and refuses to
