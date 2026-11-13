@@ -47,6 +47,30 @@ class ConnectTest(unittest.TestCase):
         self.assertEqual(motors.writes[-1], ("torque_enable", True), "aimed where it is before the torque is on")
         robot.disconnect()
 
+    def test_a_lost_goal_write_is_sent_again_and_one_that_never_lands_leaves_the_torque_off(self) -> None:
+        # A goal write gets no reply, so a garbled one would leave a servo its old goal.
+        for dropped, connects in ((2, True), (connect.GOAL_TRIES, False)):
+            with self.subTest(dropped=dropped):
+                clock = FakeClock()
+                motors = FakeMotors(clock, calibration(), REST)
+                for i, register in motors.registers.items():
+                    register["goal_position"] = REST[motors.names[i]] + 400
+                connect.install()
+                robot = follower(motors)
+                motors.drop_goal_writes = dropped
+                if connects:
+                    robot.connect(calibrate=False)
+                    clock.advance(2.0)
+                    self.assertEqual(motors.present(), REST)
+                    self.assertTrue(motors.torqued())
+                    robot.disconnect()
+                else:
+                    with self.assertRaisesRegex(ConnectionError, "torque stays off"):
+                        robot.connect(calibrate=False)
+                    clock.advance(2.0)
+                    self.assertFalse(any(r["torque_enable"] for r in motors.registers.values()))
+                    self.assertEqual(motors.present(), REST, "never driven to the old goal")
+
 
 if __name__ == "__main__":
     unittest.main()

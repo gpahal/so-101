@@ -35,6 +35,7 @@ import logging
 import traceback
 from collections.abc import Callable
 
+from so_101 import connect
 from so_101.control.previews import Previews
 from so_101.scan import ERROR_BITS, Reply
 
@@ -496,7 +497,9 @@ class Follower:
             try:
                 self.read_joints()
                 self.mark()
-                self.arm.send_action(dict(self.present))  # where the arm is now, never the old goal
+                connect.hold_where_it_is(self.inner.bus)  # where the arm is now, never the old goal, read back
+                self.read_joints()
+                self.arm.goal = dict(self.present)
                 self.inner.bus.enable_torque(num_retry=2)
                 self.lost = False
                 self.log("follower_back", pose=dict(self.present))

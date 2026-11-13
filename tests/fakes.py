@@ -129,6 +129,7 @@ class FakeMotors:
         self.sag: dict[str, int] = {}
         self.writes: list[tuple[str, object]] = []
         self.status: dict[str, int] = {}  # motor -> the alarm bits in its replies
+        self.drop_goal_writes = 0  # how many Goal_Position sync writes are lost on the bus, as a garbled packet
         self.failing = False
         # motor -> how many torque-off writes it acknowledges without carrying out, as a servo may after
         # a garbled packet: its torque stays on and a hand can't move it.
@@ -237,6 +238,9 @@ class FakeMotors:
         """A sync write gets no reply, so it never fails: unpowered motors just miss it."""
         name = self._register(name)
         self._settle()
+        if name == "goal_position" and self.drop_goal_writes > 0:
+            self.drop_goal_writes -= 1
+            return
         for i, value in zip(ids, values, strict=True):
             self._write(i, name, value)
         if name == "goal_position":

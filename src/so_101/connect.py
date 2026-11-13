@@ -18,9 +18,23 @@ import sys
 _INSTALLED = "_so101_holds_where_it_is"
 
 
+GOAL_TRIES = 3  # a goal write gets no reply, so a garbled one goes unnoticed: read it back, and try again
+
+
 def hold_where_it_is(bus) -> None:
-    """Aim every motor of `bus` at where it is, in raw steps, so turning its torque on moves nothing."""
-    bus.sync_write("Goal_Position", bus.sync_read("Present_Position", normalize=False, num_retry=2), normalize=False)
+    """Aim every motor of `bus` at where it is, in raw steps, so turning its torque on moves nothing.
+    A sync write gets no reply, so each motor's goal is read back. A motor whose goal still isn't
+    where it is after GOAL_TRIES raises ConnectionError, before any torque is turned on: that motor
+    would drive to its old goal."""
+    for _ in range(GOAL_TRIES):
+        present = bus.sync_read("Present_Position", normalize=False, num_retry=2)
+        bus.sync_write("Goal_Position", present, normalize=False)
+        goals = bus.sync_read("Goal_Position", normalize=False, num_retry=2)
+        if not (missed := [motor for motor, steps in present.items() if goals[motor] != steps]):
+            return
+    raise ConnectionError(f"Aiming {', '.join(missed)} where it is didn't take after {GOAL_TRIES} tries, so its "
+                          "torque stays off rather than drive it to an old goal. Check the arm's cables and power, "
+                          "then try again.")
 
 
 def install() -> None:

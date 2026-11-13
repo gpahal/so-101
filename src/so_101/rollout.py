@@ -106,8 +106,10 @@ def release(robot) -> None:
 
 def engage(robot) -> None:
     """Turn the motors back on where the arm is now: they'd otherwise jump to their last goal."""
+    from so_101 import connect
+
     bus = robot.inner.bus
-    bus.sync_write("Goal_Position", bus.sync_read("Present_Position", num_retry=2))
+    connect.hold_where_it_is(bus)  # read back: a lost goal write would leave a motor its old goal
     bus.enable_torque()
 
 
