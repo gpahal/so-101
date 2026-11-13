@@ -1,11 +1,9 @@
-# SO-101 hardware settings. Every `uv run so101 ...` command and the Python helpers read this file.
+# SO-101 hardware settings. Every `uv run so101 ...` command reads this file.
 #
 # Ports can change when a board is replugged or moved to another USB socket.
 # `uv run so101 find-port <arm>` detects the board and rewrites `port` and `serial_number` here.
 # If a saved port is gone, commands look the board up by `serial_number` instead.
 #
-# Environment variables override this file: SO101_FOLLOWER_PORT, SO101_LEADER_PORT,
-# SO101_FOLLOWER_ID, SO101_LEADER_ID. `uv run so101 env` prints them all.
 # SO101_CONFIG points every command at a different settings file.
 
 # Calibration files, relative to this file. Each arm's lands in <calibration_dir>/<arm>/<id>.json.
@@ -23,15 +21,17 @@ serial_number = "5C82109414"
 
 [teleop]
 fps = 60
-# Max a follower joint may move per control step, while teleoperating and recording: degrees, or
-# percent of its range for the gripper. Smooths sudden jumps. Set to 0 to turn the limit off.
+# Max a follower joint may move per control step, in teleop, record, run and serve, the policy's
+# goals included: degrees, or percent of its range for the gripper. Smooths sudden jumps. run and
+# serve use the same limit as recording, because a lower one changes the arm's path. Set to 0 to
+# turn the limit off; a negative or non-numeric value stops every command, because LeRobot would move
+# each joint by it on every goal.
 max_relative_target = 10
 
 # Cameras. Commands find each camera by its USB vendor:product id (`usb_id`), so it doesn't matter
 # which socket it's in or what else is plugged in (on macOS). `index` is the OpenCV device index,
-# used only for a camera without a usb_id or when two cameras share one; `uv run so101 cameras`
-# lists what's connected. rotation is 0, 90, 180 or -90.
-# Environment variables force an index: SO101_CAMERA_FRONT_INDEX, SO101_CAMERA_WRIST_INDEX.
+# optional with a usb_id (0 when left out), and used only for a camera without a usb_id or when two
+# cameras share one; `uv run so101 cameras` lists what's connected. rotation is 0, 90, 180 or -90.
 #
 # [cameras.<name>.controls] is optional. Before any command opens the cameras, `so101` sets each
 # listed UVC control with uvc-util (install it with scripts/install-uvc-util.sh) and checks it
@@ -39,8 +39,8 @@ max_relative_target = 10
 # camera's controls and their ranges (that's the wrist camera's usb_id, with 0x before each part).
 # exposure-time-abs is nominally in units of 0.1 ms; the wrist camera's run off (see below).
 
-# Fixed camera looking at the workspace.
-[cameras.front]
+# Fixed camera above the workspace, looking down on the mat and the arm.
+[cameras.top]
 index = 0
 width = 640
 height = 480
@@ -48,21 +48,29 @@ fps = 30
 rotation = 0
 usb_id = "32e6:9221"
 
-[cameras.front.controls]
+[cameras.top.controls]
 # Anti-flicker for 50 Hz mains (India). 0 = off, 1 = 50 Hz, 2 = 60 Hz.
 power-line-frequency = 1
-# Fixed 20 ms exposure: a whole number of the lights' 10 ms flicker cycles, so no banding. Auto
-# exposure blows out the walls and bowl; shorter exposures (2.5, 5 ms) band and go dark. Picked from a
-# sweep of exposure, gamma, contrast and saturation: 20 ms with gamma 80 is bright with nothing clipped.
-# Fixed exposure doesn't adapt to light: if the room gets much brighter, try 10 ms with gamma 100.
+# Fixed 20 ms exposure: two whole cycles of the lights' 10 ms flicker, so no banding (0.2%
+# measured). 30 ms looked a little richer but smeared the arm in the first recorded demos when it
+# moved fast; 20 ms cuts that blur by a third. Gamma 150 puts the mat at about 40/255 and the white
+# wall and arm near 211/255, with 0.16% of pixels clipped. Contrast 36 crushes the mat to 13/255;
+# gamma 220 washes the picture out.
+# The camera gives 20 frames/s at every exposure from 10 to 30 ms.
+# Fixed exposure doesn't adapt to light: if the room gets brighter, lower gamma first.
 auto-exposure-mode = 1
 exposure-time-abs = 200
-gamma = 80
+gamma = 150
+# Fixed white balance, so colours don't shift as the arm and props move through the picture.
+# 4000 K turns the white wall neutral. Auto must be off before the temperature takes effect, so it
+# comes first.
+auto-white-balance-temp = 0
+white-balance-temp = 4000
+# Saturation 64, up from the default 57, so the red block and amber container stand out more.
+saturation = 64
 # The camera's defaults, listed so applying this config also undoes any other values left set.
-# white-balance-temp is left out: this camera accepts it but the picture doesn't change.
 brightness = 0
 contrast = 32
-saturation = 57
 
 # Camera on the gripper.
 [cameras.wrist]
@@ -76,24 +84,26 @@ usb_id = "32e6:9005"
 [cameras.wrist.controls]
 # This camera ignores power-line-frequency, so tube lights on 50 Hz mains put rolling bands in
 # its picture. A fixed exposure of a whole number of flicker cycles avoids them (auto measured 5.3%
-# flicker), but this camera's exposure units run about 12% off: a sweep found the band-free values
-# at 114, about 228 and 285, while 200 (nominally 20 ms) measured 2.7%. Retune from those values.
-# A longer exposure slows the camera (40 ms: 14 fps).
+# flicker), but this camera's exposure units run about 12% off: the band-free values are 114,
+# about 228 and 285. Values between them band (140 to 185 measured 3-8% flicker).
+# 228 with gamma 120 gives a black mat, a white wall and a saturated red block, with 0.5-1% of
+# pixels clipped and none on the gripper fingers. 114 needed gamma 200 to be bright enough, which
+# turned the mat milky grey and kept the brightest 1% under 195/255: a pale, flat picture. Higher
+# gamma at 228 clips the fingers (25% of their pixels at gamma 180).
 # Fixed exposure doesn't adapt to light: if images get too dark or bright, adjust gamma first.
-# Tuned for the wooden table: the shortest band-free exposure leaves highlight headroom, so red
-# maxed out in at most 11% of pixels just before a grasp, against 31-63% at 200. Gamma 130 with
-# brightness -10 sets the mid-tones. Reflections off the table still clip in a small stripe.
-# White balance isn't set here, and the picture can shift: it turned pink around the release in
-# 5 of 60 demos.
 auto-exposure-mode = 1
-exposure-time-abs = 114
-gamma = 130
-brightness = -10
-# The camera's defaults, listed so applying this config also undoes any other values left set.
-saturation = 25
-contrast = 27
+exposure-time-abs = 228
+gamma = 120
+brightness = 0
+# Auto white balance stays on: every fixed temperature from 3600 to 6500 K tinted this camera's
+# whites green or yellow, while auto keeps them neutral.
+auto-white-balance-temp = 1
+# Contrast 32 and saturation 40, up from the defaults 27 and 25, which looked washed out.
+contrast = 32
+saturation = 40
 
-# Where `so101 record` saves demos: <dir>/<task>/sessions/, plus edits and the training dataset.
+# Where `so101 record` saves demos (<dir>/<task>/sessions/) and `so101 serve` its runs
+# (<dir>/<task>/runs/), plus edits and the training dataset.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.
 # The environment variable SO101_DATA_DIR overrides it.
 [data]
@@ -113,17 +123,17 @@ device = "mps"
 # prices. Remote runs need `uv run hf auth login` and credit on your Hugging Face account. `--target
 # local` trains on this Mac instead, for ACT only, and takes days at these settings.
 # The job's timeout stops it and its billing, and a job that hits it loses work since its last
-# checkpoint. It's 2.5x the expected time, worked out from the steps and seconds_per_step, plus 10
-# minutes of start-up, rounded up to whole hours. Add a flavor's measured speed to use it.
+# checkpoint. It's 2.5x the expected time (the steps times seconds_per_step, plus 10 minutes of
+# start-up), rounded up to whole hours. Add a flavor's measured speed to use it.
 # steps_per_demo sets the steps from the demos kept after edits, so each demo is seen as often when
 # you add more. checkpoints sets how many get saved, whatever the length of the run.
-# Speeds measured in November 2026 on 50 demos (17,970 frames). They don't depend on the number of demos.
+# Speeds measured in November 2026 on 50 demos (17,970 frames). They don't depend on the number of demos:
+# ACT on 100 demos (57,723 frames) ran at 0.046 s a step on rtx-pro-6000.
 
 [train.act]
-# 100k steps and about 1.5 hours and $4 at 50 demos; 200k and about 3 hours and $8 at 100. An A100
-# takes 1.4x as long (about 2 hours and $5 at 50 demos) and an A10G 3.3x (4.5 hours and $5-7). ACT's
+# 200k steps and about 3 hours and $8 at 100 demos (the first run took 2 hours 35 minutes, about
+# $7). An A100 takes 1.4x as long (about 4 hours and $10) and an A10G 3.3x (about 10 hours). ACT's
 # error on unseen demos levels off early, so this length is cheap insurance rather than a known need.
-# Its learning rate is constant, so you can test the checkpoints along the way as well as the final one.
 job_target = "rtx-pro-6000"
 steps_per_demo = 2000
 batch_size = 8
@@ -135,8 +145,8 @@ rtx-pro-6000 = 0.05
 a100-large = 0.071
 
 [train.pi05]
-# 6k steps and about 5 hours and $14 at 50 demos; 12k and about 10 hours and $27 at 100. An A100
-# takes 1.6x as long (about 8 hours and $19 at 50 demos), and an A10G can't fit this batch size.
+# 12k steps and about 10 hours and $27 at 100 demos. An A100 takes 1.6x as long (about 16 hours and
+# $39), and an A10G can't fit this batch size.
 # 6k steps scored 27/40 at 50 demos in the recipe's source; longer runs haven't been tested on a robot.
 # Needs access to google/paligemma-3b-pt-224 on Hugging Face.
 job_target = "rtx-pro-6000"
@@ -161,3 +171,60 @@ job_timeout = "1h"
 [remote.pi05]
 job_target = "l4x1"
 job_timeout = "1h"
+
+# `uv run so101 serve [task]`: the control center, a web page for supervising the follower from a
+# phone or laptop over Tailscale. `serve` checks every setting here before it starts, and refuses to
+# start on a missing or partial rest pose or a value out of its range; `so101 check` warns about the
+# same problems. Only blame_s is used elsewhere: `runs`, `build --with` and `review --runs` read it to
+# find the suspect frames, and stop if it isn't a number of 0 or more.
+[control]
+# Where Reset sends the follower at the end of every attempt: each of the six motors' raw position in
+# encoder steps (0-4095), the same for every task. Pick a folded pose that stays put with the power
+# off, move the arm there by hand, and save it with `uv run so101 pose --save-rest`, which replaces
+# the rest_pose and rest_pose_calibration lines below with the ones it saves.
+rest_pose = { shoulder_pan = 2049, shoulder_lift = 845, elbow_flex = 3025, wrist_flex = 2864, wrist_roll = 2039, gripper = 857 }
+# The first 12 hex digits of the follower calibration file's SHA-256 when rest_pose was saved, which
+# `pose --save-rest` writes. Recalibrating changes where each step count puts a joint, so `serve`
+# refuses to start when the calibration file no longer matches, or when this line is missing:
+# save the rest pose again. `so101 check` only warns about either.
+rest_pose_calibration = "3b1efd26e3ea"
+# Seconds of the arm's actual motion each Rewind plays back, newest first, in real time. Short
+# enough to undo only the mistake; press Rewind again to go back another rewind_s, never past the
+# start of the attempt.
+rewind_s = 2.5
+# Backstop for an attempt nobody ends: seconds of policy driving, not counting pauses, rewinds or
+# Teleop. Demos record for up to 30 s (episode_time_s in tasks.toml), so 45 s gives a policy half as
+# long again to finish or retry, while a forgotten attempt still ends. Only policy time counts because
+# the backstop limits how long the policy gets: a pause to look closer or step away never ends an
+# attempt. At the limit the arm returns to rest, the attempt is saved, and `serve` asks how it went.
+# The right arrow or Reset is the normal way an attempt ends. `so101 run` keeps [run] duration_s for
+# comparable evaluations.
+attempt_limit_s = 45
+# Backstop of Teleop seconds in one attempt. 3 minutes is six times a 30 s demo, so it doesn't cut
+# a slow correction or demo short, but a forgotten one stops recording.
+human_limit_s = 180
+# Where Teleop from rest starts: "start-pose" first drives to the demos' start pose, so human demos
+# start where the policy's attempts do; "rest" hands over at the rest pose.
+teleop_from_rest = "start-pose"
+# When an operator pauses without rewinding, the last blame_s seconds of frames where the policy
+# drove are marked as the suspect frames, kept out of training. Waiting frames, where it sent no
+# action, don't count. The same as rewind_s, so marking a mistake covers what one Rewind would have
+# undone.
+blame_s = 2.5
+# What a running policy does when the controlling page stops polling for link_timeout_s seconds:
+# "pause" holds the arm, so a policy never runs unsupervised; "continue" keeps it running.
+on_link_loss = "pause"
+# The page polls 4 times a second, so 3 s is 12 missed polls: a real dropout, not a slow phone. At
+# least 1 s, so a few slow polls never count as a lost link.
+link_timeout_s = 3
+# "tailscale" listens only on this computer's Tailscale address, or on 127.0.0.1 behind HTTPS when
+# `tailscale serve` offers the port, and falls back to 127.0.0.1 with a warning when Tailscale isn't
+# running. "127.0.0.1" allows only this computer's browser. It never listens on 0.0.0.0. The checks of
+# Tailscale's routes are in the README, under The control page.
+bind = "tailscale"
+# The control page's port: `serve` serves the page at http://<address>:<port>/.
+port = 8101
+# Frames per second of each camera preview on the page, 320 px wide. Enough to see what the robot
+# sees, at a sixth of the cameras' 30 fps, so previews over Tailscale stay light on a phone. When
+# the control loop falls under 95% of the task's fps, previews drop to half this rate, then stop.
+preview_fps = 5

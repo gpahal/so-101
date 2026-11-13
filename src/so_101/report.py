@@ -8,7 +8,7 @@ Status = Literal["PASS", "WARN", "FAIL"]
 
 @dataclass(frozen=True)
 class Result:
-    group: str  # e.g. "follower", "front camera", "dataset"
+    group: str  # e.g. "follower", "top camera", "dataset"
     status: Status
     detail: str
     fix: str = ""

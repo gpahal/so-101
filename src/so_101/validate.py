@@ -5,7 +5,9 @@ from pathlib import Path
 
 import numpy as np
 
-from so_101.dataset_io import column, episode_frames, episode_length, episode_table, load_meta
+from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+
+from so_101.dataset_io import column, episode_frames, episode_table
 from so_101.report import Report
 
 # A joint counts as moved when its commanded position spans at least this much (degrees; the
@@ -17,13 +19,8 @@ MAX_LAG_S = 0.5
 
 @dataclass(frozen=True)
 class DatasetSummary:
-    episodes: int
     lengths: list[int]  # frames per episode
     fps: int
-
-
-def joint_name(name: str) -> str:
-    return name.removesuffix(".pos")
 
 
 def tracking(
@@ -49,7 +46,7 @@ def tracking(
     max_lag = max(0, min(int(MAX_LAG_S * fps), min(len(c) for c, _ in episodes) // 4))
     still, problems, lags, errors = [], [], [], []
     for j, raw_name in enumerate(names):
-        name = joint_name(raw_name)
+        name = raw_name.removesuffix(".pos")
         cmd_span = max(float(np.ptp(cmd[:, j])) for cmd, _ in episodes)
         meas_span = max(float(np.ptp(meas[:, j])) for _, meas in episodes)
         if cmd_span < MOVED_SPAN.get(name, MOVED_SPAN_DEFAULT):
@@ -147,7 +144,7 @@ def validate_dataset(
 ) -> DatasetSummary | None:
     """Check episodes, timestamps, videos, stats and follower tracking. Adds results to `report`."""
     try:
-        meta = load_meta(root, repo_id)
+        meta = LeRobotDatasetMetadata(repo_id, root=root)
     except Exception as e:
         report.fail(group, f"can't open the dataset at {root}: {e}")
         return None
@@ -155,7 +152,7 @@ def validate_dataset(
         report.fail(group, "the dataset has no episodes")
         return None
     fps = meta.fps
-    lengths = [episode_length(meta, ep) for ep in range(meta.total_episodes)]
+    lengths = [int(meta.episodes[ep]["length"]) for ep in range(meta.total_episodes)]
     report.ok(group, f"{meta.total_episodes} episodes, {sum(lengths)} frames, {sum(lengths) / fps:.1f} s at {fps} fps")
 
     # Joint data: one row per frame, timestamps at exactly 1/fps.
@@ -184,18 +181,13 @@ def validate_dataset(
         camera = f"{key.removeprefix('observation.images.')} video"
         brightness, problems = [], []
         for ep in range(meta.total_episodes):
-            try:
-                decoded = 0
+            try:  # episode_frames yields every frame of the episode's length, or raises
                 for i, frame in episode_frames(meta, ep, key):
-                    decoded += 1
                     if frame.shape[:2] != (height, width):
                         problems.append(f"episode {ep} is {frame.shape[1]}x{frame.shape[0]}, expected {width}x{height}")
                         break
                     if i % 10 == 0:
                         brightness.append(float(frame.mean()))
-                else:
-                    if decoded != lengths[ep]:
-                        problems.append(f"episode {ep} has {decoded} video frames for {lengths[ep]} rows of joint data")
             except Exception as e:
                 problems.append(str(e))
         if problems:
@@ -213,4 +205,4 @@ def validate_dataset(
         report.fail(group, "normalization stats are missing (meta/stats.json)")
 
     tracking(report, "follower", names, pairs, fps, require_motion, strict=strict_tracking)
-    return DatasetSummary(meta.total_episodes, lengths, fps)
+    return DatasetSummary(lengths, fps)

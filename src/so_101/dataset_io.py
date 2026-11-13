@@ -1,15 +1,10 @@
 """Read episodes of a local LeRobot v3 dataset: joint arrays from parquet, camera frames from video."""
 
 from collections.abc import Iterator
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
-
-
-def load_meta(root: Path, repo_id: str) -> LeRobotDatasetMetadata:
-    return LeRobotDatasetMetadata(repo_id, root=root)
 
 
 def episode_table(meta: LeRobotDatasetMetadata, ep: int) -> pd.DataFrame:
@@ -23,10 +18,6 @@ def column(table: pd.DataFrame, name: str) -> np.ndarray:
     return np.stack(table[name].to_numpy()).astype(np.float32)
 
 
-def episode_length(meta: LeRobotDatasetMetadata, ep: int) -> int:
-    return int(meta.episodes[ep]["length"])
-
-
 def episode_frames(
     meta: LeRobotDatasetMetadata, ep: int, video_key: str, start: int = 0, stop: int | None = None
 ) -> Iterator[tuple[int, np.ndarray]]:
@@ -38,7 +29,7 @@ def episode_frames(
     import av
 
     av.logging.set_level(av.logging.ERROR)  # hide FFmpeg's per-frame colour-conversion warnings
-    length = episode_length(meta, ep)
+    length = int(meta.episodes[ep]["length"])
     stop = length if stop is None else min(stop, length)
     if start >= stop:
         return

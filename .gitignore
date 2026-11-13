@@ -8,6 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Downloaded policies, snapshots and reports
 outputs/
 
 # Recorded demos (see [data] in so101.toml)

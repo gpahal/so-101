@@ -15,7 +15,7 @@ from pathlib import Path
 
 from so_101 import check
 from so_101.console import run_lerobot
-from so_101.recording import record_args, task_cameras
+from so_101.recording import record_args
 from so_101.report import Report
 from so_101.settings import Settings
 from so_101.tasks import Task
@@ -101,9 +101,10 @@ def dry_run(
     out.mkdir(parents=True)
 
     print("Checking the setup...", flush=True)
-    found_cameras = [s.camera(ours) for ours in task.cameras.values()]
+    found_cameras = [s.camera(name) for name in task.cameras]
     report, lookups = check.run_checks(
-        s, cameras=found_cameras, task=task, loop_fps=task.fps, keyboard=True, snapshot_dir=out / "snapshots"
+        s, cameras=found_cameras, task=task, loop_fps=task.fps, keyboard=True, snapshot_dir=out / "snapshots",
+        video=True,
     )
     report.print("SETUP")
 
@@ -128,13 +129,10 @@ def dry_run(
         print()
         finish()
         return
-    cameras = task_cameras(s, task, [lookup.camera for lookup in lookups])
-    args = record_args(
-        s, task, cameras, root=root, repo_id=repo_id, episodes=2, episode_time_s=task.episode_time_s,
-        reset_time_s=task.reset_time_s, display=display,
-    )
+    cameras = [lookup.camera for lookup in lookups]
+    args = record_args(s, task, cameras, root=root, repo_id=repo_id, episodes=2, display=display)
     data_report = Report()
-    code = run_lerobot("lerobot-record", [*args, *extra])
+    code = run_lerobot("so101-record", [*args, *extra])  # lerobot-record, connecting the follower where it is
     if code != 0:
         data_report.fail("rehearsal", f"lerobot-record exited with {code}")
     summary = None
@@ -155,11 +153,9 @@ def dry_run(
             print()
             data_report.warn("replay", "skipped")
         else:
-            replay_args = [*s.follower.lerobot_args(), f"--dataset.repo_id={repo_id}", f"--dataset.root={root}",
+            replay_args = [*s.follower_args(), f"--dataset.repo_id={repo_id}", f"--dataset.root={root}",
                            "--dataset.episode=1", f"--dataset.fps={summary.fps}"]
-            if s.teleop.max_relative_target:
-                replay_args.append(f"--robot.max_relative_target={s.teleop.max_relative_target}")
-            if run_lerobot("lerobot-replay", replay_args) == 0:
+            if run_lerobot("so101-replay", replay_args) == 0:  # lerobot-replay, connecting the follower where it is
                 data_report.ok("replay", "replayed episode 2: it should have matched what you did")
             else:
                 data_report.fail("replay", "lerobot-replay failed")

@@ -1,22 +1,31 @@
-"""Health checks for the arms, cameras and setup, run by `so101 check` and before record, teleop and run.
+"""Health checks for the arms, cameras and setup, run by `so101 check` and before record, teleop, run and serve.
 
-Everything here is read-only: arms are read over their serial bus without LeRobot's `connect()`,
-which would start calibrating on a mismatch and switch motor torque on. Only `live_test` moves the
-follower, and only when asked for with `so101 check --live`.
+Nothing here writes to the motors: arms are read over their serial bus without LeRobot's `connect()`,
+which would start calibrating on a mismatch and switch motor torque on. The camera check sets each
+camera's UVC controls, the only thing written. Only `live_test` moves the follower, and only when
+asked for with `so101 check --live`.
+
+The checks open the buses and cameras they need and close them again. A caller that already holds
+a device open, such as the control center (`control/main.py`), passes it in instead: the checks use it as it is and leave
+it open. Opening a second connection isn't an option for an arm, because two processes on one
+serial port corrupt each other's packets.
 """
 
 import shutil
 import sys
 import time
+import math
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from serial.tools import list_ports
 
 from so_101 import data
-from so_101.devices import CameraLookup, find_cameras, get_control, set_controls, uvc_util
+from so_101.devices import CameraLookup, find_camera, get_control, set_controls, uvc_util, video_devices
+from so_101 import settings
 from so_101.report import Report
 from so_101.settings import ARMS, Arm, ArmName, Camera, ConfigError, PortNotFoundError, Settings
 
@@ -33,6 +42,10 @@ VOLTAGE_SPREAD_WARN_V = 1.0
 POSITION_SLACK_TICKS = 50  # how far outside its calibrated range a joint may read before it's flagged
 CAMERA_SAMPLE_S = 2.5
 LOOP_SAMPLE_S = 3.0
+# Free disk below which recording is refused, and below which it's warned about. `serve` checks them
+# before each attempt too.
+DISK_FAIL_GB = 1
+DISK_WARN_GB = 5
 
 
 def narrow_joints_warning(arm: Arm) -> str:
@@ -49,21 +62,24 @@ def narrow_joints_warning(arm: Arm) -> str:
 # --- System ---------------------------------------------------------------------------------------
 
 
-def check_system(report: Report, s: Settings, cameras: list[Camera], keyboard: bool) -> None:
+def check_system(report: Report, s: Settings, cameras: list[Camera], keyboard: bool, hub: bool = True) -> None:
+    """Hugging Face login (with `hub`), disk space, uvc-util, and with `keyboard` the Accessibility
+    permission. The login check asks the Hub, with no timeout."""
     from so_101.tasks import hf_user
 
-    try:
-        report.ok("hugging face", f"logged in as {hf_user()}")
-    except ConfigError:
-        report.warn("hugging face", "not logged in: needed to train and back up", fix="uv run hf auth login")
-    except Exception as e:  # offline, or the Hub is down
-        report.warn("hugging face", f"can't reach the Hub: {e}")
+    if hub:
+        try:
+            report.ok("hugging face", f"logged in as {hf_user()}")
+        except ConfigError:
+            report.warn("hugging face", "not logged in: needed to train and back up", fix="uv run hf auth login")
+        except Exception as e:  # offline, or the Hub is down
+            report.warn("hugging face", f"can't reach the Hub: {e}")
 
     existing = next(p for p in [s.data_dir, *s.data_dir.parents] if p.exists())
     free_gb = shutil.disk_usage(existing).free / 1e9
-    if free_gb < 1:
+    if free_gb < DISK_FAIL_GB:
         report.fail("disk", f"{free_gb:.1f} GB free for {s.data_dir}", fix="free up disk space")
-    elif free_gb < 5:
+    elif free_gb < DISK_WARN_GB:
         report.warn("disk", f"{free_gb:.1f} GB free for {s.data_dir}", fix="free up disk space")
     else:
         report.ok("disk", f"{free_gb:.0f} GB free for {s.data_dir}")
@@ -87,25 +103,32 @@ def check_system(report: Report, s: Settings, cameras: list[Camera], keyboard: b
             )
 
 
+def check_video(report: Report, required: bool) -> None:
+    """SVT-AV1's macOS teardown crash fix (`so_101.svtshim`). With `required`, this process encodes
+    video (or starts one that does), so the fix must be loaded in it; otherwise it only has to build."""
+    from so_101 import svtshim
+
+    if not svtshim.needed():
+        if sys.platform == "darwin" and svtshim.svt_version():
+            report.ok("video encoder", f"{svtshim.version_text()} has its teardown crash fixed")
+        return
+    if found := svtshim.problem(in_this_process=required):
+        report.fail("video encoder", found[0], fix=found[1])
+    elif required:
+        report.ok("video encoder", f"{svtshim.version_text()}: the teardown crash fix is loaded")
+    else:
+        report.ok("video encoder", f"{svtshim.version_text()}: its teardown crash fix builds, and the commands "
+                  "that record or build load it")
+
+
 # --- Arms -----------------------------------------------------------------------------------------
 
 
-def _open_bus(arm: Arm, port: str, use_degrees: bool = False) -> "SerialMotorsBus":
+def _open_bus(arm: Arm, port: str, degrees: bool = False) -> "SerialMotorsBus":
     """The arm's motor bus as LeRobot defines it, with the calibration file loaded, opened read-only."""
     from lerobot.motors import SerialMotorsBus
 
-    if arm.name == "follower":
-        from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-
-        device = SO101Follower(
-            SO101FollowerConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir, use_degrees=use_degrees)
-        )
-    else:
-        from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
-
-        device = SO101Leader(
-            SO101LeaderConfig(port=port, id=arm.id, calibration_dir=arm.calibration_dir, use_degrees=use_degrees)
-        )
+    device = arm.lerobot_device(port, use_degrees=degrees)
     # A separate bus, not device.bus: when `device` is garbage-collected its __del__ disconnects its
     # bus if open, which writes torque-off to every motor and closes the port.
     bus = SerialMotorsBus(port=port, motors=device.bus.motors, calibration=device.calibration)
@@ -128,23 +151,31 @@ class MotorReading:
     alarms: list[str]
 
 
-def read_pose(arm: Arm, use_degrees: bool) -> dict[str, float]:
-    """Each joint's position in the units a policy sees, without writing anything."""
-    bus = _open_bus(arm, arm.resolve_port(), use_degrees=use_degrees)
+def read_pose(arm: Arm, degrees: bool = False) -> dict[str, float] | dict[str, int]:
+    """Each joint's position, without writing anything: with `degrees` in the degrees a policy sees,
+    otherwise in raw encoder steps (0-4095), without calibration. Opens and closes the arm's bus."""
+    bus = _open_bus(arm, arm.resolve_port(), degrees=degrees)
     try:
-        return bus.sync_read("Present_Position", num_retry=2)
+        pose = bus.sync_read("Present_Position", normalize=degrees, num_retry=2)
     finally:
         close_bus(bus)
+    return pose if degrees else {name: int(steps) for name, steps in pose.items()}
+
+
+def _ping_motors(bus: "SerialMotorsBus") -> tuple[dict, list[str]]:
+    """Each motor's ping reply, None if it didn't answer, and "name (id N)" for each that didn't."""
+    from so_101.scan import ping
+
+    replies = {name: ping(bus._connected_bus, motor.id) for name, motor in bus.motors.items()}
+    return replies, [f"{name} (id {bus.motors[name].id})" for name, reply in replies.items() if reply is None]
 
 
 def read_motors(arm: Arm) -> list[MotorReading]:
     """Read every motor of an arm without writing anything. Raises if a motor doesn't answer."""
-    from so_101.scan import ping
-
     bus = _open_bus(arm, arm.resolve_port())
     try:
-        replies = {name: ping(bus._connected_bus, motor.id) for name, motor in bus.motors.items()}
-        if missing := [f"{name} (id {bus.motors[name].id})" for name, reply in replies.items() if reply is None]:
+        replies, missing = _ping_motors(bus)
+        if missing:
             raise RuntimeError(f"no answer from {', '.join(missing)}: is the arm's power on?")
         temps = bus.sync_read("Present_Temperature", normalize=False, num_retry=2)
         volts = bus.sync_read("Present_Voltage", normalize=False, num_retry=2)
@@ -169,46 +200,62 @@ def read_motors(arm: Arm) -> list[MotorReading]:
     return readings
 
 
-def check_arm(report: Report, arm: Arm) -> "SerialMotorsBus | None":
-    """Check one arm. Returns its open bus if the motors answered, for the loop timing test."""
-    from so_101.scan import ping
-
-    group = arm.name
-    fix = f"uv run so101 calibrate {arm.name}"
-    if not arm.calibration_file.is_file():
-        report.fail(group, f"not calibrated (no {arm.calibration_file})", fix=fix)
-    elif warning := narrow_joints_warning(arm):
-        report.fail(group, warning, fix=f"{fix}, and move every joint through its full range")
+def open_arm(report: Report, arm: Arm) -> "SerialMotorsBus | None":
+    """The arm's bus, opened read-only for the caller to close, or None with the reason reported:
+    the board isn't found, its port holds another board, or the port won't open."""
     try:
         port = arm.resolve_port()
     except PortNotFoundError:
-        report.fail(group, "board not found", fix=f"plug in its USB cable and power; `uv run so101 find-port {arm.name}`")
+        report.fail(arm.name, "board not found", fix=f"plug in its USB cable and power; `uv run so101 find-port {arm.name}`")
         return None
     serial = next((p.serial_number for p in list_ports.comports() if p.device == port), None)
     if arm.serial_number and serial and serial != arm.serial_number:
         report.fail(
-            group,
+            arm.name,
             f"{port} is another board (serial number {serial}, expected {arm.serial_number})",
             fix="run `uv run so101 find-port follower` and `uv run so101 find-port leader` to save both ports again",
         )
         return None
     try:
-        bus = _open_bus(arm, port)
+        return _open_bus(arm, port)
     except Exception as e:
-        report.fail(group, f"can't open {port}: {e}", fix="close other programs using the arm, then replug it")
+        report.fail(arm.name, f"can't open {port}: {e}", fix="close other programs using the arm, then replug it")
         return None
 
+
+def check_arm_files(report: Report, arm: Arm) -> None:
+    """The arm's calibration file: there, and with every joint's range wide enough."""
+    fix = f"uv run so101 calibrate {arm.name}"
+    if not arm.calibration_file.is_file():
+        report.fail(arm.name, f"not calibrated (no {arm.calibration_file})", fix=fix)
+    elif warning := narrow_joints_warning(arm):
+        report.fail(arm.name, warning, fix=f"{fix}, and move every joint through its full range")
+
+
+def check_arm(report: Report, arm: Arm) -> "SerialMotorsBus | None":
+    """Check one arm, opening its bus. Returns the bus, still open for the caller to close, if the
+    motors answered, for the loop timing test; otherwise closes it."""
+    check_arm_files(report, arm)
+    if (bus := open_arm(report, arm)) is None:
+        return None
+    if check_motors(report, arm, bus):
+        return bus
+    close_bus(bus)
+    return None
+
+
+def check_motors(report: Report, arm: Arm, bus: "SerialMotorsBus") -> bool:
+    """Check one arm's motors on its open `bus`, which stays open. Returns whether they answered."""
+    group = arm.name
     try:
-        replies = {name: ping(bus._connected_bus, motor.id) for name, motor in bus.motors.items()}
-        missing = [f"{name} (id {bus.motors[name].id})" for name, reply in replies.items() if reply is None]
+        replies, missing = _ping_motors(bus)
         if missing:
             report.fail(
                 group,
                 f"no answer from {', '.join(missing)}",
                 fix=f"check servo power and the cable after the last motor that answers; `uv run so101 scan {arm.name}`",
             )
-            close_bus(bus)
-            return None
+            return False
         wrong = [f"{name} (model {reply.model})" for name, reply in replies.items() if reply.model != STS3215_MODEL]
         if wrong:
             report.fail(group, f"not STS3215 servos: {', '.join(wrong)}",
@@ -224,10 +271,10 @@ def check_arm(report: Report, arm: Arm) -> "SerialMotorsBus | None":
 
         volts = {m: v / 10 for m, v in bus.sync_read("Present_Voltage", normalize=False, num_retry=2).items()}
         temps = bus.sync_read("Present_Temperature", normalize=False, num_retry=2)
-        moved = "" if port == arm.port else f" (saved port {arm.port} is gone; found by serial number)"
+        moved = "" if bus.port == arm.port else f" (saved port {arm.port} is gone; found by serial number)"
         report.ok(
             group,
-            f"{port}{moved}: 6/6 motors, {min(volts.values()):.1f}-{max(volts.values()):.1f} V, "
+            f"{bus.port}{moved}: 6/6 motors, {min(volts.values()):.1f}-{max(volts.values()):.1f} V, "
             f"up to {max(temps.values())} °C",
         )
         if max(volts.values()) - min(volts.values()) > VOLTAGE_SPREAD_WARN_V:
@@ -243,13 +290,12 @@ def check_arm(report: Report, arm: Arm) -> "SerialMotorsBus | None":
         check_calibration(report, arm, bus)
     except Exception as e:
         report.fail(group, f"reading the motors failed: {e}", fix=f"replug the arm; `uv run so101 scan {arm.name}`")
-        close_bus(bus)
-        return None
-    return bus
+        return False
+    return True
 
 
 def check_calibration(report: Report, arm: Arm, bus: "SerialMotorsBus") -> None:
-    """Compare the calibration file with what's stored in the motors. File-only checks are in `check_arm`."""
+    """Compare the calibration file with what's stored in the motors. File-only checks are in `check_arm_files`."""
     group = arm.name
     fix = f"uv run so101 calibrate {arm.name}"
     if not arm.calibration_file.is_file():
@@ -346,52 +392,29 @@ def flicker_percent(profiles: list[np.ndarray]) -> float | None:
     return 100 * float(np.median(changes))
 
 
-def similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Correlation of two RGB images shrunk to 32x24 grey: 1 for the same view, about 0 for unrelated."""
-    import cv2
-
-    def small(img: np.ndarray) -> np.ndarray:
-        g = cv2.resize(_gray(img), (32, 24), interpolation=cv2.INTER_AREA)
-        return (g - g.mean()) / (g.std() + 1e-6)
-
-    return float(np.mean(small(a) * small(b)))
-
-
-def reference_dir(s: Settings) -> Path:
-    return s.outputs_dir / "check" / "reference"
+def find_cameras(report: Report, cameras: list[Camera]) -> list[CameraLookup]:
+    """Where each camera is now, reporting each that isn't found."""
+    devices = video_devices()
+    lookups = [find_camera(cam, devices) for cam in cameras]
+    for lookup in lookups:
+        if lookup.problem:
+            report.fail(f"{lookup.camera.name} camera", lookup.problem,
+                        fix="plug it in; `uv run so101 cameras` lists what's connected")
+    return lookups
 
 
-def check_cameras(
-    report: Report,
-    s: Settings,
-    cameras: list[Camera],
-    save_reference: bool,
-    snapshot_dir: Path | None,
-    opened: dict[str, "OpenCVCamera"],
-    record_fps: int | None = None,
-) -> list[CameraLookup]:
-    """Find, open and sample each camera. Open cameras are added to `opened`, which the caller closes.
-
-    `record_fps` is the rate frames will be recorded at, when below the cameras' configured rate.
-    """
-    import cv2
+def open_cameras(report: Report, lookups: list[CameraLookup]) -> tuple[dict[str, "OpenCVCamera"], set[str]]:
+    """Set each found camera's controls, then open it, as recording does. Returns the cameras that
+    opened, by name, for the caller to close, and the names of those whose controls couldn't be set."""
     from lerobot.cameras.configs import Cv2Rotation
     from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 
-    lookups = find_cameras(cameras)
-    controls_set: set[str] = set()
-    for lookup in lookups:
-        cam = lookup.camera
+    opened, unset = {}, set()
+    for cam in (lookup.camera for lookup in lookups if not lookup.problem):
         group = f"{cam.name} camera"
-        if lookup.problem:
-            report.fail(group, lookup.problem, fix="plug it in; `uv run so101 cameras` lists what's connected")
-            continue
-        # Set controls before opening the camera, as recording does; they're read back once it's open.
-        if cam.usb_id and cam.controls:
-            if error := set_controls(cam):
-                report.warn(group, f"couldn't set controls {cam.controls}: {error}")
-            else:
-                controls_set.add(cam.name)
+        if cam.usb_id and cam.controls and (error := set_controls(cam)):
+            report.warn(group, f"couldn't set controls {cam.controls}: {error}")
+            unset.add(cam.name)
         try:
             device = OpenCVCamera(OpenCVCameraConfig(
                 index_or_path=cam.index, fps=cam.fps, width=cam.width, height=cam.height,
@@ -406,14 +429,33 @@ def check_cameras(
                 fix="allow camera access for your terminal in System Settings > Privacy & Security > Camera; "
                 "`uv run so101 cameras` shows which index is which",
             )
+    return opened, unset
 
-    samples = sample_cameras(opened, CAMERA_SAMPLE_S) if opened else {}
+
+def check_cameras(
+    report: Report,
+    lookups: list[CameraLookup],
+    cams: Mapping[str, "OpenCVCamera"],
+    snapshot_dir: Path | None = None,
+    record_fps: int | None = None,
+    unset: Collection[str] = (),
+) -> None:
+    """Sample each found camera that's open in `cams`, by name, and read back its controls, except
+    for the cameras in `unset`, whose controls couldn't be set and already have a WARN.
+
+    `record_fps` is the rate frames will be recorded at, when below the cameras' configured rate.
+    """
+    import cv2
+
+    cams = {lookup.camera.name: cams[lookup.camera.name] for lookup in lookups
+            if not lookup.problem and lookup.camera.name in cams}
+    samples = sample_cameras(cams, CAMERA_SAMPLE_S) if cams else {}
     for lookup in lookups:
         cam = lookup.camera
         if cam.name not in samples:
             continue
         group = f"{cam.name} camera"
-        if cam.name in controls_set:
+        if cam.usb_id and cam.controls and cam.name not in unset:
             wrong = {k: got for k, v in cam.controls.items() if (got := get_control(cam, k)) is not None and got != v}
             if wrong:
                 report.warn(group, f"controls didn't stick once the camera was open: {wrong} (wanted {cam.controls})",
@@ -467,36 +509,14 @@ def check_cameras(
             report.warn(group, f"rolling bands or flicker ({flicker:.1f}% row brightness change between frames)",
                         fix="set power-line-frequency = 1 (50 Hz) or a fixed exposure under [cameras.<name>.controls]")
 
-        ref_path = reference_dir(s) / f"{cam.name}.png"
-        if save_reference:
-            ref_path.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(ref_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-            report.ok(group, f"saved reference image {ref_path}")
-        elif ref_path.is_file() and (ref := cv2.imread(str(ref_path))) is not None:
-            if ref.shape != frame.shape:
-                report.warn(group, f"reference image is {ref.shape[1]}x{ref.shape[0]}, "
-                            f"camera is {frame.shape[1]}x{frame.shape[0]}",
-                            fix="save a new one with `uv run so101 check --save-reference`")
-            else:
-                score = similarity(frame, cv2.cvtColor(ref, cv2.COLOR_BGR2RGB))
-                if score >= 0.7:
-                    pass
-                elif not lookup.found_by_usb and score < 0.4:
-                    report.fail(group, f"doesn't look like its reference image (similarity {score:.2f}): "
-                                "probably the wrong camera",
-                                fix=f"check which camera is which with `uv run so101 cameras`, then fix {s.path.name}")
-                else:
-                    report.warn(group, f"looks different from its reference image (similarity {score:.2f}): "
-                                "the camera or the scene may have moved",
-                                fix="put it back, or save a new reference with `uv run so101 check --save-reference`")
-        elif not lookup.found_by_usb:
+        if not lookup.found_by_usb:
             report.warn(group, f"can't confirm this is the {cam.name} camera ({lookup.note})",
-                        fix="save a reference image with `uv run so101 check --save-reference` once the cameras are placed")
+                        fix="`uv run so101 cameras` shows which index is which; set this camera's `usb_id` "
+                        "or `index` in so101.toml to match")
 
         if snapshot_dir is not None:
             snapshot_dir.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(snapshot_dir / f"{cam.name}.png"), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    return lookups
 
 
 # --- Recording loop -------------------------------------------------------------------------------
@@ -542,9 +562,7 @@ def check_loop(
 
 
 def check_task(report: Report, s: Settings, task: "Task") -> None:
-    """For your own tasks: will new demos merge with the sessions recorded so far?"""
-    if not task.own:
-        return
+    """Will new demos merge with the sessions recorded so far?"""
     group = f"task {task.name}"
     done = [session for session in data.sessions(s, task) if session.meta]
     kept = data.kept_episodes(s, task)
@@ -556,7 +574,7 @@ def check_task(report: Report, s: Settings, task: "Task") -> None:
     features = latest.meta.features
     recorded_cams = {k.removeprefix("observation.images."): tuple(f["shape"][:2]) for k, f in features.items()
                      if k.startswith("observation.images.")}
-    planned_cams = {key: (s.camera(ours).height, s.camera(ours).width) for key, ours in task.cameras.items()}
+    planned_cams = {name: (s.camera(name).height, s.camera(name).width) for name in task.cameras}
     changes = []
     if latest.meta.fps != task.fps:
         changes.append(f"fps {latest.meta.fps} -> {task.fps}")
@@ -575,6 +593,104 @@ def check_task(report: Report, s: Settings, task: "Task") -> None:
                     fix="joint values may not line up with earlier demos; review them, or start the task over")
 
 
+# --- Control center settings ----------------------------------------------------------------------
+
+REST_POSE_FIX = ("move the follower to its rest pose by hand, then run `uv run so101 pose --save-rest` "
+                 "(see Saving a rest pose in the README)")
+
+
+def follower_motors(arm: Arm) -> list[str]:
+    """The follower's motors as LeRobot defines them, without opening its port."""
+    return list(arm.lerobot_device(arm.port).bus.motors)
+
+
+def _number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def rest_pose_problem(s: Settings) -> str | None:
+    """The first thing wrong with the rest pose `serve` drives to, or None. Without the follower's
+    calibration file there's nothing to compare `rest_pose_calibration` with, so it isn't compared."""
+    pose, saved, now = s.control.rest_pose, s.control.rest_pose_calibration, s.follower.calibration_fingerprint()
+    if pose is None:
+        return f"no rest_pose under [control] in {s.path}: Reset drives the arm there at the end of every attempt"
+    if not isinstance(pose, dict):
+        return f"rest_pose = {pose!r} isn't a table of motor positions"
+    motors = follower_motors(s.follower)
+    missing = [m for m in motors if m not in pose]
+    unknown = [m for m in pose if m not in motors]
+    if missing or unknown:
+        return ("rest_pose must name exactly the follower's six motors, so the arm is checked at rest in every "
+                "joint before the motors turn off"
+                + (f"; it leaves out {', '.join(missing)}" if missing else "")
+                + (f"; it names unknown {', '.join(unknown)}" if unknown else ""))
+    if bad := [f"{m} = {v!r}" for m, v in pose.items()
+               if not (isinstance(v, int) and not isinstance(v, bool) and 0 <= v < settings.MOTOR_STEPS)]:
+        return (f"rest_pose has positions that aren't raw motor steps from 0 to {settings.MOTOR_STEPS - 1}: "
+                + ", ".join(bad))
+    if saved is None:
+        return ("rest_pose has no rest_pose_calibration, so `serve` can't tell whether the follower was "
+                "recalibrated since it was saved, and the pose may no longer fold the arm")
+    if now is not None and saved != now:
+        return (f"the follower was recalibrated since rest_pose was saved (rest_pose_calibration {saved!r}, "
+                f"calibration file now {now!r}), so the saved pose may no longer fold the arm")
+    return None
+
+
+def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] = "FAIL") -> None:
+    """The rest pose and the `[control]` settings, which `serve` needs. Reads so101.toml and the
+    follower's calibration file only.
+
+    `settings.load()` doesn't check them, so a bad value never stops the commands that fix it. Each
+    problem gets `status`: FAIL in `serve`'s preflight, WARN in `so101 check`. `runs`, `build --with`
+    and `review --runs` check `blame_s` themselves (`analysis.check_blame_s`)."""
+    c = s.control
+
+    def problem(group: str, detail: str, fix: str) -> None:
+        report.add(group, status, detail if status == "FAIL" else f"{detail}; `serve` won't start", fix)
+
+    if detail := rest_pose_problem(s):
+        problem("rest pose", detail, REST_POSE_FIX)
+    elif s.follower.calibration_fingerprint() is None:
+        # The follower's own check fails on the missing file; this only says what couldn't be compared.
+        report.warn("rest pose", f"there's no calibration file ({s.follower.calibration_file}) to compare "
+                    f"rest_pose_calibration {c.rest_pose_calibration!r} with, so `serve` can't tell whether rest_pose "
+                    "still folds the arm", fix="put the follower's calibration file back, or calibrate it (`uv run "
+                    "so101 calibrate follower`) and save the rest pose again")
+    else:
+        report.ok("rest pose", "names the follower's six motors, saved with its current calibration")
+
+    rules = settings.CONTROL_SETTINGS
+    settings_ok = True
+
+    def bad_value(key: str, detail: str, allowed: str) -> None:
+        nonlocal settings_ok
+        settings_ok = False
+        default = rules[key].default
+        default = f'"{default}"' if isinstance(default, str) else f"{default:g}"  # as so101.toml writes it
+        problem("control", f"{key} = {getattr(c, key)!r} {detail}",
+                f"set {key} under [control] in {s.path} to {allowed}, or delete the line for the default {default}")
+
+    for key, rule in rules.items():
+        if (low := rule.minimum) is None:
+            continue
+        value = getattr(c, key)
+        allowed = f"a number {'of at least' if rule.inclusive else 'above'} {low:g}"
+        if not _number(value):
+            bad_value(key, "isn't a number", allowed)
+        elif not math.isfinite(value):
+            bad_value(key, "isn't a finite number", allowed)
+        elif value < low or value == low and not rule.inclusive:
+            bad_value(key, f"is out of range: {rule.why}", allowed)
+    if isinstance(c.port, bool) or not isinstance(c.port, int) or not 1 <= c.port <= 65535:
+        bad_value("port", "isn't a port number", "a whole number from 1 to 65535")
+    for key, rule in rules.items():
+        if rule.choices and getattr(c, key) not in rule.choices:
+            bad_value(key, "isn't allowed", "one of " + ", ".join(f'"{a}"' for a in rule.choices))
+    if settings_ok:
+        report.ok("control", "every [control] setting is in its range")
+
+
 # --- Putting it together --------------------------------------------------------------------------
 
 
@@ -586,22 +702,43 @@ def run_checks(
     task: "Task | None" = None,
     loop_fps: int | None = None,
     keyboard: bool = False,
-    save_reference: bool = False,
     snapshot_dir: Path | None = None,
+    control: Literal["FAIL", "WARN"] | None = None,
+    teleop_only: tuple[ArmName, ...] = (),
+    video: bool | None = None,
 ) -> tuple[Report, list[CameraLookup]]:
-    """Run the checks. `loop_fps` also times a recording step, which needs both arms and the cameras."""
+    """Run the checks. `loop_fps` also times a recording step, which needs both arms and the cameras.
+    With `control`, the rest pose and `[control]` settings are checked too, each problem getting that
+    status (`check_control`). The arms in `teleop_only` (of `arms`) are needed only for Teleop: each of
+    their failures is a WARN that says Teleop won't be available. With `video`, the video encoder's
+    crash fix is checked too (`check_video`): True for a command that records. Every device the checks
+    open, they close.
+    """
     cameras = list(s.cameras.values()) if cameras is None else cameras
     report = Report()
     check_system(report, s, cameras, keyboard)
-    buses: dict[ArmName, FeetechMotorsBus] = {}
+    if video is not None:
+        check_video(report, video)
+    if control is not None:
+        check_control(report, s, control)
+    buses: dict[ArmName, SerialMotorsBus] = {}
     opened: dict[str, OpenCVCamera] = {}
     lookups: list[CameraLookup] = []
     try:
         for name in arms:
-            if (bus := check_arm(report, s.arm(name))) is not None:
+            arm_report = Report() if name in teleop_only else report
+            if (bus := check_arm(arm_report, s.arm(name))) is not None:
                 buses[name] = bus
+            if arm_report is not report:
+                for r in arm_report.results:
+                    if r.status == "FAIL":
+                        report.warn(r.group, f"{r.detail}; Teleop won't be available", r.fix)
+                    else:
+                        report.results.append(r)
         if cameras:
-            lookups = check_cameras(report, s, cameras, save_reference, snapshot_dir, opened, loop_fps)
+            lookups = find_cameras(report, cameras)
+            opened, unset = open_cameras(report, lookups)
+            check_cameras(report, lookups, opened, snapshot_dir, loop_fps, unset)
         if task is not None:
             check_task(report, s, task)
         if loop_fps and set(buses) == set(ARMS) and len(opened) == len(cameras) and not report.failures:
@@ -636,9 +773,6 @@ def preflight(s: Settings, title: str, **kwargs) -> tuple[list[Camera], Report]:
 
 def live_test(report: Report, s: Settings, seconds: float = 10.0) -> None:
     """Teleoperate for `seconds` and check that every follower joint follows the leader."""
-    from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-    from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
-
     from lerobot.utils.robot_utils import precise_sleep
 
     from so_101.validate import tracking
@@ -656,17 +790,16 @@ def live_test(report: Report, s: Settings, seconds: float = 10.0) -> None:
         print()
         report.warn("live test", "skipped")
         return
-    follower = SO101Follower(SO101FollowerConfig(
-        port=s.follower.resolve_port(), id=s.follower.id, calibration_dir=s.follower.calibration_dir,
-        max_relative_target=s.teleop.max_relative_target or None,
-    ))
-    leader = SO101Leader(SO101LeaderConfig(
-        port=s.leader.resolve_port(), id=s.leader.id, calibration_dir=s.leader.calibration_dir,
-    ))
+    follower = s.follower.lerobot_device(s.follower.resolve_port(),
+                                         max_relative_target=s.teleop.max_relative_target or None)
+    leader = s.leader.lerobot_device(s.leader.resolve_port())
     group = "live test"
     names = list(follower.action_features)
     commanded, measured = [], []
-    fps = 30  # the rate LeRobot records at
+    fps = 30  # tasks.toml's default rate: the live test runs without a task
+    from so_101 import connect
+
+    connect.install()  # the follower connects holding where it is, never at an old goal
     try:
         leader.connect(calibrate=False)
         follower.connect(calibrate=False)

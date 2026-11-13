@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from so_101 import data
+from so_101.build import MIN_EPISODE_S
 from so_101.dataset_io import column, episode_table
 from so_101.settings import Settings
 from so_101.tasks import Task
@@ -25,16 +26,25 @@ HELP = """\
 """
 
 
-def open_viewer(session: data.Session, episode: int) -> None:
-    """Show the episode in Rerun: both cameras plus joint plots, with a timeline in seconds."""
+def view(repo_id: str, root: Path, episode: int) -> None:
+    """Open episode `episode` of the dataset at `root` in Rerun, without waiting for it: both cameras
+    plus joint plots, with a timeline in seconds."""
     exe = Path(sys.executable).parent / "lerobot-dataset-viz"
     subprocess.Popen(
-        [str(exe), "--repo-id", session.repo_id, "--root", str(session.dataset_root), "--episode-index", str(episode),
-         "--num-workers", "0"],
+        [str(exe), "--repo-id", repo_id, "--root", str(root), "--episode-index", str(episode), "--num-workers", "0"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+
+
+def ask(prompt: str) -> str:
+    """The operator's answer to `prompt`; "q", to quit, at the end of input or Ctrl+C."""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "q"
 
 
 def describe(edit: data.Edit | None) -> str:
@@ -65,8 +75,8 @@ def parse(answer: str, duration: float, suggestion: data.Edit) -> data.Edit | st
         except ValueError:
             return "Usage: t START END, in seconds, e.g. t 1.2 14.5"
         end = min(end, duration)
-        if not 0 <= start < end or end - start < 0.5:
-            return f"Need 0 <= START < END <= {duration:.2f}, at least 0.5 s apart."
+        if not 0 <= start < end or end - start < MIN_EPISODE_S:
+            return f"Need 0 <= START < END <= {duration:.2f}, at least {MIN_EPISODE_S} s apart."
         return data.Edit(suggestion.session, suggestion.episode, keep=(round(start, 2), round(end, 2)))
     return f"Unknown answer {answer!r}. Type ? for help."
 
@@ -110,21 +120,16 @@ def review(s: Settings, task: Task, only: str | None, everything: bool, viewer: 
         print(f"  now:        {describe(edits.get((session.name, ep)))}")
         print(f"  suggestion: {hint}")
         if viewer:
-            open_viewer(session, ep)
+            view(session.repo_id, session.dataset_root, ep)
         while True:
-            try:
-                answer = input("  > ")
-            except (EOFError, KeyboardInterrupt):
-                print()
-                answer = "q"
-            result = parse(answer, duration, suggestion)
+            result = parse(ask("  > "), duration, suggestion)
             if isinstance(result, data.Edit):
                 edits[result.key] = result
                 data.save_edits(s, task, edits)
                 print(f"  saved: {describe(result)}\n")
                 break
             if result == "v":
-                open_viewer(session, ep)
+                view(session.repo_id, session.dataset_root, ep)
             elif result == "s":
                 print()
                 break
