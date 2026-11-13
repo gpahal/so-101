@@ -1030,10 +1030,13 @@ class LoopSafetyTest(RigTest):
                     for motor, steps in fell.items():
                         self.assertAlmostEqual(goal[motor], steps, delta=2, msg=f"{motor}: aimed where the arm is")
 
-                rig.motors.restore_motor_power()
-                rig.tick(FPS)
+                # The supply comes back lower than at start, under load (87.5%), and a loaded joint settles
+                # 3 steps below its goal: aiming at where it settles would lower the arm every tick.
+                rig.motors.sag = {"shoulder_lift": 3, "elbow_flex": 3}
+                rig.motors.restore_motor_power(volts=10.5)
+                rig.tick(2 * FPS)
                 for motor, steps in fell.items():
-                    self.assertAlmostEqual(rig.motors.present()[motor], steps, delta=2,
+                    self.assertAlmostEqual(rig.motors.present()[motor], steps, delta=4,
                                            msg=f"{motor} stays where it fell when the power returns")
                 self.assertEqual([e["change"] for e in rig.events("power")], ["lost", "back"])
                 self.assertTrue(rig.motors.torqued(), "its torque is on again, where the arm is")
@@ -1051,7 +1054,9 @@ class LoopSafetyTest(RigTest):
         self.assertEqual(rig.status()["state"], "autonomous")
         self.assertEqual(rig.events("power"), [])
 
-        rig.motors.status["wrist_roll"] = 1  # the servo's own voltage alarm
+        rig.motors.status["wrist_roll"] = 1  # the servo's own voltage alarm, on two replies in a row
+        rig.tick()
+        self.assertEqual(rig.status()["state"], "autonomous", "one reply with the bit, as a garbled one, changes nothing")
         rig.tick()
         self.assertEqual(rig.status()["state"], "fault")
         self.assertIn("power dropped", rig.status()["fault"])

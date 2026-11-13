@@ -22,11 +22,10 @@ supply's capacitors, or on the USB board's signal line, while the motor goes lim
 Holding the last goal then would leave each goal a step above the falling arm, and the servo drives
 back to it when the power returns. So the loop also reads every motor's voltage on every tick, after
 the restart marks, in one more bus read like theirs (`check_power`). Two reads in a row below
-POWER_LOW of the voltage measured at start (`measure_supply`), or a voltage alarm, is a power loss
-(`PowerLost`): from then on every goal
-is the measured pose, so a servo that gets its power back holds where the arm is. Once the voltage
-reads POWER_BACK of the start or more for POWER_BACK_S, the motors' torque is turned on where the arm
-is found, and the arm holds there.
+POWER_LOW of the voltage measured at start (`measure_supply`), or with a voltage alarm, is a power
+loss (`PowerLost`): while the reads stay low every goal is the measured pose, so a servo that gets
+its power back holds where the arm is. Once they aren't low, the last of those goals holds, and after
+POWER_BACK_S without a low read the motors' torque is turned on there.
 
 Goals and holds need no camera, so they reach the arm even while a camera reports itself
 disconnected (`Arm`), through the same step cap.
@@ -63,9 +62,9 @@ VOLTAGE_BIT = 1
 # changes nothing.
 POWER_LOW = 0.75
 POWER_LOW_READS = 2
-# The supply is back once it reads this fraction of the start or more for POWER_BACK_S: a switch
-# turned back on ramps up over a few hundred milliseconds.
-POWER_BACK = 0.9
+# The supply is back once no read has been low for POWER_BACK_S: a switch turned back on ramps up
+# over a few hundred milliseconds. It counts from POWER_LOW, not a higher mark, because a supply
+# holding a loaded pose reads lower than at start, at rest, and must still count as back.
 POWER_BACK_S = 0.5
 SUPPLY_DROPPED = ("The follower's power dropped: {listed} V, where it read {reference:.1f} V at start. Its motors "
                   "went limp, so the arm holds where it's measured, never where it was told to go, and holds "
@@ -203,9 +202,10 @@ class Follower:
         self.motors_read_at: float | None = None
         self.unblamed: str | None = None  # the last error of a hold that no device explains, logged once
         self.reference: float | None = None  # the supply's voltage at start, the median of the motors' reads
-        self.low_reads = 0  # supply reads in a row below POWER_LOW of `reference`
+        self.low_reads = 0  # low supply reads in a row: below POWER_LOW of `reference`, or with the voltage bit
+        self.limp = False  # POWER_LOW_READS low reads in a row: the motors have no power to move
         self.unpowered: str | None = None  # SUPPLY_DROPPED, from a power loss until the power is back
-        self.back_since: float | None = None  # when the supply first read POWER_BACK again, while unpowered
+        self.back_since: float | None = None  # when the reads stopped being low, while unpowered
         self.volts: dict[str, float] = {}  # each motor's supply voltage, as last read
 
     @property
@@ -405,40 +405,45 @@ class Follower:
         self.reference = values[len(values) // 2]
 
     def check_power(self) -> None:
-        """Read every motor's supply voltage. Raise PowerLost on the second read in a row below
-        POWER_LOW of the start, or on a reply with the voltage bit, unless the power is already lost.
-        While it is, note when the supply reads POWER_BACK of the start again: `power_back` says
-        when it has for POWER_BACK_S."""
+        """Read every motor's supply voltage. A read is low below POWER_LOW of the start, or with the
+        voltage bit in a reply. On the second low read in a row the motors are limp (`limp`), and,
+        unless the power is already lost, PowerLost is raised. While it's lost, note when the reads
+        stopped being low: `power_back` says when they have stayed so for POWER_BACK_S."""
         if self.reference is None:
             return
         volts, statuses = self._read_supply()
         self.volts = volts
         alarm = any(status & VOLTAGE_BIT for status in statuses.values())
-        self.low_reads = self.low_reads + 1 if min(volts.values()) < POWER_LOW * self.reference else 0
-        if alarm or self.low_reads >= POWER_LOW_READS:
+        low = alarm or min(volts.values()) < POWER_LOW * self.reference
+        self.low_reads = self.low_reads + 1 if low else 0
+        self.limp = self.low_reads >= POWER_LOW_READS
+        if low:
             self.back_since = None
-            if self.unpowered is None:
-                listed = ", ".join(f"{name} {v:.1f}" for name, v in volts.items())
-                self.unpowered = SUPPLY_DROPPED.format(listed=listed, reference=self.reference)
-                self.log("power", change="lost", volts=volts, reference=self.reference, alarm=alarm,
-                         pose=dict(self.present))
-                raise PowerLost(self.unpowered)
-        elif self.unpowered is not None:
-            if min(volts.values()) < POWER_BACK * self.reference:
-                self.back_since = None
-            elif self.back_since is None:
-                self.back_since = self.clock()
+        elif self.unpowered is not None and self.back_since is None:
+            self.back_since = self.clock()
+        if self.limp and self.unpowered is None:
+            listed = ", ".join(f"{name} {v:.1f}" for name, v in volts.items())
+            self.unpowered = SUPPLY_DROPPED.format(listed=listed, reference=self.reference)
+            self.log("power", change="lost", volts=volts, reference=self.reference, alarm=alarm,
+                     pose=dict(self.present))
+            raise PowerLost(self.unpowered)
 
     @property
     def power_back(self) -> bool:
-        """The power was lost, and the supply has read POWER_BACK of the start for POWER_BACK_S."""
+        """The power was lost, and no read has been low for POWER_BACK_S."""
         return (self.unpowered is not None and self.back_since is not None
                 and self.clock() - self.back_since >= POWER_BACK_S)
 
     def _track(self) -> None:
-        """While the power is lost, aim every motor at where the arm is measured, so a servo whose
-        power comes back holds there. Once it's back, turn the torque on there explicitly."""
-        self.arm.send_action(dict(self.present))
+        """While the power is lost: when the motors are limp, aim every motor at where the arm is
+        measured, so a servo whose power comes back holds there. Otherwise hold that last goal, never
+        re-aiming: a powered joint under load settles a little below its goal, and aiming at where it
+        settled would lower the arm a little every tick. Once the power is back, turn the torque on
+        there explicitly."""
+        if self.limp:
+            self.arm.send_action(dict(self.present))
+        else:
+            self.arm.hold()
         if self.power_back:
             self.inner.bus.enable_torque(num_retry=2)
             self.log("power", change="back", volts=self.volts, reference=self.reference, pose=dict(self.present))

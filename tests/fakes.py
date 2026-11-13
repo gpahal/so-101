@@ -124,6 +124,9 @@ class FakeMotors:
         self.goals: list[dict[str, int]] = []
         self.torque: list[tuple[bool, dict[str, int]]] = []
         self.stops: dict[str, int] = {}  # motor -> the raw position it can't rise above
+        # motor -> how many steps short of its goal it settles under the arm's weight, as a servo with
+        # LeRobot's P-only control does when it holds a loaded joint
+        self.sag: dict[str, int] = {}
         self.writes: list[tuple[str, object]] = []
         self.status: dict[str, int] = {}  # motor -> the alarm bits in its replies
         self.failing = False
@@ -139,7 +142,7 @@ class FakeMotors:
         elapsed, self._last = self.clock() - self._last, self.clock()
         for i, r in self.registers.items():
             if r["torque_enable"] and self.motor_power:
-                gap = r["goal_position"] - r["present_position"]
+                gap = r["goal_position"] - self.sag.get(self.names[i], 0) - r["present_position"]
                 move = max(-self.speed * elapsed, min(self.speed * elapsed, gap))
                 r["present_position"] = round(r["present_position"] + move)
             if (stop := self.stops.get(self.names[i])) is not None:
