@@ -797,6 +797,9 @@ def live_test(report: Report, s: Settings, seconds: float = 10.0) -> None:
     names = list(follower.action_features)
     commanded, measured = [], []
     fps = 30  # tasks.toml's default rate: the live test runs without a task
+    from so_101 import connect
+
+    connect.install()  # the follower connects holding where it is, never at an old goal
     try:
         leader.connect(calibrate=False)
         follower.connect(calibrate=False)

@@ -9,8 +9,9 @@ connect snapped it back up to where it was.
 
 `install` makes `configure` write each motor's Goal_Position as its Present_Position just before the
 torque comes back on, so the arm holds where it is. Every command that connects the follower calls
-it first: `serve` (`control/main.py`), `run` (`rollout.main`), and `teleop` and `record` through the
-`so101-teleoperate` and `so101-record` entry points below, which run LeRobot's scripts.
+it first: `serve` (`control/main.py`), `run` (`rollout.main`) and `check --live` in their process,
+and `teleop`, `record`, `record --dry-run --replay` and `calibrate` through the `so101-teleoperate`,
+`so101-record`, `so101-replay` and `so101-calibrate` entry points below, which run LeRobot's scripts.
 """
 
 import sys
@@ -79,6 +80,23 @@ def record() -> None:
     svtshim.ensure()  # started by `so101`, the fix is already loaded; run directly, it restarts itself
     svtshim.require()
     from lerobot.scripts.lerobot_record import main
+
+    install()
+    sys.exit(main())
+
+
+def replay() -> None:
+    """`lerobot-replay`, connecting the follower where it is: a dry run's replay starts from a pose
+    moved by hand, while each servo still holds the recording's last goal."""
+    from lerobot.scripts.lerobot_replay import main
+
+    install()
+    sys.exit(main())
+
+
+def calibrate() -> None:
+    """`lerobot-calibrate`, connecting the follower where it is before calibration turns its torque off."""
+    from lerobot.scripts.lerobot_calibrate import main
 
     install()
     sys.exit(main())

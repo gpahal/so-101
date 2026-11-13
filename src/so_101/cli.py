@@ -208,7 +208,7 @@ def cmd_setup_motors(s: settings.Settings, ns: argparse.Namespace, extra: list[s
 
 
 def cmd_calibrate(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
-    lerobot("lerobot-calibrate", [*s.arm(ns.arm).lerobot_args(), *extra])
+    lerobot("so101-calibrate", [*s.arm(ns.arm).lerobot_args(), *extra])  # lerobot-calibrate, connecting the follower where it is
 
 
 def cmd_check(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:

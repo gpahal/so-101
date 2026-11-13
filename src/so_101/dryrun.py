@@ -155,7 +155,7 @@ def dry_run(
         else:
             replay_args = [*s.follower_args(), f"--dataset.repo_id={repo_id}", f"--dataset.root={root}",
                            "--dataset.episode=1", f"--dataset.fps={summary.fps}"]
-            if run_lerobot("lerobot-replay", replay_args) == 0:
+            if run_lerobot("so101-replay", replay_args) == 0:  # lerobot-replay, connecting the follower where it is
                 data_report.ok("replay", "replayed episode 2: it should have matched what you did")
             else:
                 data_report.fail("replay", "lerobot-replay failed")
