@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from so_101 import cli
+from so_101 import cli, settings
 from so_101.commands.policy import local_checkpoint
 from so_101.settings import ConfigError
 
@@ -72,6 +72,23 @@ class LocalTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as stop:
                 local_checkpoint(str(output), "pi05")
             self.assertIn("holds a model of type act, not pi05", str(stop.exception))
+
+
+class ForwardedTest(unittest.TestCase):
+    def test_a_forwarded_flag_is_read_as_lerobot_reads_it_the_last_one_winning(self) -> None:
+        extra = ["--policy.repo_id=a/one", "--steps=10", "--policy.repo_id", "b/two"]
+        self.assertEqual(cli.forwarded(extra, "policy.repo_id"), "b/two")
+        self.assertIsNone(cli.forwarded(extra, "robot.max_relative_target"))
+
+    def test_a_forwarded_negative_step_cap_stops_the_command_before_it_runs(self) -> None:
+        # LeRobot takes the last of a repeated flag, so it would replace so101.toml's checked cap.
+        with mock.patch.object(cli, "cmd_teleop") as teleop, \
+                mock.patch.object(cli.sys, "argv", ["so101", "teleop", "--robot.max_relative_target=-10"]), \
+                self.assertRaises(SystemExit) as stop:
+            cli.main()
+        teleop.assert_not_called()
+        self.assertIn("--robot.max_relative_target is '-10'", str(stop.exception))
+        self.assertEqual(settings.step_cap("5", "--robot.max_relative_target"), 5.0)
 
 
 class PrivateTest(unittest.TestCase):

@@ -403,6 +403,18 @@ def cmd_backup(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     print(f"Backed up. To restore: uv run hf download {repo} --repo-type dataset --local-dir {folder}")
 
 
+def forwarded(extra: list[str], name: str) -> str | None:
+    """The value a forwarded `--<name>=value` or `--<name> value` gives, the last if repeated, as
+    LeRobot's parser takes it, or None."""
+    value = None
+    for i, arg in enumerate(extra):
+        if arg.startswith(f"--{name}="):
+            value = arg.split("=", 1)[1]
+        elif arg == f"--{name}" and i + 1 < len(extra):
+            value = extra[i + 1]
+    return value
+
+
 def refuse_public(api, repo: str, repo_type: str, command: str) -> None:
     """Exit unless the Hub repo `repo` is private or doesn't exist yet. `create_repo(private=True,
     exist_ok=True)` keeps an existing repo as it is, and someone may have made it public."""
@@ -600,14 +612,19 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     if target == "local":
         local, output = local_train_args(s, task, ns.policy, root)
         args += local
+        if (forwarded(extra, "policy.push_to_hub") or "").lower() in ("true", "1", "yes"):
+            from huggingface_hub import HfApi
+
+            refuse_public(HfApi(), forwarded(extra, "policy.repo_id") or policy, "model", "train")
         print(f"Training {ns.policy} on {kept} demos{also} for {steps:,} steps on this computer ({s.run.device}). "
               f"Nothing is uploaded: the model is saved in {output}.\n"
               f"To run it: uv run so101 run {task.name} --checkpoint {output}")
     else:
         from huggingface_hub import HfApi
 
-        # The job pushes the model to this repo as it trains; LeRobot's private=true doesn't change an existing one.
-        refuse_public(HfApi(), policy, "model", "train")
+        # The job pushes the model to this repo as it trains, or to a forwarded --policy.repo_id;
+        # LeRobot's private=true doesn't change an existing one.
+        refuse_public(HfApi(), forwarded(extra, "policy.repo_id") or policy, "model", "train")
         print(f"Uploading the training dataset to the private Hub dataset {task.dataset}...")
         push_dataset(root, task.dataset)
         timeout = recipe.job_timeout(steps, target)
@@ -867,6 +884,10 @@ def main() -> None:
     if extra and not ns.forwards:
         parser.error(f"unrecognized arguments: {' '.join(extra)} (`so101 {ns.command}` passes nothing on to LeRobot)")
     try:
-        ns.fn(settings.load(), ns, extra)
+        s = settings.load()
+        # LeRobot takes the last of a repeated flag, so a forwarded cap replaces so101.toml's: check it the same way.
+        if (cap := forwarded(extra, "robot.max_relative_target")) is not None:
+            settings.step_cap(cap, "--robot.max_relative_target")
+        ns.fn(s, ns, extra)
     except (PortNotFoundError, ConfigError) as e:
         sys.exit(str(e))
