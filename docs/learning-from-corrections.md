@@ -22,7 +22,7 @@ The rules are in the `control/analysis.py` docstring. In short:
 | Failure-fix pairs | A rewind that undid policy frames, followed by Teleop from the pose it went back to | No. `so101 runs` exports them |
 | Outcomes | succeeded, failed or ignored, from the operator's answer or `labels.toml` | Only to select attempts |
 
-A failure-fix pair is the data most of the second group needs: a bad action chunk and a good one from the same state. Its `action` column is what the arm was sent, after the `max_relative_target` cap. `control.policy_action` holds the policy's raw output. Both are recorded only while the policy drives, so no frame shows what the policy would have done while the human drove.
+A failure-fix pair is the data most of the second group needs: a bad action chunk and a good one from the same state. Its `action` column is what the arm was sent, after the `max_relative_target` cap. `control.policy_action` holds the policy's raw output, and `control.leader` the leader's pose, which `build --with` trains on instead, as the demos record their action before the cap. Both are recorded only while the policy drives, so no frame shows what the policy would have done while the human drove.
 
 ## What LeRobot 0.7.0 provides
 

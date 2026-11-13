@@ -231,12 +231,25 @@ class BuildTest(unittest.TestCase):
             rows = built[built["episode_index"] == n]
             source = recorded[recorded["episode_index"] == ep].sort_values("frame_index").iloc[a:b]
             np.testing.assert_array_equal(np.stack(rows["observation.state"]), np.stack(source["observation.state"]))
-            np.testing.assert_array_equal(np.stack(rows["action"]), np.stack(source["action"]))
+            # The action asked for, before the cap, as a demo's is: the leader's pose in Teleop.
+            np.testing.assert_array_equal(np.stack(rows["action"]), np.stack(source["control.leader"]))
             self.assertTrue((np.ravel(np.stack(rows["control.phase"])) == Phase.TELEOP).all())
             self.assertTrue((np.ravel(np.stack(rows["control.label"])) == analysis.FrameLabel.CORRECTION).all())
             self.assertTrue(np.ravel(np.stack(rows["intervention"])).all())
             success = np.ravel(np.stack(rows["control.attempt_success"]))
             self.assertTrue((success == (ep == 0)).all(), "attempt 1 succeeded; attempts 3 and 4 failed")
+
+        # A policy success's action is the policy's own, before the cap.
+        build(self.s, TASK, (analysis.POLICY_SUCCESSES,))
+        built = table(data.train_root(self.s, TASK))
+        entries = json.loads(data.build_manifest_path(self.s, TASK).read_text())["episodes"][1:]
+        self.assertTrue(entries)
+        for n, entry in enumerate(entries, start=1):
+            self.assertEqual(entry["source"], analysis.POLICY_SUCCESSES)
+            ep, (a, b) = entry["episode"], entry["frames"]
+            rows = built[built["episode_index"] == n]
+            source = recorded[recorded["episode_index"] == ep].sort_values("frame_index").iloc[a:b]
+            np.testing.assert_array_equal(np.stack(rows["action"]), np.stack(source["control.policy_action"]))
 
         # Neither reading nor building changed the run.
         self.assertEqual(digest(run_dir), before)

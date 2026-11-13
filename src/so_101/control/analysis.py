@@ -103,7 +103,7 @@ SOURCES = (CORRECTIONS, HUMAN_ATTEMPTS, POLICY_SUCCESSES)
 # The version of the rules that cut and label a run's frames, which build.json records. Raise it when
 # `training_cuts`, `intervention_mask` or `frame_labels` change what a build holds, so a build made
 # under other rules isn't current.
-RULES_VERSION = 5
+RULES_VERSION = 6  # 6: a cut's action is the leader's pose or the policy's action, before the cap
 
 Range = tuple[int, int]
 

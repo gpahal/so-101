@@ -10,7 +10,11 @@ than recording does.
 own episode, after the demos. The cuts already leave out scripted, suspect and waiting frames and
 ignored attempts (`analysis.training_cuts` has the full list). A cut whose episode the run's episode index doesn't list, as when a kill
 came after its data file was finished and before its index row was written, is left out with a note.
-Only the demos' columns are written, unless `keep_labels` is set.
+Only the demos' columns are written, unless `keep_labels` is set. A cut's `action` is what a demo's
+is: what the arm was asked for, before the follower's `max_relative_target` cap (lerobot-record saves
+the leader's pose, not the capped goal). So a Teleop cut takes the run's `control.leader`, and a
+policy-success cut its `control.policy_action`, rather than the run's `action`, the capped goal
+(`ACTION_COLUMN`).
 With either, build.json records `analysis.RULES_VERSION`, so a build made under other cut or label
 rules isn't current.
 """
@@ -38,6 +42,12 @@ BUILD_CRF = 23
 BUILD_PRESET = 10
 MIN_EPISODE_S = 0.5
 DEMOS = "demos"
+# Where each run cut's `action` comes from: what was asked for, before the cap, as in a demo.
+ACTION_COLUMN = {
+    analysis.CORRECTIONS: "control.leader",
+    analysis.HUMAN_ATTEMPTS: "control.leader",
+    analysis.POLICY_SUCCESSES: "control.policy_action",
+}
 
 # Columns `--keep-labels` adds: control.phase is the run's own, and the rest come from the analysis.
 LABEL_FEATURES = {
@@ -267,7 +277,7 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
         for n, p in enumerate(plans):
             meta = p.meta
             table = episode_table(meta, p.episode)
-            state, action = column(table, "observation.state"), column(table, "action")
+            state, action = column(table, "observation.state"), column(table, ACTION_COLUMN.get(p.source, "action"))
             streams = [episode_frames(meta, p.episode, key, p.start, p.stop) for key in video_keys]
             try:
                 for i in range(p.start, p.stop):
