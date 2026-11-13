@@ -513,6 +513,7 @@ class Controller:
             recording=self.recorder.failure or self._disk,
             outcome=outcome is not None,
             fault_saved=self._faulted,
+            fault_labelled=self._closed.outcome if self._faulted and self._closed is not None else None,
         )
 
     def _devices(self) -> dict[str, str | None]:

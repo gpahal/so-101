@@ -134,6 +134,7 @@ class Facts:
     recording: str | None  # why a new attempt can't be recorded (little free disk, a failed dataset)
     outcome: bool  # the command came with an outcome to record (Reset's)
     fault_saved: bool  # the last fault saved an attempt, which an outcome given with Reset in Fault labels
+    fault_labelled: str | None  # that attempt's outcome, when it already has one: Reset in Fault won't relabel it
 
 
 @dataclass(frozen=True)
@@ -262,6 +263,10 @@ def _reset(state: State, facts: Facts) -> Transition:
         if facts.outcome and state is State.FAULT and not facts.fault_saved:
             return _refuse(state, "The fault saved no attempt, so there is nothing to label: Reset without an "
                                   "outcome drives the arm to rest.")
+        if facts.outcome and state is State.FAULT and facts.fault_labelled:
+            return _refuse(state, f"The attempt the fault saved is already labelled {facts.fault_labelled}: Reset "
+                                  "without an outcome drives the arm to rest. To change the label, use "
+                                  "`uv run so101 review --runs`.")
         if facts.outcome and state is State.RESTING:
             return _refuse(state, "No attempt is open to label: Reset without an outcome drives the arm to rest.")
         if facts.follower_missing:

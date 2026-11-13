@@ -66,7 +66,9 @@ def print_serve_summary(run: data.Run) -> None:
         return
     events = read_events(run)  # skips a last line a crash cut short
     saved = sum(bool(e.get("saved")) for e in events if e.get("type") == "attempt_end")
-    outcomes = [e.get("outcome") for e in events if e.get("type") == "outcome"]
+    # An attempt's latest outcome, by its episode: a later one replaces an earlier one, as in `runs`.
+    latest = {e.get("episode"): e.get("outcome") for e in events if e.get("type") == "outcome"}
+    outcomes = list(latest.values())
     counts = ", ".join(f"{outcomes.count(o)} {o}" for o in ("succeeded", "failed", "ignored"))
     print(f"\nThis run is in {run.path}\n  Attempts saved: {saved} ({counts}, {saved - len(outcomes)} unlabelled)", flush=True)
     if not any(e.get("type") == "run_end" for e in events):

@@ -476,6 +476,30 @@ class ControllerTest(RigTest):
                                            msg=f"leader {motor} reached rest before its motors turned off")
                 self.assertFalse(rig.leader_motors.torqued())
 
+    def test_an_attempt_a_fault_saved_with_its_outcome_is_never_labelled_twice(self) -> None:
+        from so_101.commands.serve import print_serve_summary
+
+        rig = self.new_rig("labelled-twice", recorded=True)
+        rig.start_policy()
+        rig.command("reset", outcome="succeeded")
+        rig.robot.inner.cameras["top"].stalled()  # a fault on the way to rest saves it as it is
+        rig.tick(2)
+        self.assertEqual(rig.status()["state"], "fault")
+        self.assertEqual([e["outcome"] for e in rig.events("outcome")], ["succeeded"])
+
+        printed = rig.press("left")  # the terminal's ignore, which the page doesn't send in Fault
+        self.assertIn("already labelled succeeded", printed)
+        self.assertEqual(rig.status()["state"], "fault")
+        self.assertEqual([e["outcome"] for e in rig.events("outcome")], ["succeeded"])
+        self.assertEqual(rig.command("reset"), Result("reset", True), "Reset without an outcome still goes to rest")
+        rig.tick_until("resting")
+        rig.controller.close()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            print_serve_summary(Run.at(rig.run_dir))
+        self.assertIn("Attempts saved: 1 (1 succeeded, 0 failed, 0 ignored, 0 unlabelled)", out.getvalue())
+
     def test_a_hot_or_alarmed_leader_never_connects_so_teleop_stays_unavailable(self) -> None:
         # Preflight's WARN says Teleop won't be available: a Handover would turn those motors on.
         rig = self.new_rig("leader-unfit")
