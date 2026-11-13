@@ -35,7 +35,16 @@ class PolicySetup:
     def steps_line(self, s: settings.Settings) -> str:
         n, cap = self.action_steps, s.teleop.max_relative_target
         limit = f"limit {cap:g} per step" if cap else "no per-step limit"
-        return f"Predicts every {n} steps ({n / self.task.fps:.1f} s), {limit}."
+        if not self.server:
+            return f"Predicts every {n} steps ({n / self.task.fps:.1f} s), {limit}."
+        # The remote client asks again once the measured turnaround plus one step is left in its queue,
+        # or its refill_seconds if that's more.
+        if remote.EXECUTION[self.server.labels["policy"]] == "chunk":
+            asks = "asks for the next once the turnaround plus one step is left (at least 0.5 s)"
+            return f"Predicts {n} steps ({n / self.task.fps:.1f} s) at a time and {asks}, {limit}."
+        return (f"Predicts {n / self.task.fps:.1f} s at a time with real-time chunking: it asks for the next "
+                f"once {remote.RTC_REFILL_S:g} s is left (more if the turnaround is longer), and the server "
+                f"steers each new prediction to agree with the motion under way, {limit}.")
 
     def run(self, command: str, args: list[str], log_path: Path | None, summary: Callable[[], None]) -> NoReturn:
         """Run `command` through the SSH tunnel to the remote server, if any, then call `summary`, say
@@ -73,6 +82,8 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
     fail on a bad rest pose or `[control]` setting."""
     local = local_checkpoint(ns.checkpoint, ns.policy) if ns.checkpoint else None
     config = json.loads((local / "config.json").read_text()) if local else task.policy_config(ns.revision, ns.policy)
+    if ns.remote:
+        remote.refuse_action_steps(ns.policy, ns.action_steps)
     action_steps = resolve_action_steps(ns.action_steps, config)
     server = remote.require_server(task.name, ns.policy, ns.revision or "main", action_steps) if ns.remote else None
 
@@ -98,7 +109,7 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
         f"--strategy.type={'base' if serving else 'episodic'}",
         # A remote server sets the action steps itself, and its client rejects --policy flags.
         *(
-            remote.client_args()
+            remote.client_args(ns.policy)
             if server
             else [f"--policy.path={checkpoint}", f"--policy.n_action_steps={action_steps}"]
         ),

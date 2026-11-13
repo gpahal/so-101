@@ -32,6 +32,28 @@ JOINTS = ["shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos", "wrist_flex
 # started again this long after each exit, so the tunnel comes back on its own after a network drop.
 RESTART_DELAY_S = 5.0
 
+# How each policy's chunks of actions are joined. ACT's server returns plain chunks, each replacing the
+# rest of the last ("chunk"). pi0.5 uses guided real-time chunking ("rtc_guided"): each request carries
+# the actions still queued, and the server steers the new chunk to agree with them, so a new plan
+# can't jump away from the motion under way. Plain chunks measured jumps of up to 47 degrees at the
+# seams with pi0.5, because its flow-matching samples can disagree from one second to the next.
+EXECUTION = {"act": "chunk", "pi05": "rtc_guided"}
+# With RTC, the client asks for the next chunk once this much motion is left in its queue, or the
+# turnaround plus one step if that's more. LeRobot's 0.5 s, raised to the turnaround, left 0.71 s
+# against a 0.65 s turnaround from India, and one request that took over 1.7 s, likely a network
+# stall since the GPU takes 0.45 s at most, ran the arm out of actions after 18 s. With 1 s, and the
+# grace below, a stall of about 2.3 s holds the arm still instead. The cost is requests back to back,
+# about 1.5 a second instead of 1, which RTC makes harmless to the motion.
+RTC_REFILL_S = 1.0
+# How long the arm holds its last target when the queue runs out before the run fails (LeRobot: 1 s).
+RTC_STARVATION_GRACE_S = 2.0
+# With RTC, how much of the queued motion the server steers the new chunk to match: all of it, since
+# the arm plays the queue while the request is out, and every step it plays before the new chunk takes
+# over must be steered. LeRobot's default of 10 steps (0.33 s) would leave the seam free. Past the
+# queue, the server pads with its last action, pulling the new chunk toward a hold, so this matches
+# the refill. Seams are steered while the turnaround stays under it.
+RTC_HORIZON_S = RTC_REFILL_S
+
 # LeRobot 0.7's server requires every input the model declares, but the client can only send cameras
 # that exist. pi0.5 pads and masks a missing camera itself, which is what it saw in training, so
 # accept its empty camera slots missing. This follows LeRobot's own override for SmolVLA.
@@ -62,10 +84,11 @@ main()
 
 
 def server_config(
-    repo: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int, fps: int
+    repo: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int, fps: int
 ) -> dict:
     """The policy server's config, describing the model's inputs and outputs. `image_sizes` is each
-    camera's (width, height), from `tasks.image_sizes`."""
+    camera's (width, height), from `tasks.image_sizes`. With real-time chunking, `action_steps` is
+    the model's own and only bounds the steered horizon: LeRobot takes no execution slice then."""
     vector = {"dtype": "float32", "names": JOINTS, "semantics": SEMANTICS, "shape": [len(JOINTS)]}
     cameras = [
         {
@@ -80,7 +103,7 @@ def server_config(
     return {
         "deployment": DEPLOYMENT,
         "model": {"repo_or_path": repo, "revision": revision, "device": "cuda"},
-        "execution": {"supported_modes": ["chunk"], "action_fps": float(fps), "n_action_steps": action_steps},
+        "execution": execution_config(EXECUTION[policy_type], action_steps, fps),
         "language": {"enabled": False},
         "zenoh": {"mode": "peer", "listen_endpoints": [f"tcp/127.0.0.1:{PORT}"]},
         "semantics": SEMANTICS,
@@ -88,6 +111,29 @@ def server_config(
         "features": [{"name": "observation.state", **vector}, *cameras],
         "action_feature": {"name": "action", **vector},
     }
+
+
+def execution_config(mode: str, action_steps: int, fps: int) -> dict:
+    if mode == "chunk":
+        return {"supported_modes": ["chunk"], "action_fps": float(fps), "n_action_steps": action_steps}
+    horizon = min(action_steps, round(RTC_HORIZON_S * fps))
+    return {
+        "supported_modes": [mode],
+        "action_fps": float(fps),
+        "rtc": {"enabled": True, "mode": mode.removeprefix("rtc_"), "execution_horizon": horizon},
+    }
+
+
+def refuse_action_steps(policy_type: str, requested: int | None) -> None:
+    """With real-time chunking the client, not a fixed step count, decides when to predict again."""
+    if requested is not None and EXECUTION[policy_type] != "chunk":
+        sys.exit(f"{policy_type} on the cloud GPU uses real-time chunking, which asks for the next prediction "
+                 "once the measured turnaround plus one step of motion is left, so it takes no --action-steps.")
+
+
+def steps_flag(policy_type: str, action_steps: int) -> str:
+    """The --action-steps flag that names a server's model, or nothing with real-time chunking."""
+    return f" --action-steps {action_steps}" if EXECUTION[policy_type] == "chunk" else ""
 
 
 def setup_script(policy_type: str, config: dict) -> tuple[str, str]:
@@ -136,17 +182,20 @@ def active_server():
 
 def describe(job) -> str:
     labels = job.labels or {}
+    execution = labels.get("execution")
+    steps = (f"{labels.get('action_steps')} action steps" if execution == "chunk"
+             else "real-time chunking" if execution else "plain chunks from before real-time chunking")
     return (
-        f"{labels.get('policy')} for {labels.get('task')} at {labels.get('revision')}, "
-        f"{labels.get('action_steps')} action steps, "
+        f"{labels.get('policy')} for {labels.get('task')} at {labels.get('revision')}, {steps}, "
         f"on {job.flavor} (job {job.id}, {job.status.stage})"
     )
 
 
 def _labels(task: str, policy_type: str, revision: str, action_steps: int) -> dict[str, str]:
-    """The job labels that say which model a server serves: `start_server` sets them, and
-    `require_server` matches them."""
-    return {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps)}
+    """The job labels that say which model a server serves, and how its chunks are joined:
+    `start_server` sets them, and `require_server` matches them."""
+    return {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps),
+            "execution": EXECUTION[policy_type]}
 
 
 def start_server(
@@ -159,7 +208,7 @@ def start_server(
     check_ssh_key()
     if server := active_server():
         sys.exit(f"A policy server is already running: {describe(server)}.\nStop it first: uv run so101 server stop")
-    setup, serve = setup_script(policy_type, server_config(repo, revision, image_sizes, action_steps, fps))
+    setup, serve = setup_script(policy_type, server_config(repo, policy_type, revision, image_sizes, action_steps, fps))
     api = HfApi()
     job = api.run_job(
         image=SERVER_IMAGE,
@@ -177,10 +226,11 @@ def start_server(
         wait_until_ready(job.id, policy_type)
     except KeyboardInterrupt:
         sys.exit("\nStopped watching. The job is still running and billing: uv run so101 server stop")
+    steps = steps_flag(policy_type, action_steps)
     print(
         "\nThe policy server is ready. Next:\n"
-        f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision} --action-steps {action_steps}\n"
-        f"  uv run so101 serve {task} --policy {policy_type} --remote --revision {revision} --action-steps {action_steps}\n"
+        f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision}{steps}\n"
+        f"  uv run so101 serve {task} --policy {policy_type} --remote --revision {revision}{steps}\n"
         "  uv run so101 server stop"
     )
 
@@ -226,7 +276,8 @@ def stop_server() -> None:
 
 def require_server(task: str, policy_type: str, revision: str, action_steps: int):
     """The running server, if it serves what this run asks for. Starting one bills, so never do it implicitly."""
-    start = f"uv run so101 server start {task} --policy {policy_type} --revision {revision} --action-steps {action_steps}"
+    start = (f"uv run so101 server start {task} --policy {policy_type} --revision {revision}"
+             f"{steps_flag(policy_type, action_steps)}")
     server = active_server()
     if server is None:
         sys.exit(f"No policy server is running. Start one first:\n  {start}")
@@ -314,14 +365,20 @@ class _Supervisor:
         return self.proc
 
 
-def client_args() -> list[str]:
+def client_args(policy_type: str) -> list[str]:
+    mode = EXECUTION[policy_type]
     return [
         "--inference.type=remote",
         f"--inference.endpoint=tcp/127.0.0.1:{PORT}",
         f"--inference.deployment={DEPLOYMENT}",
         f"--inference.semantics={SEMANTICS}",
-        "--inference.mode=chunk",
-        "--inference.chunk_merge=aligned",
+        f"--inference.mode={mode}",
+        # A plain chunk replaces the rest of the last from its own time on. LeRobot takes only "append"
+        # with RTC, and its RTC queue still replaces the rest of the last chunk, from the step the arm
+        # reached while the request was out, with the new chunk the server steered to agree with it.
+        f"--inference.chunk_merge={'aligned' if mode == 'chunk' else 'append'}",
+        *([] if mode == "chunk" else [f"--inference.refill_seconds={RTC_REFILL_S:g}",
+                                      f"--inference.action_starvation_grace_s={RTC_STARVATION_GRACE_S:g}"]),
         # Measured with pi0.5 on an L4 from India: quality 90 ran out of actions and faulted within 10
         # seconds, 50 kept the arm moving 90% of the time, and 30 kept it moving 97% of the time.
         "--inference.encoding=jpeg",

@@ -13,11 +13,11 @@ REST = {"shoulder_pan": 2048, "shoulder_lift": 900, "elbow_flex": 3100,
         "wrist_flex": 2600, "wrist_roll": 2048, "gripper": 1000}
 
 
-def follower(motors: FakeMotors):
+def follower(motors: FakeMotors, calib: dict | None = None):
     from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
     directory = Path(tempfile.mkdtemp(prefix="so101-test-"))
-    (directory / "follower.json").write_text(json.dumps(calibration()))
+    (directory / "follower.json").write_text(json.dumps(calib or calibration()))
     robot = SO101Follower(SO101FollowerConfig(port="/dev/fake", id="follower", calibration_dir=directory,
                                               use_degrees=True, max_relative_target=10.0))
     robot.bus._open_bus = lambda: motors
@@ -70,6 +70,88 @@ class ConnectTest(unittest.TestCase):
                     clock.advance(2.0)
                     self.assertFalse(any(r["torque_enable"] for r in motors.registers.values()))
                     self.assertEqual(motors.present(), REST, "never driven to the old goal")
+
+
+    def test_a_joint_resting_just_past_its_limit_is_pulled_back_to_the_limit(self) -> None:
+        # On 2026-11-13 the folded elbow read 3035 against a Max_Position_Limit of 3031: the servo stored
+        # a goal of 3035 as 3031, so the read-back never matched and every connect refused.
+        for side, offset in (("max", connect.OVERSHOOT_MAX_STEPS), ("min", -connect.OVERSHOOT_MAX_STEPS)):
+            with self.subTest(side=side):
+                clock = FakeClock()
+                calib = calibration()
+                calib["elbow_flex"]["range_max"] = REST["elbow_flex"]
+                calib["elbow_flex"]["range_min"] = REST["elbow_flex"]
+                rest = dict(REST, elbow_flex=REST["elbow_flex"] + offset)
+                motors = FakeMotors(clock, calib, rest)
+                for i, register in motors.registers.items():
+                    register["goal_position"] = REST[motors.names[i]] - 400  # old goals, inside every limit
+
+                connect.install()
+                robot = follower(motors, calib)
+                robot.connect(calibrate=False)
+                clock.advance(2.0)
+
+                self.assertTrue(motors.torqued())
+                self.assertEqual(motors.present(), REST, "only the elbow moved, back to its limit")
+                self.assertEqual(motors.writes[-1], ("torque_enable", True))
+                robot.disconnect()
+
+    def test_a_joint_further_past_its_limit_leaves_the_torque_off_and_says_so(self) -> None:
+        clock = FakeClock()
+        calib = calibration()
+        calib["elbow_flex"]["range_max"] = REST["elbow_flex"]
+        rest = dict(REST, elbow_flex=REST["elbow_flex"] + connect.OVERSHOOT_MAX_STEPS + 1)
+        motors = FakeMotors(clock, calib, rest)
+        connect.install()
+        robot = follower(motors, calib)
+        with self.assertRaisesRegex(ConnectionError, r"elbow_flex at 3121, 21 steps \(1.8°\) past its limit 3100.*by hand"):
+            robot.connect(calibrate=False)
+        clock.advance(2.0)
+        self.assertFalse(any(r["torque_enable"] for r in motors.registers.values()))
+        self.assertEqual(motors.goals, [], "no goal written, which would turn the torque on")
+        self.assertEqual(motors.present(), rest)
+
+
+class CheckLimitsTest(unittest.TestCase):
+    """`so101 check` reports what connecting will do with a follower joint past its limits."""
+
+    def report_for(self, elbow: int):
+        from types import SimpleNamespace
+
+        from lerobot.motors import Motor, MotorCalibration, MotorNormMode, SerialMotorsBus
+
+        from so_101 import check
+        from so_101.report import Report
+
+        calib = calibration()
+        calib["elbow_flex"]["range_max"] = REST["elbow_flex"]
+        motors = FakeMotors(FakeClock(), calib, dict(REST, elbow_flex=elbow))
+        file = Path(tempfile.mkdtemp(prefix="so101-test-")) / "follower.json"
+        file.write_text(json.dumps(calib))
+        bus = SerialMotorsBus("/dev/fake", {n: Motor(c["id"], "sts3215", MotorNormMode.DEGREES) for n, c in calib.items()},
+                              calibration={n: MotorCalibration(**c) for n, c in calib.items()})
+        bus._open_bus = lambda: motors
+        bus._connect(handshake=False)
+        report = Report()
+        check.check_calibration(report, SimpleNamespace(name="follower", calibration_file=file), bus)
+        self.assertEqual(motors.goals, [], "check writes nothing to the motors")
+        return [(r.status, r.detail, r.fix) for r in report.results]
+
+    def test_inside_the_range_passes(self) -> None:
+        [(status, detail, _)] = self.report_for(REST["elbow_flex"])
+        self.assertEqual((status, detail), ("PASS", "calibration matches the motors (follower.json)"))
+
+    def test_a_joint_just_past_its_limit_warns_of_the_pull_back(self) -> None:
+        [(status, detail, fix)] = self.report_for(REST["elbow_flex"] + 4)
+        self.assertEqual(status, "WARN")
+        self.assertIn("elbow_flex at 3104, 4 steps (0.4°) past its limit 3100", detail)
+        self.assertIn("pulls each back to its limit", fix)
+
+    def test_a_joint_too_far_past_its_limit_fails_as_connecting_would(self) -> None:
+        [(status, detail, fix)] = self.report_for(REST["elbow_flex"] + connect.OVERSHOOT_MAX_STEPS + 1)
+        self.assertEqual(status, "FAIL")
+        self.assertIn("elbow_flex at 3121, 21 steps", detail)
+        self.assertIn("by hand", fix)
 
 
 if __name__ == "__main__":

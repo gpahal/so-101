@@ -12,6 +12,11 @@ torque comes back on, so the arm holds where it is. Every command that connects 
 it first: `serve` (`control/main.py`), `run` (`rollout.main`) and `check --live` in their process,
 and `teleop`, `record`, `record --dry-run --replay` and `calibrate` through the `so101-teleoperate`,
 `so101-record`, `so101-replay` and `so101-calibrate` entry points below, which run LeRobot's scripts.
+
+A joint can rest a few steps past its calibrated limit: on 2026-11-13 the folded elbow read 3035 against a
+Max_Position_Limit of 3031, because calibration never pushed it to its stop. The servo stores any goal
+past its limits as the limit, so a goal of where it is can't read back. Up to OVERSHOOT_MAX_STEPS past,
+the goal is the limit instead, and the torque pulls the joint that far back in. Further past, it refuses.
 """
 
 import sys
@@ -20,18 +25,53 @@ _INSTALLED = "_so101_holds_where_it_is"
 
 
 GOAL_TRIES = 3  # a goal write gets no reply, so a garbled one goes unnoticed: read it back, and try again
+# How far past its calibrated limits a joint may rest, in raw steps (20 is 1.8°), and still connect: turning
+# the torque on pulls it back to the limit at full speed, outside `max_relative_target`, so only a twitch is
+# allowed. Further past, a hand moves it back, or a horn or gear slipped and the arm needs calibrating.
+OVERSHOOT_MAX_STEPS = 20
+
+
+def past_limits(present: dict[str, int], limits: dict[str, tuple[int, int]]) -> dict[str, int]:
+    """How many steps each motor of `present` rests past its (min, max) limits, for the motors past them."""
+    past = {}
+    for motor, steps in present.items():
+        low, high = limits[motor]
+        if (over := max(low - steps, steps - high)) > 0:
+            past[motor] = over
+    return past
+
+
+def describe_past(past: dict[str, int], limits: dict[str, tuple[int, int]], present: dict[str, int]) -> str:
+    return ", ".join(
+        f"{m} at {present[m]}, {n} steps ({n * 360 / 4096:.1f}°) past its limit {min(max(present[m], limits[m][0]), limits[m][1])}"
+        for m, n in past.items()
+    )
+
+
+def read_limits(bus) -> dict[str, tuple[int, int]]:
+    low = bus.sync_read("Min_Position_Limit", normalize=False, num_retry=2)
+    high = bus.sync_read("Max_Position_Limit", normalize=False, num_retry=2)
+    return {motor: (low[motor], high[motor]) for motor in low}
 
 
 def hold_where_it_is(bus) -> None:
-    """Aim every motor of `bus` at where it is, in raw steps, so turning its torque on moves nothing.
-    A sync write gets no reply, so each motor's goal is read back. A motor whose goal still isn't
-    where it is after GOAL_TRIES raises ConnectionError, before any torque is turned on: that motor
-    would drive to its old goal."""
+    """Aim every motor of `bus` at where it is, in raw steps, so turning its torque on moves nothing. A
+    motor up to OVERSHOOT_MAX_STEPS past its position limits is aimed at the limit, which the servo would
+    store anyway; one further past raises ConnectionError before any goal is written. A sync write gets
+    no reply, so each motor's goal is read back. A motor whose goal still isn't its aim after GOAL_TRIES
+    raises ConnectionError, before any torque is turned on: that motor would drive to its old goal."""
+    limits = read_limits(bus)
     for _ in range(GOAL_TRIES):
         present = bus.sync_read("Present_Position", normalize=False, num_retry=2)
-        bus.sync_write("Goal_Position", present, normalize=False)
+        if far := {m: n for m, n in past_limits(present, limits).items() if n > OVERSHOOT_MAX_STEPS}:
+            raise ConnectionError(
+                f"{describe_past(far, limits, present)}, more than the {OVERSHOOT_MAX_STEPS} steps connecting pulls "
+                "back, so its torque stays off. Move it back inside its range by hand and try again; if it reads "
+                "past its limit again, a horn or gear may have slipped: recalibrate the arm.")
+        aim = {m: min(max(steps, limits[m][0]), limits[m][1]) for m, steps in present.items()}
+        bus.sync_write("Goal_Position", aim, normalize=False)
         goals = bus.sync_read("Goal_Position", normalize=False, num_retry=2)
-        if not (missed := [motor for motor, steps in present.items() if goals[motor] != steps]):
+        if not (missed := [motor for motor, steps in aim.items() if goals[motor] != steps]):
             return
     raise ConnectionError(f"Aiming {', '.join(missed)} where it is didn't take after {GOAL_TRIES} tries, so its "
                           "torque stays off rather than drive it to an old goal. Check the arm's cables and power, "
