@@ -14,7 +14,7 @@
 
 ## Hardware and billing
 
-The arms may be plugged in. Unless the user asks, run only read-only commands: `info`, `tasks`, `check`, `scan`, `motors`, `pose`, `runs`, `server status` and `--help`. `check` writes only the cameras' UVC controls, which last until a camera loses power, and its snapshots under `outputs/check/`. `runs` writes only its export under `outputs/runs/`.
+The arms may be plugged in. Unless the user asks, run only read-only commands: `info`, `tasks`, `check`, `scan`, `motors`, `pose`, `runs`, `server status` and `--help`. `check` writes only the cameras' UVC controls, which last until a camera loses power, its snapshots under `outputs/check/`, and the SVT-AV1 fix it builds into `~/Library/Caches/so101/` (`svtshim`). `runs` writes only its export under `outputs/runs/`.
 
 - These move the arm: `teleop`, `record`, `run`, `serve`, `check --live`, `record --dry-run --replay`.
 - `setup-motors` and `calibrate` write to the motors.

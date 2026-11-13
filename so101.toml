@@ -181,7 +181,7 @@ job_timeout = "1h"
 # Where Reset sends the follower at the end of every attempt: each of the six motors' raw position in
 # encoder steps (0-4095), the same for every task. Pick a folded pose that stays put with the power
 # off, move the arm there by hand, and save it with `uv run so101 pose --save-rest`, which replaces
-# the commented-out rest_pose and rest_pose_calibration lines below with the ones it saves.
+# the rest_pose and rest_pose_calibration lines below with the ones it saves.
 rest_pose = { shoulder_pan = 2053, shoulder_lift = 841, elbow_flex = 3026, wrist_flex = 2872, wrist_roll = 2045, gripper = 862 }
 # The first 12 hex digits of the follower calibration file's SHA-256 when rest_pose was saved, which
 # `pose --save-rest` writes. Recalibrating changes where each step count puts a joint, so `serve`

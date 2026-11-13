@@ -46,7 +46,10 @@ SPACE_REFUSED = {
 # The right arrow (LeRobot: end the episode) asks for one of these, then ends the attempt with it.
 # On their own they answer the prompt after a time limit.
 OUTCOME_KEYS = {"s": "succeeded", "f": "failed", "i": "ignored"}
-ASK = "How did it go? s succeeded, f failed, i ignore this attempt. Any other key keeps it going."
+ASK = ("How did it go? s succeeded, f failed, i ignore this attempt. Any other key answers nothing and does what it "
+       "always does: Esc still ends the attempt and quits.")
+# The keys that end the attempt, or ask again, when pressed instead of an answer: no "Not ended" for them.
+ENDING_KEYS = {"esc", "left", "right"}
 
 HINTS = {
     "resting": "r starts an attempt, t starts one with the leader, c runs the checks, Esc quits (away "
@@ -147,7 +150,8 @@ class KeyReader:
                 if outcome := OUTCOME_KEYS.get(key):
                     self._send("reset", outcome=outcome, for_attempt=attempt)
                     return
-                print("Not ended: the attempt goes on.", flush=True)
+                if key not in ENDING_KEYS:
+                    print("Not ended: the attempt goes on.", flush=True)
         if key == "right" and not status["attempt_open"]:
             self._send("reset")  # in Fault the attempt was saved there; at rest none is open: nothing to ask
         elif key == "right":

@@ -500,6 +500,16 @@ class ControllerTest(RigTest):
             print_serve_summary(Run.at(rig.run_dir))
         self.assertIn("Attempts saved: 1 (1 succeeded, 0 failed, 0 ignored, 0 unlabelled)", out.getvalue())
 
+    def test_a_key_that_ends_the_attempt_instead_of_answering_never_says_it_goes_on(self) -> None:
+        rig = self.new_rig("not-ended")
+        rig.start_policy()
+        rig.press("right")
+        self.assertIn("Not ended", rig.press("p"), "Pause leaves the attempt open")
+        rig.press("right")
+        printed = rig.press("esc")
+        self.assertNotIn("Not ended", printed)
+        self.assertEqual(rig.status()["state"], "returning", "Esc ended the attempt to quit")
+
     def test_a_hot_or_alarmed_leader_never_connects_so_teleop_stays_unavailable(self) -> None:
         # Preflight's WARN says Teleop won't be available: a Handover would turn those motors on.
         rig = self.new_rig("leader-unfit")
