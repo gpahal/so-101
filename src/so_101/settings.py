@@ -192,6 +192,8 @@ class Remote:
 
     job_target: str
     job_timeout: str
+    # pi0.5 only: give the model its unused action columns as training did (`remote.PI05_SERVER`).
+    pin_unused_actions: bool
 
 
 # Raw encoder steps per turn of an STS3215 motor: positions run 0-4095.
@@ -297,6 +299,13 @@ def _control(section: dict) -> Control:
     )
 
 
+def _remote(policy: str, section: dict, path: Path) -> Remote:
+    pin = section.get("pin_unused_actions", True)
+    if not isinstance(pin, bool):
+        raise ConfigError(f"[remote.{policy}] pin_unused_actions in {path} is {pin!r}: set it to true or false.")
+    return Remote(job_target=section["job_target"], job_timeout=section["job_timeout"], pin_unused_actions=pin)
+
+
 def load() -> Settings:
     path = config_path()
     try:
@@ -364,10 +373,7 @@ def _parse(path: Path) -> Settings:
             device=run.get("device", "mps"),
         ),
         train={policy: recipe(policy, section) for policy, section in train.items()},
-        remote={
-            policy: Remote(job_target=section["job_target"], job_timeout=section["job_timeout"])
-            for policy, section in data.get("remote", {}).items()
-        },
+        remote={policy: _remote(policy, section, path) for policy, section in data.get("remote", {}).items()},
         control=_control(data.get("control", {})),
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,

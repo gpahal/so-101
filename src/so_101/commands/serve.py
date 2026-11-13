@@ -33,6 +33,8 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         "action_steps": setup.action_steps,
         "inference": "remote" if server else "local",
         "job": server.id if server else None,
+        # pi0.5 on the cloud GPU: whether the server pinned the model's unused action columns.
+        "pin_unused_actions": {"true": True, "false": False}.get(server.labels.get(remote.PIN_LABEL)) if server else None,
     }
     print(setup.steps_line(s), flush=True)
     if "leader" not in setup.arms:
