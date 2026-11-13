@@ -28,7 +28,9 @@ Each fit used 72 of the 96 demos that hold the block; `score` and `check` used t
 | `sim check`: the policy's actions from the demo's, on sim images (on real images: 0.6°) | 3.1° | 2.2° |
 | ... with only the top picture the sim's | 2.2° | 1.3° |
 | ... with only the wrist picture the sim's | 1.5° | 1.4° |
-| `sim eval`, ACT policy, 100 action steps, 30 s an attempt (on the arm: 24 of 25) | 17 of 25 | 12 of 15 in an interim run |
+| `sim eval`, ACT policy, 100 action steps, 30 s an attempt (on the arm: 24 of 25) | 17 of 25 (68%) | 19 of 25 (76%; 57% to 89% at 95%) |
+
+The real-pixels eval placed 17 of its first 18 and 2 of its last 7; an earlier run of 15, a build before, placed 12. It ran just before the last change to the wrist camera's drawing, which leaves the block rendered when a real frame can't supply it whole; `sim check` read the same within 0.05° either side of that change.
 
 Physics, which doesn't depend on how things are drawn:
 
