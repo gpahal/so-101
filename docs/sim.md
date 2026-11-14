@@ -21,17 +21,17 @@ Each fit used 72 of the 96 demos that hold the block; `score` and `check` used t
 
 "Rendered" draws everything from the arm model and fitted colours. "Real pixels" is what the sim does when the demos are on the computer: the arm in the top camera, the wrist camera's view, and each attempt's block and jar come from the demos' frames (README, "Real pixels"). The first two columns are from 2026-11-13, when the jar's height was a guess (63 mm) and the jaws' friction was the arm model's 1.0.
 
-| Check | Rendered, 13 Nov | Real pixels, 13 Nov | 14 Nov, jar measured and jaws' friction lowered | 14 Nov, and blocks moved clear of the jaws | 14 Nov, and blocks placed before the jaws' slide | 14 Nov, and the wrist camera refitted |
-| --- | --- | --- | --- | --- | --- | --- |
-| `sim score`, top camera, pixels from the real frame (two real frames of the same pose: 7.2) | 9.3 | 5.4 | 5.3 | 5.3 | 5.3 | 5.3 |
-| `sim score`, wrist camera (two real frames: 13.7) | 21.2 | 11.1 | 10.0 | 9.9 | 10.2 | 9.9 |
-| `sim score`, wrist camera's sharpness against a real frame's | | 3.7 | 2.3 | 2.3 | 2.5 | 2.9 |
-| `sim check`: the policy's actions from the demo's, on sim images (on real images: 0.6°) | 3.1° | 2.2° | 2.0° | 2.0° | 2.0° | 1.9° |
-| ... with only the top picture the sim's | 2.2° | 1.3° | 1.3° | 1.3° | 1.3° | 1.3° |
-| ... with only the wrist picture the sim's | 1.5° | 1.4° | 1.2° | 1.2° | 1.2° | 1.2° |
-| `sim replay`: of 96 demos' real commands, the ones that put the block in the jar | | 85 | 88 | 90 | 90 | 90 |
-| `sim replay --recording`: of the 24 attempts of the real ACT run that held the block, the ones the sim puts in the jar | | | 17 | 20 | 19 | 19 |
-| `sim eval`, ACT policy, 100 action steps, 30 s an attempt (on the arm: 24 of 25) | 17 of 25 (68%) | 19 of 25 (76%; 57% to 89% at 95%) | 15 of 25 (60%; 41% to 77%) | 17 of 25 (68%; 48% to 83%) | 18 of 25 (72%; 52% to 86%) | 36 of 50 (72%; 58% to 83%), as the column before on the same 50 |
+| Check | Rendered, 13 Nov | Real pixels, 13 Nov | 14 Nov, jar measured and jaws' friction lowered | 14 Nov, and blocks moved clear of the jaws | 14 Nov, and blocks placed before the jaws' slide | 14 Nov, and the wrist camera refitted | 15 Nov, and the wrist picture's block always painted from real frames |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `sim score`, top camera, pixels from the real frame (two real frames of the same pose: 7.2) | 9.3 | 5.4 | 5.3 | 5.3 | 5.3 | 5.3 | 5.3 |
+| `sim score`, wrist camera (two real frames: 13.7) | 21.2 | 11.1 | 10.0 | 9.9 | 10.2 | 9.9 | 9.8 |
+| `sim score`, wrist camera's sharpness against a real frame's | | 3.7 | 2.3 | 2.3 | 2.5 | 2.9 | 3.0 |
+| `sim check`: the policy's actions from the demo's, on sim images (on real images: 0.6°) | 3.1° | 2.2° | 2.0° | 2.0° | 2.0° | 1.9° | 1.8° |
+| ... with only the top picture the sim's | 2.2° | 1.3° | 1.3° | 1.3° | 1.3° | 1.3° | 1.3° |
+| ... with only the wrist picture the sim's | 1.5° | 1.4° | 1.2° | 1.2° | 1.2° | 1.2° | 1.1° |
+| `sim replay`: of 96 demos' real commands, the ones that put the block in the jar | | 85 | 88 | 90 | 90 | 90 | 90 |
+| `sim replay --recording`: of the 24 attempts of the real ACT run that held the block, the ones the sim puts in the jar | | | 17 | 20 | 19 | 19 | 19 |
+| `sim eval`, ACT policy, 100 action steps, 30 s an attempt (on the arm: 24 of 25) | 17 of 25 (68%) | 19 of 25 (76%; 57% to 89% at 95%) | 15 of 25 (60%; 41% to 77%) | 17 of 25 (68%; 48% to 83%) | 18 of 25 (72%; 52% to 86%) | 36 of 50 (72%; 58% to 83%), as the column before on the same 50 | 41 of 50 (82%; 69% to 90%) |
 
 Every eval starts its attempts from the same 25 layouts in the same order, so the runs can be compared attempt by attempt:
 
@@ -98,6 +98,37 @@ The build now fits it the second way (`fit.fit_wrist_camera`). The fixed jaw is 
 With the new camera, blocks placed by the wrist camera replay into the jar as often as the top camera's (66 and 64 of 72 against 66 and 65); with the old one, 61 and 58.
 
 Measured with the ACT policy as an instrument only, on frames of the demos' approach and grasp, the old camera was most of what moved its actions on sim pictures. Its aim moved 1.25° from the one on real pictures with the block at the mat's far right, 0.80° in the middle and 0.92° at the left, mostly at the shoulder, which aimed 2.1° short at the far right; with the camera fitted from far and near, 0.87°, 0.63° and 0.71°, and 0.8° short.
+
+## Following attempts one at a time
+
+Changing the sim and counting placements over 25 or 50 attempts didn't say why attempts failed. The ACT run of 2026-11-13 13:09 (24 of 25 on the arm) did, attempt by attempt. It saved every frame, joint and command, the policy carried out 100-action chunks as the sim's eval does, and ACT predicts the same chunk from the same input. So:
+
+- **Along each real attempt,** at every chunk's start, the policy predicts from the real frames, from the sim's pictures with the arm, block and jar where they really were, and from one of each. From the real frames it reproduces the chunk the arm carried out to 1 to 3 mm at the jaws' tips (median per phase; up to 14 mm on an attempt's first chunk), so whatever the sim's pictures change is theirs.
+- **From each real attempt's start,** the policy runs in the sim, closed loop, with every contact between the jaws and the block recorded, and each sim attempt is set beside the real one.
+
+| Chunk | Real frames against what the arm did | Sim pictures | Sim top picture only | Sim wrist picture only |
+| --- | --- | --- | --- | --- |
+| The first, at the start pose | 6.0 mm | 26.4 mm | 16.2 | 12.7 |
+| Approach | 1.5 mm | 9.9 mm | 8.1 | 5.4 |
+| The one with the grasp | 2.0 mm | 20.8 mm | 9.0 | 16.2 |
+
+(Medians of how far the jaws' tips move from the real-frame chunk, averaged over each chunk.)
+
+**At the grasp, the wrist camera's block decides it.** With the real block's pixels put into the sim's wrist picture, the grasp chunk moved 6.5 mm instead of 16.2; with only the sim's block put into the real frame, 12.5. And it was the block's look more than its place: the sim's block pasted where the real one was moved the chunk 10.3 mm, the real block moved to where the sim drew it, 5.0. The painter (`photo.WristPhotos`) used to leave the block rendered whenever the nearest demo frame couldn't paint 80% of it spot by spot, as up close at a grasp it couldn't about half the time; a rendered block moved the grasp chunk 22 mm (median, 13 chunks) and a painted one 5 mm (11 chunks). It also read the mat round where the real block stood in that frame from the block's dark, shaded edges, which left a dark outline of it on the mat.
+
+**In the sim the fixed jaw came down on the block.** Closed loop from the 25 real starts, the sim put 18 in the jar. In every failure the policy commanded the descent as on the arm, but the fixed jaw met the block's top and held the arm 30 to 35 mm up: when the jaws began to close, the block lay 22 mm below their midpoint and 15 to 30 mm towards the fixed jaw, where on the arm it lay level with them and 9 mm towards it. Replaying the arm's own commands in the sim, the same attempts succeed, so it's the policy's aim from the sim's pictures, not the physics or where the block is.
+
+**The fix.** A block the painter can't paint spot by spot now gets the nearest frame's real block, scaled and moved onto the drawn one (`photo.BLOCK_PATCH`), and mat within 9 px of the real block's red isn't read from that frame (`photo.BLOCK_EDGE`). The grasp chunk then moves 10.1 mm (median) instead of 16.2, and the approach chunks are unchanged (5.3 against 5.4).
+
+| From the 25 starts of the real run | Sim puts in the jar | Outcome as on the arm |
+| --- | --- | --- |
+| Before | 18 | 18 |
+| With the block painted as above | 20 | 21 |
+| And the block's and jar's top camera pixels from the run's own frame 3 s in, as an eval takes a demo's | 21 | 22 |
+
+Over the eval's 50 attempts with the same layouts, it placed 41 against 36: 6 placed that the build before missed, and 1 missed that it placed (p = 0.13 by an exact sign test).
+
+What's left: the sim still fails real attempts 18 and 23, both at the mat's far right and both grasped tightly on the arm (the block 13 to 14 mm towards the fixed jaw, against 5 mm in the attempts the sim matches). The run's own wrist frames put its blocks 3.5 mm (median) further from the fixed jaw than the sim does, in 20 of 21 attempts: the top camera had moved 1 to 2.5 px since the demos, and the sim places a run's blocks through the demos' camera. In the wrist picture, the table's edge past the mat and the floor beyond it are drawn a few pixels off, and at the grasp the block about 14 px higher than the real one.
 
 ## What replaying a real policy run showed
 

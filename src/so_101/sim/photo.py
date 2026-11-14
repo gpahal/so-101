@@ -28,6 +28,9 @@ FILL_REACH = 6.0  # pixels
 WHOLE_BLOCK = 0.8  # the share of the drawn block's pixels a real frame has to show for any to be used
 MARGIN = 12.0  # pixels round the drawn arm that may show more of the real one
 REGISTER_REACH = 45.0  # pixels: further off than this, a patch of the right colour is something else
+# Pixels round the real block's red that are still its dark, shaded edge, and must not be read as mat.
+BLOCK_EDGE = 9
+BLOCK_PATCH = True  # a block the frame can't paint spot by spot gets the frame's real block, scaled onto it
 LINKS = arm.MOVING_BODIES
 
 
@@ -327,10 +330,16 @@ class WristPhotos:
         # saw the block from another side, only some of its spots show there, and a block patched together
         # from real and rendered pieces looks like neither: it's then left as rendered, whole.
         reads_red = _read(red.astype(np.uint8), read_at, cv2.INTER_NEAREST, 0) > 0
+        # The real block's shaded edges aren't red enough to count as the block, but read as mat they draw
+        # a dark outline of it where it stood in that frame.
+        edge = cv2.dilate(red.astype(np.uint8), np.ones((BLOCK_EDGE, BLOCK_EDGE), np.uint8)) if BLOCK_EDGE else red.astype(np.uint8)
+        near_red = _read(edge, read_at, cv2.INTER_NEAREST, 0) > 0
         block = part == -2
-        seen &= np.where(block, reads_red, ~reads_red)
+        seen &= np.where(block, reads_red, ~near_red)
+        patch = None
         if block.any() and seen[block].mean() < WHOLE_BLOCK:
             seen[block] = False
+            patch = self._block_patch(real, red, rows[block], columns[block]) if BLOCK_PATCH else None
         # The jaws are fixed to the camera, so they're read from the very pixels they're drawn at, with the
         # opening of the nearest frame, which is rarely more than a pixel different.
         jaws = (part == LINKS.index("gripper")) | (part == LINKS.index("moving_jaw_so101_v1"))
@@ -348,7 +357,31 @@ class WristPhotos:
         painted[rows[seen], columns[seen]] = colours[seen]
         done = np.zeros(shapes.shape, bool)
         done[rows[seen], columns[seen]] = True
+        if patch is not None:
+            painted[rows[block], columns[block]] = patch
+            done[rows[block], columns[block]] = True
         return _fill(painted, parts > -9, done)
+
+    @staticmethod
+    def _block_patch(real: np.ndarray, red: np.ndarray, rows: np.ndarray, columns: np.ndarray) -> np.ndarray | None:
+        """Colours for the drawn block's pixels from the real block in `real`, scaled and moved so its red
+        patch covers the drawn block: when the frame saw the block from too different a side to paint it
+        spot by spot. Up close at a grasp that's about half the time, and a rendered block there moved the
+        ACT policy's grasp 22 mm (median) from where real frames put it, against 5 mm painted."""
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(red.astype(np.uint8))
+        if count < 2:
+            return None
+        largest = labels == 1 + int(np.argmax(stats[1:, 4]))
+        found_rows, found_columns = np.nonzero(largest)
+        scale = np.sqrt(len(rows) / len(found_rows))
+        # The real pixel each drawn pixel is read from: the drawn block's centre onto the real one's, scaled.
+        source = np.c_[found_columns.mean() + (columns - columns.mean()) / scale, found_rows.mean() + (rows - rows.mean()) / scale].astype(np.float32)
+        colours = _read(real, source, cv2.INTER_LINEAR, 0)
+        inside = _read(largest.astype(np.uint8), source, cv2.INTER_NEAREST, 0) > 0
+        if not inside.any():
+            return None
+        colours[~inside] = np.median(colours[inside], axis=0)  # past the real patch's edge: its typical red
+        return colours
 
 
 def _yaw(angle: float) -> np.ndarray:

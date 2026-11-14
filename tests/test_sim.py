@@ -216,6 +216,23 @@ class ArmTest(unittest.TestCase):
 
         self.assertIsNone(fit.push_while_closing(Hidden(), 0, 72))
 
+    def test_a_block_the_frame_cant_paint_spot_by_spot_gets_the_real_block_scaled_onto_it(self) -> None:
+        from so_101.sim.looks import red_mask
+        from so_101.sim.photo import WristPhotos
+
+        # The real frame's block: 40 px wide at (100, 100), two reds, darker on its right half.
+        real = np.zeros((480, 640, 3), np.uint8)
+        real[80:120, 80:100] = (220, 20, 20)
+        real[80:120, 100:120] = (150, 10, 10)
+        # The drawn block: 80 px wide, centred at (400, 300).
+        rows, columns = np.mgrid[260:340, 360:440]
+        colours = WristPhotos._block_patch(real, red_mask(real), rows.ravel(), columns.ravel())
+        self.assertIsNotNone(colours)
+        drawn = colours.reshape(80, 80, 3)
+        np.testing.assert_allclose(drawn[40, 10], (220, 20, 20), atol=2)  # its left half from the real block's left
+        np.testing.assert_allclose(drawn[40, 70], (150, 10, 10), atol=2)
+        self.assertIsNone(WristPhotos._block_patch(np.zeros_like(real), np.zeros((480, 640), bool), rows.ravel(), columns.ravel()))
+
     def test_a_block_seen_from_above_is_drawn_where_and_as_big_as_it_was_seen(self) -> None:
         from so_101.sim import fit
         from so_101.sim.camera import Lens
