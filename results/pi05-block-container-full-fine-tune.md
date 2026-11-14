@@ -1,4 +1,4 @@
-# π0.5 on block-container: 21 of 25 (2026-11-14)
+# π0.5 on block-container: 21 of 25
 
 The π0.5 policy trained with the full fine-tune recipe put the block in the jar in 21 of 25 attempts, 5 at each of the 5 block spots used for the demos. Three of the four failures were at the far-right spot. Two of them never lifted the block: the gripper stopped short of it, pinched its near edge and let go, again and again. The other two carried the block to the jar and let go over its rim, so it fell beside the jar. The room was much brighter than in the demos for the whole run: the top camera read 125 to 144 of 255, against 86.
 
@@ -6,10 +6,10 @@ The π0.5 policy trained with the full fine-tune recipe put the block in the jar
 
 | | |
 | --- | --- |
-| Command | `uv run so101 run --policy pi05 --remote --episodes 25`, started 10:37, finished 10:49 |
+| Command | `uv run so101 run --policy pi05 --remote --episodes 25` |
 | Policy | `gpahal/pi05_so101_block-container` at `100-demos` (commit `30f7e126`): 30,000 steps from `lerobot/pi05_base`, whole model trained, 32-bit weights, image augmentation, averaged weights |
 | Server | Hugging Face Jobs L4, started with `uv run so101 server start --policy pi05`: bfloat16, guided real-time chunking, unused action columns pinned |
-| Training data | 100 demos in 10 sessions, recorded 2026-11-12, the same as the ACT baseline |
+| Training data | 100 demos in 10 sessions, the same as the ACT baseline |
 | Attempt limit | 30 s; every attempt was ended with right arrow before it |
 | Block spots | Cycled through the 5 spots of the demos, in order: A, B, C, D, E |
 | Lighting | Brighter than the demos: top camera brightness 125 to 144 of 255 at the start of every attempt (the demos read about 86). See [Lighting](#lighting) |
@@ -102,11 +102,11 @@ Measured the same way on both runs, from the commands sent to the arm:
 | Largest command step between two frames, placed attempts | 2.4° to 5.4° | 3.0° to 12.1° |
 | Largest movement of the arm between two frames | 2.4° to 3.1° | 2.2° to 3.4° |
 
-π0.5 now moves as smoothly as ACT. The first π0.5 model, trained for 12,000 steps with only the action model unfrozen, changed direction 54 to 88 times per attempt without the pin and 15 to 16 times with it, in five attempts on 2026-11-13.
+π0.5 now moves as smoothly as ACT. The first π0.5 model, trained for 12,000 steps with only the action model unfrozen, changed direction 54 to 88 times per attempt without the pin and 15 to 16 times with it, in five earlier attempts.
 
 ## Lighting
 
-The run was in morning daylight, and the demos were recorded in the afternoon under the room's lights. The cameras' exposure is fixed, so the pictures were brighter:
+The run was in daylight, and the demos were recorded under the room's lights. The cameras' exposure is fixed, so the pictures were brighter:
 
 | | Demos | ACT baseline | This run |
 | --- | --- | --- | --- |
@@ -120,7 +120,7 @@ The policy was trained with random brightness changes of up to 20% and had never
 
 ## Compared with the ACT baseline
 
-| | ACT (2026-11-13, 13:09) | π0.5 (this run) |
+| | ACT baseline | π0.5 (this run) |
 | --- | --- | --- |
 | Placed | 24 of 25 | 21 of 25 |
 | By spot (A, B, C, D, E) | 5, 5, 5, 4, 5 | 5, 5, 4, 2, 5 |
@@ -128,7 +128,7 @@ The policy was trained with random brightness changes of up to 20% and had never
 | Lighting (top camera) | 95 to 100, close to the demos | 125 to 144 |
 | Where the policy ran | The Mac's GPU, 100 action steps per prediction | An L4 in the cloud, a new plan about every 0.6 s |
 
-This doesn't show which policy is better. A gap of 3 in 25 is within what chance gives (Fisher's exact test, p = 0.35), and the two runs were in different light. ACT has only been run in bright light once, on 2026-11-13 in warmer and brighter light than this (brightness 155, 37% of the top camera's pixels at full white), where it placed 4 of 11.
+This doesn't show which policy is better. A gap of 3 in 25 is within what chance gives (Fisher's exact test, p = 0.35), and the two runs were in different light. ACT has only been run in bright light once, in warmer and brighter light than this (brightness 155, 37% of the top camera's pixels at full white), where it placed 4 of 11.
 
 The policies fail differently. ACT's misses were all first grasps beside the block, and it recovered from 2 of 3. π0.5 grasped the block in 23 of 25 attempts at the first try, and lost 2 of those 23 at the jar.
 
