@@ -711,6 +711,57 @@ def blocks_by_wrist(env, demos: Demos, held: dict, layouts: list[dict], reach: f
     return float(np.median(moves)), float(np.median(left))
 
 
+def closing_starts(state: np.ndarray, hold: int) -> int:
+    """The last frame before a hold at which the jaws are still as open as they got on their way to it."""
+    grip = state[:, 5]
+    first = max(hold - 90, 0)
+    widest = first + int(np.argmax(grip[first:hold]))
+    return widest + int(np.flatnonzero(grip[widest:hold] >= grip[widest] - 0.7)[-1])
+
+
+def clear_of_jaws(env, demos: Demos, held: dict, layouts: list[dict], place: str, reach: float = 0.014, allow: float = 0.0007) -> tuple[int, float]:
+    """Move each demo's block from its `place` to the nearest spot the real jaws didn't pass through, as
+    `<place>_clear`, and return how many moved and their median move in millimetres.
+
+    The real arm came down with a jaw either side of the block. A block the sim starts a few millimetres
+    off can lie under where a jaw came down, and then the jaw lands on it and nothing is grasped. So with
+    the arm at the demo's real joints, over the 5 s before its jaws begin to close, no part of the arm
+    may be more than `allow` inside the block; the block is tried at spots further and further from
+    `place`, up to `reach`, until none is; a block with no clear spot that near stays. Once the jaws close
+    they push the block, so nothing after that says where it lay.
+    """
+    moves = []
+    for layout in layouts:
+        episode = layout["episode"]
+        start = layout.get(place, layout["seen"])
+        layout[f"{place}_clear"] = list(start)
+        if episode not in held:
+            continue
+        state = demos.episode(episode)[0]
+        last = closing_starts(state, held[episode][0])
+        frames = range(max(last - 150, 0), last + 1, 3)  # the whole way down: a jaw can pass over the block's place and move on
+
+        def inside(xy) -> float:
+            deepest = 0.0
+            for frame in frames:
+                env.set_joints(state[frame])
+                env.set_block(xy, start[2])
+                mujoco.mj_forward(env._model, env.data)
+                deepest = max(deepest, env.arm_in_block())
+            return deepest
+
+        if inside(start[:2]) <= allow:
+            continue
+        for radius in np.arange(0.001, reach + 1e-9, 0.001):
+            spots = np.array(start[:2]) + radius * np.array([[np.cos(a), np.sin(a)] for a in np.arange(0, 2 * np.pi, 0.001 / radius)])
+            free = next((spot for spot in spots if inside(spot) <= allow), None)
+            if free is not None:
+                layout[f"{place}_clear"] = [round(float(free[0]), 4), round(float(free[1]), 4), start[2]]
+                moves.append(radius * 1000)
+                break
+    return len(moves), float(np.median(moves)) if moves else 0.0
+
+
 def replays_into_jar(env, demos: Demos, layouts: list[dict], place: str) -> int:
     """How many demos' real commands, replayed, leave the block in the jar when each block starts at its
     layout's `place`: `seen` by the top camera, or `by_wrist`."""

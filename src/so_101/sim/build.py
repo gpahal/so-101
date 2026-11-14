@@ -46,6 +46,12 @@ DEFAULTS = {
     "table_past_mat": 0.025,
     "floor_below": 0.74,  # the floor below the table top: a desk's height
 }
+# Where a demo's block can start, by the key its layout keeps each place under, best guess first on a tie.
+BLOCK_PLACES = ("seen_clear", "by_wrist_clear", "seen", "by_wrist")
+BLOCK_PLACE_NAMES = {
+    "seen": "the top camera's places", "by_wrist": "the wrist camera's", "seen_clear": "the top camera's moved clear of the jaws",
+    "by_wrist_clear": "the wrist camera's moved clear",
+}  # fmt: skip
 TABLE = {"x": [-0.12, 0.42], "y": [-0.45, 0.1], "texel": 0.001}  # replaced by the edges the top camera sees
 
 
@@ -241,8 +247,9 @@ def build(
     env = sim_env.BlockContainerEnv(scene_dir=str(out))
     env.reset(seed=0)
     moved, left = fit.blocks_by_wrist(env, demos, held, scene["starts"])
+    cleared = {place: fit.clear_of_jaws(env, demos, held, scene["starts"], place) for place in ("seen", "by_wrist")}
     env.close()
-    scene["fits"]["block"] |= {"wrist_move_mm": round(moved, 1), "wrist_px": round(left, 1)}
+    scene["fits"]["block"] |= {"wrist_move_mm": round(moved, 1), "wrist_px": round(left, 1), "moved_clear": {place: [count, round(by, 1)] for place, (count, by) in cleared.items()}}
     fit.save_json(scene_path, scene)
 
     timing = kept.get("timing")
@@ -264,19 +271,24 @@ def build(
     env = sim_env.BlockContainerEnv(scene_dir=str(out), max_relative_target=teleop_limit)
     env.reset(seed=0)
     error = fit.tracking_error(env, demos, held, held_back[:: max(1, len(held_back) // 6)])
-    # Where does each demo's block start: where the top camera saw it, or where the wrist camera did? The two
-    # are a few millimetres apart, and the arm has to grasp it, so whichever lets more of the real demos'
-    # commands put it in the jar.
-    into_jar = {place: fit.replays_into_jar(env, demos, [layout for layout in scene["starts"] if layout["episode"] in fit_on], place) for place in ("seen", "by_wrist")}
+    # Where does each demo's block start? The top camera and the wrist camera place it a few millimetres
+    # apart, and either place can lie under where a real jaw came down. The arm has to grasp it, so it's
+    # whichever of the four lets most of the real demos' commands put it in the jar; a tie goes to a
+    # place clear of the jaws, since the real block was.
+    fitted = [layout for layout in scene["starts"] if layout["episode"] in fit_on]
+    into_jar = {place: fit.replays_into_jar(env, demos, fitted, place) for place in BLOCK_PLACES}
     env.close()
-    chosen = max(into_jar, key=into_jar.get)
+    chosen = max(BLOCK_PLACES, key=into_jar.get)
     for layout in scene["starts"]:
         layout["block"] = layout.get(chosen, layout["seen"])
     scene["fits"]["block"] |= {"placed": chosen, "replays_into_jar": into_jar}
+    seen_clear, wrist_clear = scene["fits"]["block"]["moved_clear"]["seen"], scene["fits"]["block"]["moved_clear"]["by_wrist"]
     report(
-        f"Blocks: the wrist camera saw them {scene['fits']['block']['wrist_move_mm']:.1f} mm (median) from where the top camera did. Replaying "
-        f"{len(fit_on)} demos puts {into_jar['seen']} in the jar from the top camera's places and {into_jar['by_wrist']} from the wrist "
-        f"camera's, so each block starts where the {'top' if chosen == 'seen' else 'wrist'} camera saw it."
+        f"Blocks: the wrist camera saw them {scene['fits']['block']['wrist_move_mm']:.1f} mm (median) from where the top camera did. "
+        f"{seen_clear[0]} of the top camera's places and {wrist_clear[0]} of the wrist camera's lay under where a real jaw came down, and "
+        f"were moved clear by {seen_clear[1]:.0f} and {wrist_clear[1]:.0f} mm (median). Replaying {len(fit_on)} demos puts "
+        + ", ".join(f"{into_jar[place]} in the jar from {BLOCK_PLACE_NAMES[place]}" for place in BLOCK_PLACES)
+        + f", so each block starts at {BLOCK_PLACE_NAMES[chosen]}."
     )
     scene["fits"]["joint_error"] = [round(float(e), 2) for e in error]
     report("Joint error on demos the motors weren't fitted to: " + ", ".join(f"{e:.1f}" for e in error))
@@ -480,6 +492,58 @@ def replay(demos_root: Path, scene_dir: Path, episodes: list[int] | None, limit:
         "in_jar": sum(r["in_jar"] for r in results),
         "error": np.mean([r["error"] for r in results], axis=0),
     }
+
+
+def replay_recording(recording: Path, scene_dir: Path, limit: float) -> dict:
+    """Replay another recording's real commands in the sim: a run a policy drove on the arm, say, which
+    no fit ever saw. Real commands that worked on the arm should work here, whoever gave them.
+
+    Each attempt's jar is placed from its first top camera frame and its block from the frame 3 s in, as
+    a build places a demo's: a run's first frames can still show a hand putting the block down. The block
+    is then moved clear of where that attempt's own jaws came down. All this needs the top camera where
+    it was for the demos. Attempts that never held the block on the arm are replayed too but counted
+    apart: there's nothing they should lift.
+    """
+    run = fit.Demos(recording)
+    held = fit.held_demos(run)
+    env = sim_env.BlockContainerEnv(scene_dir=str(scene_dir), max_relative_target=limit)
+    env.reset(seed=0)
+    scene, units = env.scene, arm.Units.from_scene(env.scene)
+    top, table_height = scene["cameras"]["top"], scene["table"]["height"]
+    lens = Lens.from_scene(top["lens"])
+    episodes = list(range(len(run)))
+    jar = {"radius": scene["jar"]["radius"], "height": scene["jar"]["tint_height"]}
+    _, jars = fit.fit_jars(run, episodes, top["pose"], lens, jar, table_height, scene["jar"]["home"], True)
+    layouts = []
+    delay = top.get("delay_ticks", 0)
+    for episode in episodes:
+        state = run.episode(episode)[0]
+        frame = min(90, len(state) - 1)
+        early = run.frame(episode, frame)
+        blob = fit.red_blob(early, 40)
+        if blob is None:  # the block is hidden then, so there's no saying where it lay
+            continue
+        guess = fit.on_plane(top["pose"], lens, blob[0], table_height + scene["block"]["height"] * 0.6)[0, :2]
+        turn = fit.jaw_yaw(units, state[held[episode][0]]) if episode in held else 0.0
+        seen, _ = fit.block_yaw(env, early, guess, state[max(frame - delay, 0)], turn)
+        layouts.append({"episode": episode, "seen": seen, "jar": jars[episode]})
+    fit.clear_of_jaws(env, run, held, layouts, "seen")
+    results = []
+    for layout in layouts:
+        state, action = run.episode(layout["episode"])
+        env.reset(seed=0, options={"joints": state[0], "block": layout["seen_clear"], "jar": layout["jar"]})
+        start = highest = env.block_pose()[0][2]
+        for command in action:
+            env.apply(command)
+            highest = max(highest, env.block_pose()[0][2])
+        for _ in range(45):  # let it settle
+            env.apply(action[-1])
+        results.append({
+            "episode": layout["episode"], "held": layout["episode"] in held, "lifted": bool(highest - start > 0.03), "in_jar": env.block_in_jar(),
+            "moved_mm": float(np.linalg.norm(np.subtract(layout["seen_clear"][:2], layout["seen"][:2])) * 1000),
+        })  # fmt: skip
+    env.close()
+    return {"attempts": len(run), "results": results}
 
 
 def check(demos_root: Path, scene_dir: Path, policy_dir: Path, device: str, frames: int = 80) -> dict:

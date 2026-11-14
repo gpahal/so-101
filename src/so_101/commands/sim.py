@@ -92,6 +92,22 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         except ValueError as error:
             sys.exit(str(error))
         print(f"\nScene written to {scene}. Check it with `uv run so101 sim score {task.name}`, then commit it.")
+    elif ns.action == "replay" and ns.recording:
+        recording = Path(ns.recording).expanduser()
+        if not (recording / "meta" / "info.json").is_file():
+            sys.exit(f"{recording} isn't a recording: it has no meta/info.json. A run's is its `dataset` folder.")
+        result = sim_build.replay_recording(recording, scene, limit)
+        for row in result["results"]:
+            outcome = "in the jar" if row["in_jar"] else "lifted, not in the jar" if row["lifted"] else "not lifted"
+            note = "" if row["held"] else " (never held on the arm)"
+            moved = f", block moved {row['moved_mm']:.0f} mm clear of the jaws" if row["moved_mm"] else ""
+            print(f"attempt {row['episode']:3d}: {outcome}{note}{moved}")
+        real = [row for row in result["results"] if row["held"]]
+        print(
+            f"\nOf the {len(real)} attempts that held the block on the arm, the sim lifts it in {sum(row['lifted'] for row in real)} "
+            f"and puts it in the jar in {sum(row['in_jar'] for row in real)}. {result['attempts'] - len(real)} of {result['attempts']} never held it "
+            "or hid it from the top camera 3 s in."
+        )
     elif ns.action == "replay":
         video = s.outputs_dir / "sim" / f"replay_{task.name}.mp4"
         episodes = list(range(0, ns.episodes)) if ns.episodes else None

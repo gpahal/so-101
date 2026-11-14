@@ -238,6 +238,50 @@ class EnvTest(unittest.TestCase):
         self.assertTrue(info["is_success"])
         self.assertTrue(self.env.jar_upright())
 
+    def test_a_block_under_a_jaw_is_moved_clear_of_where_the_jaws_came_down(self) -> None:
+        import mujoco
+
+        from so_101.sim import fit
+
+        env = self.env
+        env.reset(seed=0, options={"start": 0})
+        # Lower the open jaws until the fixed jaw's tip is within the block's height above the mat.
+        tip = env._model.geom("fixed_jaw_sph_tip1").id
+        for lift in np.arange(0.0, 60.0, 0.5):
+            reading = np.array([0.0, lift, 5.0, 66.0, 0.0, 35.0])
+            env.set_joints(reading)
+            mujoco.mj_forward(env._model, env.data)
+            if env.data.geom_xpos[tip][2] < env.table_height + 0.008:
+                break
+        # The block's edge 6 mm under that tip, as when the sim starts it a few millimetres off.
+        outward = env.data.geom_xpos[tip][:2] / np.linalg.norm(env.data.geom_xpos[tip][:2])
+        under = [float(v) for v in env.data.geom_xpos[tip][:2] + outward * 0.010]
+        env.set_block(under, float(np.arctan2(outward[1], outward[0])))
+        mujoco.mj_forward(env._model, env.data)
+        self.assertGreater(env.arm_in_block(), 0.002)
+
+        # A recording that holds that pose with its jaws open, then closes them and holds the block.
+        grip = np.r_[np.full(60, 35.0), np.linspace(35.0, 18.0, 10), np.full(30, 18.0)]
+        state = np.tile(reading, (len(grip), 1))
+        state[:, 5] = grip
+
+        class Recording:
+            def episode(self, episode):
+                return state, state
+
+        self.assertEqual(fit.closing_starts(state, 72), 60)
+        yaw = float(np.arctan2(outward[1], outward[0]))
+        layouts = [{"episode": 0, "seen": [*under, yaw]}, {"episode": 1, "seen": [under[0], under[1] + 0.1, yaw]}]
+        moved, by = fit.clear_of_jaws(env, Recording(), {0: (72, 99), 1: (72, 99)}, layouts, "seen")
+        self.assertEqual(moved, 1)
+        self.assertGreater(by, 1.0)
+        self.assertLess(by, 14.5)
+        self.assertEqual(layouts[1]["seen_clear"], layouts[1]["seen"])  # well away from the jaws: left alone
+        env.set_joints(reading)
+        env.set_block(layouts[0]["seen_clear"][:2], yaw)
+        mujoco.mj_forward(env._model, env.data)
+        self.assertLessEqual(env.arm_in_block(), 0.0007)
+
     def test_a_block_beside_the_jar_is_not_in_it(self) -> None:
         self.env.reset(seed=0, options={"start": 0, "block": [0.37, -0.09, 0.0]})
         for _ in range(30):

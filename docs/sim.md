@@ -10,7 +10,7 @@ Each fit used 72 of the 96 demos that hold the block; `score` and `check` used t
 | --- | --- |
 | Top camera's pose and lens, joint offsets | The drawn arm's outline is 3.8 px from the real one. The block appears 3.9 px from where the jaws closed on it |
 | Joint offsets | shoulder_lift -0.4°, elbow_flex -6.1°, wrist_flex -2.6°, wrist_roll +3.9° |
-| Block's start, seen by the top camera | 5.0 mm (median) from where the jaws later closed on it |
+| Block's start | The top camera saw it 5.0 mm (median) from where the jaws later closed on it. 37 of the 96 lay under where a real jaw came down, and were moved clear by 2 mm (median) |
 | Jar | Measured: 63 mm across, 70 mm tall, taped over its lower 52 mm. It stood within 5 x 6 mm (1 SD) over the demos |
 | Wrist camera | Its drawn outlines are 6.6 px from the real jaws, 6.5 px from the block, 9.3 px from the jar |
 | Cameras' timing | The top camera's picture is 3 control ticks (100 ms) older than the joints saved with it. The wrist camera's delay barely shows: 0 to 2 ticks fit alike, and 0 was taken. Both give 25 new pictures a second |
@@ -21,28 +21,29 @@ Each fit used 72 of the 96 demos that hold the block; `score` and `check` used t
 
 "Rendered" draws everything from the arm model and fitted colours. "Real pixels" is what the sim does when the demos are on the computer: the arm in the top camera, the wrist camera's view, and each attempt's block and jar come from the demos' frames (README, "Real pixels"). The first two columns are from 2026-11-13, when the jar's height was a guess (63 mm) and the jaws' friction was the arm model's 1.0.
 
-| Check | Rendered, 13 Nov | Real pixels, 13 Nov | Real pixels, 14 Nov |
-| --- | --- | --- | --- |
-| `sim score`, top camera, pixels from the real frame (two real frames of the same pose: 7.2) | 9.3 | 5.4 | 5.3 |
-| `sim score`, wrist camera (two real frames: 13.7) | 21.2 | 11.1 | 10.0 |
-| `sim score`, wrist camera's sharpness against a real frame's | | 3.7 | 2.3 |
-| `sim check`: the policy's actions from the demo's, on sim images (on real images: 0.6°) | 3.1° | 2.2° | 2.0° |
-| ... with only the top picture the sim's | 2.2° | 1.3° | 1.3° |
-| ... with only the wrist picture the sim's | 1.5° | 1.4° | 1.2° |
-| `sim replay`: of 96 demos' real commands, the ones that put the block in the jar | | 85 | 88 |
-| `sim eval`, ACT policy, 100 action steps, 30 s an attempt (on the arm: 24 of 25) | 17 of 25 (68%) | 19 of 25 (76%; 57% to 89% at 95%) | 15 of 25 (60%; 41% to 77% at 95%) |
+| Check | Rendered, 13 Nov | Real pixels, 13 Nov | 14 Nov, jar measured and jaws' friction lowered | 14 Nov, and blocks moved clear of the jaws |
+| --- | --- | --- | --- | --- |
+| `sim score`, top camera, pixels from the real frame (two real frames of the same pose: 7.2) | 9.3 | 5.4 | 5.3 | 5.3 |
+| `sim score`, wrist camera (two real frames: 13.7) | 21.2 | 11.1 | 10.0 | 9.9 |
+| `sim score`, wrist camera's sharpness against a real frame's | | 3.7 | 2.3 | 2.3 |
+| `sim check`: the policy's actions from the demo's, on sim images (on real images: 0.6°) | 3.1° | 2.2° | 2.0° | 2.0° |
+| ... with only the top picture the sim's | 2.2° | 1.3° | 1.3° | 1.3° |
+| ... with only the wrist picture the sim's | 1.5° | 1.4° | 1.2° | 1.2° |
+| `sim replay`: of 96 demos' real commands, the ones that put the block in the jar | | 85 | 88 | 90 |
+| `sim replay --recording`: of the 24 attempts of the real ACT run that held the block, the ones the sim puts in the jar | | | 17 | 20 |
+| `sim eval`, ACT policy, 100 action steps, 30 s an attempt (on the arm: 24 of 25) | 17 of 25 (68%) | 19 of 25 (76%; 57% to 89% at 95%) | 15 of 25 (60%; 41% to 77%) | 17 of 25 (68%; 48% to 83%) |
 
 Every eval starts its attempts from the same 25 layouts in the same order, so the runs can be compared attempt by attempt:
 
-- **The same layouts fail.** Both real-pixels runs placed 2 of their last 7. On 14 November, 5 of the 6 attempts whose block lay more than 24° to the arm's right failed, and 14 of the other 19 placed. Of the demos, 16 of 96 have their block that far right, the edge of where they put it.
-- **The two real-pixels runs don't differ by more than chance.** 19 and 15 of 25 are 76% and 60% with intervals of 57% to 89% and 41% to 77%, and an earlier run of 15 attempts, a build before, placed 12. Which of the day's changes moved which attempt wasn't separated: 25 attempts can't show a change of 4.
-- **Half the failures seen were out of time, not out of reach.** Videos are kept for the first 10 attempts. Of the 4 that failed on 14 November, 2 never closed on the block, and 2 hovered over it, grasped late and were holding it over the jar when the 30 s ran out.
+- **The same layouts fail.** The first two real-pixels runs placed 2 of their last 7. Of the 6 attempts whose block lay more than 23° to the arm's right, the two runs of 14 November placed 1 and then 2; of the other 19 they placed 14 and then 15. On the arm that spot was the hardest too, with 4 of 5. Of the demos, 16 of 96 have their block that far right, the edge of where they put it.
+- **The three real-pixels runs don't differ by more than chance.** 19, 15 and 17 of 25 have intervals that overlap from 57% to 77%, and an earlier run of 15 attempts, a build before, placed 12. Which change moved which attempt wasn't separated: 25 attempts can't show a change of 4.
+- **Half the failures seen were out of time, not out of reach.** Videos are kept for the first 10 attempts. Of the 4 that failed in the first run of 14 November, 2 never closed on the block, and 2 hovered over it, grasped late and were holding it over the jar when the 30 s ran out.
 
 Physics, which doesn't depend on how things are drawn:
 
 | Check | Result |
 | --- | --- |
-| `sim replay`: every demo's real commands, nothing correcting the arm | 90 of 96 lift the block, 88 put it in the jar |
+| `sim replay`: every demo's real commands, nothing correcting the arm | 93 of 96 lift the block, 90 put it in the jar |
 | Jaw tips at the release, sim against real joints, in 32 of those replays | 1.7 mm low and 1.1 mm across (medians), with every joint within 0.3° |
 
 ## What the measurements and photos of 14 November settled
@@ -66,6 +67,31 @@ A ruler gave the block, the jar and the mat, and nine photos showed the setup fr
 - **Nor can the demos place the mat.** With the mat's top held 15, 30 and 43 mm lower, the top camera's outline fits within 0.25 px (3.8, 3.9, 4.1 and 4.0 px) and the offsets move by up to 16° to keep each grasp on the mat. Only the photos say where it is.
 - **The wrist camera is where the arm model mounts one.** The fit puts its lens 9 mm from the model's own wrist camera and pitches it 5° from it, and the photos show the follower's camera on that mount.
 - **The jaws' friction was too high.** See the next section.
+
+## What replaying a real policy run showed
+
+`so101 run` saves every attempt's frames, joints and commands, so the run of 2026-11-13 that placed 24 of 25 on the arm can be replayed like a demo (`sim replay --recording`). No fit saw it and no model is in the loop: its commands worked on the arm, so they should work in the sim.
+
+At first they didn't. Of the 24 attempts that held the block on the arm, the sim put 17 in the jar, and missed all 3 at the far-right spot. There the sim's fixed jaw came to rest on top of the block, 25 mm up, where the real one went down beside it to 7 mm, and the jaws closed on nothing.
+
+- **The policy leaves the block almost no room.** It brings its fixed jaw down within a few millimetres of the block's side, most of all at the far right; a demo's grasp is centred. On the arm that works, and it's also where the run's one failure was. In the sim a block that starts a few millimetres off lies under the jaw.
+- **The top camera can't place a block that closely.** It and the arm's joints disagree by about 5 mm on where a block is, and by more for this run: the top camera had moved 1 to 2.5 px between the demos, on 12 November, and the run a day later (its picture of the table's edge and of the mat's corner, lined up with the demos'). By 14 November it had moved 4 to 13 px. The π0.5 run of that morning is replayed all the same, and a moved camera is part of why it replays worse.
+- **Each recording says where its block wasn't.** The real jaws never passed through the real block. So each block is moved to the nearest spot to where the top camera saw it that the real arm, at its real joints over the 5 s before its jaws begin to close, doesn't touch (`fit.clear_of_jaws`). After the jaws close they push the block, so nothing later counts.
+
+With each attempt's block moved clear of that attempt's own jaws, the sim lifts 22 of the 24 and puts 20 in the jar; 11 blocks moved, by 5 mm (median), and the far-right ones by 6 to 8 mm. The attempt that failed on the arm fails in the sim too. The build now does the same for each demo (37 of 96 move, by 2 mm), and the replayed demos went from 88 of 96 in the jar to 90.
+
+Other runs, the same way:
+
+| Run on the arm | Held the block | Sim lifts it | Sim puts it in the jar |
+| --- | --- | --- | --- |
+| ACT, 2026-11-13 13:09, 25 attempts (24 placed on the arm) | 24 | 22 | 20 |
+| ACT, 2026-11-13 12:49, 25 attempts | 20 | 14 | 9 |
+| π0.5, 2026-11-13 13:28 and 14:23, 5 attempts each | 7 | 4 | 2 |
+| π0.5, 2026-11-14 10:37, 25 attempts | 23 | 17 | 15 |
+
+The 12:49 run's results on the arm weren't written down; its last frames show most of its blocks in the jar. Its first frames often show a hand still putting the block down, which is why a recording's block is placed from the frame 3 s in.
+
+What this doesn't fix is a policy running in the sim. There the block starts where a demo's did, moved clear of that demo's jaws, not of the policy's, and the policy comes down closer to the block than a demo did. In an eval of 14 November the attempts that placed the block first touched it 8 to 10 s in, as on the arm, and had it in the jar by 11 to 22 s (on the arm the jaws open over the jar at 12 to 15 s); the ones that failed closed their jaws up to 5 times without lifting it.
 
 ## What replaying the demos showed about the jaws
 
@@ -117,10 +143,12 @@ So a sim result for this ACT policy is still a lower bound, not a prediction. Co
 
 In order of what they would fix. Each `[sim]` setting is in `so101.toml`. Measured on 2026-11-14 and no longer needed: the block's, the jar's and the mat's sizes, and photos of the whole setup.
 
-1. **A checkerboard on the mat.** A printed checkerboard (squares of 25 mm, measured after printing) flat on the mat, and `uv run so101 check` run once to save a frame from each camera; then the same at two more places, one of them with the board propped at a slope so the wrist camera sees it at an angle. This gives each camera's lens from points known to the millimetre, which is what the wrist camera's fit lacks. With the distance from the shoulder's pan axis to the board's near corner measured, it also gives the top camera's pose.
-2. **The arm at known poses.** `uv run so101 pose` (read-only) with the arm's power on and the jaws closed, their tips resting on the mat, at three distances from the base measured with the ruler. A tip on the mat at a known distance is two numbers the joints must agree with, so three of them give the offsets of shoulder_lift, elbow_flex and wrist_flex, which the demos can't split.
+What stands between the sim and the arm's 24 of 25 is a few millimetres: the policy's jaw clears the block by that much, and the sim knows where a block lies relative to the arm to about 5 mm. The first recording is for that.
+
+1. **A sheet of paper, touched and looked at.** `uv run so101 sim nudge --episodes 3` teleoperates and records where no training reads (README). With a sheet of A4 taped flat on the mat where the block goes and no block: in the first take, touch the closed jaw tips to each of the sheet's four corners and hold 2 s at each; in the second, move the gripper slowly over the sheet so the wrist camera sees it from high, from low and tilted from each side, out to the far right. Four corners 210 and 297 mm apart, touched by the jaws and seen by both cameras, tie the joints, the wrist camera and the top camera to each other, which the demos can't. The command hasn't run on the arm yet.
+2. **Pushes for the mat's friction.** The third take of the same recording: no sheet, the block on the mat, pushed a few centimetres with the jaws two or three times.
 3. **The weights.** The block and the jar on kitchen scales (`block_mass`, `jar_mass`), and the jar's opening across.
-4. **Pushes for the mat's friction.** `uv run so101 sim nudge --episodes 3` (README). This moves the arm and hasn't been run yet.
+4. **New demos if the top camera has moved.** It had by 14 November, by 4 to 13 px. The sim is built for where the camera was on 12 November, and so is a policy trained on those demos.
 
 ## What else would close the gap
 
@@ -129,6 +157,7 @@ In order of what they would fix. Each `[sim]` setting is in `so101.toml`. Measur
 
 ## What was tried and dropped
 
+- **The arm's shadow in the top camera's picture.** With the block at the far right the arm is over the bare wood, where its shadow shows, and the sim's top picture is 6.3 from the real frame there against 3.9 with the block in the middle. A soft shadow on the table and the wall, with the light's direction, softness and darkness fitted to the demos' frames, fitted best with no darkness at all: 15 px out from the arm the background is already within 3.9 of the real frame, and nearer than that the picture comes from real frames.
 - **Fitting the mat's height.** The top camera draws the block about 9% larger than its red pixels cover, and the wrist camera saw the jar about 15% larger than the top camera's fit of it. A lower mat would explain the first; the second was the jar's height, 70 mm where 63 was assumed. Fitted from the block's size, the mat came out 7 to 16 mm below the base's plane, the arm's outline fitted worse (5.1 to 6.0 px against 3.8) and the optimiser's result depended on where it started. The photos show the base on the same table as the mat, and holding the mat lower fits the top camera as well, so the demos can't place it. `mat_height = "fit"` still does it.
 - **A strong pull on the joint offsets.** Holding the elbow's offset under 2°, as its calibrated range seemed to ask, left the outline 5.1 px out with the other offsets nearly free of it; refitted with the elbow held and the others free, the outline is back at 3.8 to 4.0 px (the table above). The range argument was wrong anyway: the model's limits aren't where its parts meet.
 - **A lens centre and freer joint offsets in the wrist camera's fit.** Letting the lens's axis sit off the picture's middle, and then letting the four offsets move, left the block's centre 15.8 px from the real one on held-back demos against 16.9 px without them, and the offsets didn't move. The 10 px that the block is drawn to the right of the real one stayed.

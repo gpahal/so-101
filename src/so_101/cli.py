@@ -783,6 +783,7 @@ def main() -> None:
     p.add_argument("--episodes", type=int, help="for replay: the first so many demos (default: all). For nudge: pushes to record (default 3). For eval: attempts (default 10)")
     p.add_argument("--action-steps", type=int, help="for eval: actions to carry out before predicting again (default: the model's trained value)")
     p.add_argument("--limit", type=float, help="for replay and eval: the per-step movement limit (default: max_relative_target in so101.toml)")
+    p.add_argument("--recording", metavar="DIR", help="for replay: replay this recording's commands instead of the demos': a run's `dataset` folder under outputs/rollouts/")
     p.add_argument("--refit-cameras", action="store_true", help="for build: fit the cameras and the joint offsets again, after moving a camera or recalibrating")
     p.add_argument("--refit-motors", action="store_true", help="for build: fit the motors to the real follower again")
     p.set_defaults(fn=cmd_sim, forwards=True)  # eval passes the rest to lerobot-eval, nudge to lerobot-record

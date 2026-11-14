@@ -24,7 +24,7 @@ import mujoco
 import numpy as np
 from gymnasium import spaces
 
-from so_101.sim.arm import JAW_BODIES, JOINT_NAMES, JOINTS, Units, arm_xml
+from so_101.sim.arm import JAW_BODIES, JOINT_NAMES, JOINTS, MOVING_BODIES, Units, arm_xml
 from so_101.sim.camera import HEIGHT, WIDTH, Lens, rotation_quat, to_camera
 
 CAMERAS = ("top", "wrist")
@@ -338,6 +338,8 @@ class BlockContainerEnv(gym.Env):
         self.is_block = model.geom_bodyid == self.block_body
         self.is_jar = model.geom_bodyid == self.jar_body
         self.is_arm = model.geom_group == GROUP_ARM
+        moving = {model.body(name).id for name in (*MOVING_BODIES, "camera_mount")}
+        self.moves = np.array([model.geom_bodyid[g] in moving for g in range(model.ngeom)])  # drawn or not
         self.jar_tint_geom = model.geom("jar_tint").id
         self.printed_materials = [m for m in range(model.nmat) if model.material(m).name.endswith("_material") and not model.material(m).name.startswith("sts3215")]
         self.motor_materials = [m for m in range(model.nmat) if model.material(m).name.startswith("sts3215")]
@@ -469,6 +471,15 @@ class BlockContainerEnv(gym.Env):
         position, rotation = self.jar_pose()
         local = (self.data.xpos[self.block_body] - position) @ rotation
         return bool(self.jar_upright() and np.hypot(local[0], local[1]) < jar["radius"] - jar["wall"] and 0 < local[2] < jar["height"])
+
+    def arm_in_block(self) -> float:
+        """How deep the arm's moving parts are inside the block, in metres: 0 when they're clear of it.
+        Needs `mj_forward` to have found what touches."""
+        deepest = 0.0
+        for contact in self.data.contact[: self.data.ncon]:
+            if self.is_block[contact.geom1] != self.is_block[contact.geom2] and (self.moves[contact.geom1] or self.moves[contact.geom2]):
+                deepest = min(deepest, float(contact.dist))
+        return -deepest
 
     def set_block(self, xy, yaw: float = 0.0) -> None:
         """Lay the block flat on the mat."""
