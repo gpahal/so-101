@@ -7,12 +7,12 @@ The ACT policy put the block in the jar in 24 of 25 attempts, 5 at each of the 5
 | | |
 | --- | --- |
 | Command | `uv run so101 run --episodes 25`, started 13:09, finished 13:21 |
-| Policy | `gpahal/act_so101_block-container`, latest revision, 100 action steps (3.3 s) per prediction, on the Mac's GPU |
+| Policy | `gpahal/act_so101_block-container` at `100-demos` (commit `41bf9834`), 100 action steps (3.3 s) per prediction, on the Mac's GPU |
 | Training data | 100 demos in 10 sessions, recorded 2026-11-12 |
 | Attempt limit | 30 s; every attempt was ended with right arrow before it |
 | Block spots | Cycled through the 5 spots of the demos, in order: A, B, C, D, E |
 | Lighting | Steady: top camera brightness 95 to 100 of 255 at the start of every attempt (the demos read about 88) |
-| Control loop | 29.6 Hz against 30; inference about 44 ms per prediction |
+| Control loop | 29.8 Hz against 30; inference about 44 ms per prediction |
 
 The spots, from the follower's base angle (pan) when it grasped:
 
