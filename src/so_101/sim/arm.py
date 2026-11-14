@@ -207,3 +207,24 @@ def held_block(units: Units, states: np.ndarray, depth: float = GRASP_DEPTH) -> 
     qpos = units.to_qpos(np.atleast_2d(states))
     rotations, positions = gripper_poses(qpos)
     return positions + np.einsum("nij,nj->ni", rotations, held_block_local(qpos[:, 5], depth))
+
+
+def closing_direction(jaw_angle: float) -> np.ndarray:
+    """The way closing jaws push a block, in the gripper's axes, for a model jaw angle in radians: from
+    the moving jaw's tip towards the fixed jaw's."""
+    model = arm_model()
+    fixed, moving = jaw_tips()
+    body = model.body("moving_jaw_so101_v1")
+    swing = _matrix(body.quat) @ _axis_rotations(model.jnt_axis[model.joint("gripper").id], np.array([jaw_angle]))[0]
+    way = fixed - (body.pos + swing @ moving)
+    return way / np.linalg.norm(way)
+
+
+def block_before_push(units: Units, start_states: np.ndarray, hold_states: np.ndarray, pushes: np.ndarray, depth: float = GRASP_DEPTH) -> np.ndarray:
+    """Where a block lay before closing jaws slid it towards the fixed jaw, in the arm's axes: `pushes`
+    metres back towards the moving jaw from where the jaws held it (`hold_states`), with the gripper
+    where it stood when the jaws began to close (`start_states`)."""
+    start, hold = units.to_qpos(np.atleast_2d(start_states)), units.to_qpos(np.atleast_2d(hold_states))
+    local = held_block_local(hold[:, 5], depth) - np.asarray(pushes, dtype=np.float64)[:, None] * np.array([closing_direction(a) for a in hold[:, 5]])
+    rotations, positions = gripper_poses(start)
+    return positions + np.einsum("nij,nj->ni", rotations, local)

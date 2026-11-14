@@ -171,6 +171,51 @@ class ArmTest(unittest.TestCase):
 
         self.assertAlmostEqual(arm.base_underside(), -0.0024, places=4)
 
+    def test_a_pushed_block_lay_back_towards_the_moving_jaw(self) -> None:
+        from so_101.sim import arm
+
+        units = arm.Units((0.0,) * 5, -11.7, 1.314)
+        open_jaws, holding = np.array([[0.0, 20.0, 10.0, 65.0, 0.0, 32.0]]), np.array([[0.0, 20.0, 10.0, 65.0, 0.0, 18.0]])
+        held = arm.held_block(units, holding)[0]
+        np.testing.assert_allclose(arm.block_before_push(units, holding, holding, np.zeros(1))[0], held, atol=1e-12)
+        before = arm.block_before_push(units, holding, holding, np.array([0.004]))[0]
+        self.assertAlmostEqual(float(np.linalg.norm(before - held)), 0.004, places=6)
+        # Back towards the moving jaw: against the way closing pushes.
+        rotations, _ = arm.gripper_poses(units.to_qpos(holding))
+        way = rotations[0] @ arm.closing_direction(units.to_qpos(holding)[0, 5])
+        self.assertAlmostEqual(float((before - held) @ way), -0.004, places=6)
+        # With the gripper where it stood when the jaws began to close, not where it held the block.
+        moved = open_jaws.copy()
+        moved[0, 0] += 3.0
+        self.assertGreater(np.linalg.norm(arm.block_before_push(units, moved, holding, np.zeros(1))[0] - held), 0.005)
+
+    def test_the_push_is_read_off_the_wrist_frames_with_the_block_as_ruler(self) -> None:
+        from so_101.sim import fit
+
+        # Jaws open, then closing over 10 frames: the block, 160 px wide, is 20 px further left at the hold.
+        grip = np.r_[np.full(60, 32.0), np.linspace(32.0, 18.0, 10), np.full(30, 18.0)]
+        state = np.tile([0.0, 20.0, 10.0, 65.0, 0.0, 0.0], (len(grip), 1))
+        state[:, 5] = grip
+
+        class Recording:
+            def episode(self, episode):
+                return state, state
+
+            def frame(self, episode, index, camera="top"):
+                image = np.zeros((480, 640, 3), np.uint8)
+                left = 240 if index < 65 else 220
+                image[150:300, left : left + 160] = (200, 20, 20)
+                return image
+
+        self.assertEqual(fit.closing_starts(state, 72), 60)
+        self.assertAlmostEqual(fit.push_while_closing(Recording(), 0, 72), 20 * 0.0318 / 160, places=6)
+
+        class Hidden(Recording):
+            def frame(self, episode, index, camera="top"):
+                return np.zeros((480, 640, 3), np.uint8) if index > 65 else super().frame(episode, index, camera)
+
+        self.assertIsNone(fit.push_while_closing(Hidden(), 0, 72))
+
     def test_units_convert_both_ways(self) -> None:
         from so_101.sim.arm import Units
 

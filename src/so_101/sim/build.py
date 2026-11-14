@@ -124,7 +124,7 @@ def build(
     errors = top["errors"]
     report(
         f"Top camera: the drawn arm's outline is {errors['outline_px']:.1f} px from the real one, and the block appears "
-        f"{errors['block_px']:.1f} px from where the jaws closed on it. The mat's top is {(table_height - arm.base_underside()) * 1000:+.0f} mm from the "
+        f"{errors['block_px']:.1f} px from where it lay before the jaws slid it {top.get('block_push_mm', 0.0):.1f} mm (median) closing on it. The mat's top is {(table_height - arm.base_underside()) * 1000:+.0f} mm from the "
         f"surface the arm's base stands on{'' if mat_height is not None else ' (fitted)'}. Joint offsets (degrees): "
         + ", ".join(f"{name} {offset:+.1f}" for name, offset in zip(arm.ARM_JOINTS, top["offsets_deg"]))
     )

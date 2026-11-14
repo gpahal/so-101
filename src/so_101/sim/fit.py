@@ -91,6 +91,10 @@ class TopFit:
     resting: np.ndarray  # which sightings are of the block on the mat, before its grasp
     block_areas: np.ndarray  # how many pixels the block covered in each resting sighting
     block_corners: np.ndarray  # the block's corners about its centre, as it lay in each resting sighting
+    # For each sighting, the readings when the jaws began to close on the block, and how far in metres they
+    # then slid it towards the fixed jaw (`push_while_closing`). A carried block's are its own and 0.
+    start_states: np.ndarray | None = None
+    pushes: np.ndarray | None = None
     cap: float = 40.0
 
     def residuals(self, pose, lens: Lens, offsets, gripper_closed: float, deg_per_percent: float, block_height: float) -> dict[str, np.ndarray]:
@@ -105,14 +109,16 @@ class TopFit:
             stray.append(cv2.remap(distance, x, y, cv2.INTER_LINEAR, borderValue=0)[0] * judged)
             missed.append(np.minimum(cKDTree(drawn).query(real)[0], self.cap))
         block = held_block(units, self.block_states)
+        # A block seen on the mat lay where it was before the closing jaws slid it, not where they held it.
+        seen = block if self.pushes is None else arm.block_before_push(units, self.start_states, self.block_states, self.pushes)
         # How big each block on the mat would look: the area its corners enclose in the picture.
-        centres = np.c_[block[self.resting, :2], np.full(self.resting.sum(), block_height)]
+        centres = np.c_[seen[self.resting, :2], np.full(self.resting.sum(), block_height)]
         outlines = lens.project(to_camera(centres[:, None] + self.block_corners, pose)).astype(np.float32)
         drawn_areas = np.array([cv2.contourArea(cv2.convexHull(outline)) for outline in outlines])
         return {
             "stray": np.concatenate(stray),  # the drawn arm where the real one isn't, in pixels
             "missed": np.concatenate(missed),  # the real arm where the drawn one isn't
-            "block": np.clip(lens.project(to_camera(block, pose)) - self.block_pixels, -30, 30).ravel(),
+            "block": np.clip(lens.project(to_camera(seen, pose)) - self.block_pixels, -30, 30).ravel(),
             "height": block[self.resting, 2],  # the grasped block's centre, which sat on the mat
             "size": np.sqrt(drawn_areas / self.block_areas) - 1,  # how much too big the block is drawn
         }
@@ -148,12 +154,16 @@ def top_fit_data(demos: Demos, episodes: list[int], held: dict[int, tuple[int, i
             states.append(state[index])
             distances.append(np.minimum(cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3), 40.0))
             pixels.append(np.c_[xs[pick], ys[pick]].astype(np.float64))
-    block_states, block_pixels, resting, areas, corners = [], [], [], [], []
+    found = {episode: push_while_closing(demos, episode, held[episode][0]) for episode in episodes if episode in held}
+    typical = float(np.median([push for push in found.values() if push is not None] or [0.0]))
+    block_states, block_pixels, resting, areas, corners, start_states, pushes = [], [], [], [], [], [], []
     for episode in episodes:
         if episode not in held:
             continue
         hold, let_go = held[episode]
         state = demos.episode(episode)[0]
+        start = closing_starts(state, hold)
+        push = typical if found[episode] is None else found[episode]
         carried = {calm_frame(state, int(index), window=6) for index in np.linspace(hold + 20, let_go - 3, 6)} - {None}
         sightings = [(index, hold, True) for index in (0, 5, 10)] + [(index, index - TOP_DELAY_GUESS, False) for index in sorted(carried) if hold + 10 < index < let_go]
         for index, pose_index, on_mat in sightings:
@@ -162,10 +172,39 @@ def top_fit_data(demos: Demos, episodes: list[int], held: dict[int, tuple[int, i
                 block_states.append(state[pose_index])
                 block_pixels.append(seen[0])
                 resting.append(on_mat)
+                start_states.append(state[start] if on_mat else state[pose_index])
+                pushes.append(push if on_mat else 0.0)
                 if on_mat:
                     areas.append(seen[1])
                     corners.append(block_corners(block, jaw_yaw(units, state[hold])))
-    return TopFit(np.array(states), distances, pixels, region, np.array(block_states), np.array(block_pixels), np.array(resting), np.array(areas, dtype=np.float64), np.array(corners))
+    return TopFit(
+        np.array(states), distances, pixels, region, np.array(block_states), np.array(block_pixels), np.array(resting),
+        np.array(areas, dtype=np.float64), np.array(corners), np.array(start_states), np.array(pushes),
+    )  # fmt: skip
+
+
+# The block's top face is this wide; its outline in a wrist frame, sides and studs included, a little more.
+WRIST_RULER = 0.0318
+# The wrist camera is mounted with the fixed jaw on the left of its picture, so a pushed block moves left.
+FIXED_JAW_SIDE = -1.0
+
+
+def push_while_closing(demos: Demos, episode: int, hold: int) -> float | None:
+    """How far the jaws slid the block towards the fixed jaw as they closed on it, in metres, or None if
+    the wrist camera didn't see the whole block at both ends.
+
+    The moving jaw meets the block first and shoves it across until the fixed jaw stops it: on the first
+    100 demos 4.2 mm (median 4.1, SD 2.3) against the gripper and about 3 mm over the mat. The wrist camera
+    rides on the gripper, so the block's outline crossing its picture between the frame the jaws start to
+    close and the hold is that slide. The block's own width is the ruler, so no fitted camera is needed.
+    """
+    state = demos.episode(episode)[0]
+    start = closing_starts(state, hold)
+    seen = [blob(red_mask(demos.frame(episode, frame, "wrist")), 300) for frame in (start, hold)]
+    if any(found is None or not whole(found[2]) for found in seen):
+        return None
+    pixels = (seen[1][0][0] - seen[0][0][0]) * FIXED_JAW_SIDE
+    return float(np.clip(pixels * WRIST_RULER / seen[0][2][2], -0.003, 0.012))
 
 
 def _affine_camera(points: np.ndarray, pixels: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -209,8 +248,8 @@ def fit_top_camera(data: TopFit, gripper_closed: float, deg_per_percent: float, 
     """Fit the top camera's pose and lens, the arm's joint offsets and the mat's height together.
 
     The drawn arm has to cover the real arm's pixels in frames spread over the demos, the block has to
-    appear where the jaws later closed on it and as big as it really looks, and that grasp has to sit on
-    the mat. Each alone leaves something open: outlines barely change when the camera backs off and zooms
+    appear where it lay before the jaws closed on it (where they held it, less the slide closing gave it:
+    `push_while_closing`) and as big as it really looks, and that grasp has to sit on the mat. Each alone leaves something open: outlines barely change when the camera backs off and zooms
     in, the block's sightings are nearly flat, its size says how far the mat is from the camera but not
     from the arm, and only a grasp on the mat ties the arm's reach to it.
 
@@ -293,6 +332,7 @@ def fit_top_camera(data: TopFit, gripper_closed: float, deg_per_percent: float, 
             "block_px": round(float(np.median(np.linalg.norm(found["block"].reshape(-1, 2), axis=1))), 2),
             "grasp_height_mm": [round(float(v * 1000), 1) for v in (found["height"].mean() - height, found["height"].std())],
         },
+        "block_push_mm": round(float(np.median(data.pushes[data.resting])) * 1000, 1) if data.pushes is not None and data.resting.any() else 0.0,
     }
 
 
