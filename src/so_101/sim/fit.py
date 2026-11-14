@@ -3,7 +3,7 @@
 Nothing here is measured by hand. The top camera never moves, so the arm's outline and the red block in
 its frames, against where the joint angles say they are, give the camera, its lens and each joint's
 offset. A demo's first frame shows where its block and jar stood. The wrist camera's place on the
-gripper comes from where it sees that block and jar, and its own jaws.
+gripper comes from its fixed jaw, and its lens from each block seen from far and near.
 """
 
 import json
@@ -22,7 +22,7 @@ from so_101.sim.camera import HEIGHT, WIDTH, Lens, look_through, rotation, rotat
 from so_101.sim.arm import GRASP_DEPTH, TIPS_ABOVE_MAT, held_block
 from so_101.sim.demos import FPS, Demos
 from so_101.sim.env import GROUP_BLOCK, BlockContainerEnv, jar_outline, table_points
-from so_101.sim.looks import blob, pale, red_blob, red_mask, whole, wrist_jar_mask
+from so_101.sim.looks import blob, pale, red_blob, red_mask, whole
 
 # How many ticks older than the joints saved with it a top camera picture is taken to be while the camera
 # is being fitted, before `camera_timing` can measure it: what it measured on the first 100 demos. Fitting
@@ -565,129 +565,228 @@ def wrist_masks(image: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
     return block, jaws
 
 
-def block_surface(block: dict, per_face: int = 40, seed: int = 0) -> np.ndarray:
-    """Points spread over a block's faces, in its own axes, for drawing its outline without rendering."""
+# A block lying on the mat, as the wrist camera can see it: points over its top and sides, with the way
+# each faces, and over its studs' tops. Its bottom never shows.
+def block_views(block: dict, per_face: int = 60, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
-    half = np.array([block["width"] / 2, block["width"] / 2, block["height"] / 2])
-    points = []
-    for axis in range(3):
-        for side in (-1, 1):
-            face = rng.uniform(-1, 1, (per_face, 3)) * half
-            face[:, axis] = side * half[axis]
-            points.append(face)
-    return np.concatenate(points)
+    half, up = block["width"] / 2, block["height"] / 2
+    u, v = rng.uniform(-1, 1, (2, per_face))
+    points, normals = [np.c_[u * half, v * half, np.full(per_face, up)]], [np.tile([0.0, 0.0, 1.0], (per_face, 1))]
+    for axis, sign in ((0, 1), (0, -1), (1, 1), (1, -1)):
+        side = np.zeros((per_face // 2, 3))
+        side[:, axis] = sign * half
+        side[:, 1 - axis] = rng.uniform(-half, half, per_face // 2)
+        side[:, 2] = rng.uniform(-up, up, per_face // 2)
+        facing = np.zeros(3)
+        facing[axis] = sign
+        points.append(side)
+        normals.append(np.tile(facing, (len(side), 1)))
+    stud, reach = block["stud"], block["stud"]["pitch"] / 2
+    for dx in (-reach, reach):
+        for dy in (-reach, reach):
+            angle, radius = rng.uniform(0, 2 * np.pi, 10), stud["radius"] * np.sqrt(rng.uniform(0, 1, 10))
+            points.append(np.c_[dx + radius * np.cos(angle), dy + radius * np.sin(angle), np.full(10, up + stud["height"])])
+            normals.append(np.tile([0.0, 0.0, 1.0], (10, 1)))
+    return np.concatenate(points), np.concatenate(normals)
 
 
-def jar_surface(jar: dict, count: int = 240, seed: int = 0) -> np.ndarray:
-    """Points spread over the jar's tinted wall, in its own axes."""
-    rng = np.random.default_rng(seed)
-    angle = rng.uniform(0, 2 * np.pi, count)
-    return np.c_[jar["radius"] * np.cos(angle), jar["radius"] * np.sin(angle), rng.uniform(0, jar["tint_height"], count)]
+def fixed_jaw_core(demos: Demos, held: dict, episodes: list[int], share: float = 0.75) -> np.ndarray:
+    """The wrist camera's pixels that are always the fixed jaw: pale in nearly every frame where the dark
+    mat fills the middle of the picture, in the patches that reach the bottom on its left. The fixed jaw
+    is part of the gripper the camera rides on, so it never moves in the picture; the moving jaw does."""
+    total, count = np.zeros((HEIGHT, WIDTH)), 0
+    for episode in episodes:
+        hold = held[episode][0]
+        for frame in range(max(0, hold - 120), hold - 10, 15):
+            image = demos.frame(episode, frame, "wrist").astype(np.int16)
+            if (image.max(axis=2)[150:330] < 60).mean() < 0.5:
+                continue
+            total += (image.min(axis=2) > 80) & ((image.max(axis=2) - image.min(axis=2)) < 50)
+            count += 1
+    found = (total / max(count, 1)) > share
+    found[:, WIDTH * 268 // 640 :] = False  # the moving jaw's side
+    patches, labels, stats, _ = cv2.connectedComponentsWithStats(found.astype(np.uint8))
+    return np.isin(labels, [k for k in range(1, patches) if stats[k, 1] + stats[k, 3] >= HEIGHT - 4 and stats[k, 4] > 300])
 
 
 @dataclass
-class WristFit:
-    """What `fit_wrist_camera` compares a candidate wrist camera with: frames before grasps, each with
-    things as points in the gripper's axes, and where the real camera saw them. A thing is the jaws, the
-    block or the jar: its points, how far each pixel is from its real pixels, and a sample of those."""
+class WristViews:
+    """What `fit_wrist_camera` compares a candidate wrist camera with: each demo's block, seen on the mat
+    from many gripper poses as the gripper comes down to it, and the fixed jaw.
 
-    frames: list[dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]]
-    cap: float = 60.0
+    `sightings` holds, for each demo, the gripper's rotation and position at each calm frame, where the
+    real block's patch was centred and how big it was, and how many seconds before the jaws began to close. `jaw_points` are the gripper's printed surface in
+    its own axes, `jaw_core` the pixels always the fixed jaw (`fixed_jaw_core`)."""
 
-    def residuals(self, pose, lens: Lens) -> dict[str, np.ndarray]:
-        found: dict[str, list[np.ndarray]] = {}
-        for frame in self.frames:
-            for name, (points, distance, real) in frame.items():
-                local = to_camera(points, pose)
-                drawn = lens.project(local)
-                # Only what's in front of the camera and in its picture is judged: it sees just the jaws'
-                # tips, and often half the jar.
-                seen = (local[:, 2] < -0.005) & (drawn[:, 0] > 0) & (drawn[:, 0] < lens.width - 1) & (drawn[:, 1] > 0) & (drawn[:, 1] < lens.height - 1)
-                x, y = drawn[:, 0].astype(np.float32)[None], drawn[:, 1].astype(np.float32)[None]
-                found.setdefault(f"{name}_stray", []).append(cv2.remap(distance, x, y, cv2.INTER_LINEAR, borderValue=0)[0] * seen)
-                found.setdefault(f"{name}_missed", []).append(np.minimum(cKDTree(drawn[seen]).query(real)[0], self.cap) if seen.any() else np.full(len(real), self.cap))
-        return {name: np.concatenate(values) for name, values in found.items()}
+    sightings: dict[int, list[tuple[np.ndarray, np.ndarray, np.ndarray, float, float]]]
+    points: np.ndarray
+    normals: np.ndarray
+    centre_height: float  # a block's centre above the arm's z = 0, lying on the mat
+    jaw_points: np.ndarray
+    jaw_core: np.ndarray
+
+    def __post_init__(self) -> None:
+        core = self.jaw_core.astype(np.uint8)
+        # Drawn jaw within 7 px of the core is fine: the core is only what's pale in nearly every frame.
+        self.jaw_distance = cv2.distanceTransform(1 - cv2.dilate(core, np.ones((15, 15), np.uint8)), cv2.DIST_L2, 3)
+        rows, columns = np.nonzero(core)
+        pick = np.random.default_rng(0).choice(len(rows), min(800, len(rows)), replace=False)
+        self.jaw_sample = np.c_[columns[pick], rows[pick]].astype(np.float64)
+
+    def block_misses(self, pose, lens: Lens, episode: int, place, when=None) -> np.ndarray:
+        """For each sighting of a demo's block at `place` ([x, y, yaw]): how far the drawn block's centre is
+        from the real one's, in pixels, and how much bigger it's drawn, 1% counting as 1 px. `when` keeps
+        only the sightings whose seconds before the jaws closed it accepts."""
+        x, y, yaw = place
+        flat = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1.0]])
+        world, facing = self.points @ flat.T + [x, y, self.centre_height], self.normals @ flat.T
+        out = []
+        for rotation_, position, centre, area, before in self.sightings[episode]:
+            if when is not None and not when(before):
+                continue
+            local = to_camera((world - position) @ rotation_, pose)
+            turned = (facing @ rotation_) @ rotation(pose[3:6])
+            seen = (np.einsum("ij,ij->i", local, turned) < 0) & (local[:, 2] < -0.005)
+            if seen.sum() < 20:
+                out.append([30.0, 30.0, 30.0])
+                continue
+            drawn = lens.project(local[seen])
+            size = np.sqrt(cv2.contourArea(cv2.convexHull(drawn.astype(np.float32))) / area)
+            out.append([*(drawn.mean(axis=0) - centre), (size - 1) * 100])
+        return np.asarray(out).ravel()
+
+    def jaw_misses(self, pose, lens: Lens) -> tuple[np.ndarray, np.ndarray]:
+        """The drawn gripper's pixels beyond the fixed jaw's core, and the core's pixels it leaves bare."""
+        local = to_camera(self.jaw_points, pose)
+        drawn = lens.project(local)
+        inside = (local[:, 2] < -0.003) & (drawn[:, 0] >= 0) & (drawn[:, 0] < lens.width - 1) & (drawn[:, 1] >= 0) & (drawn[:, 1] < lens.height - 1)
+        x, y = drawn[:, 0].astype(np.float32)[None], drawn[:, 1].astype(np.float32)[None]
+        stray = np.where(inside, cv2.remap(self.jaw_distance, x, y, cv2.INTER_LINEAR, borderValue=0)[0], 0.0)
+        bare = np.minimum(cKDTree(drawn[inside]).query(self.jaw_sample)[0], 40.0) if inside.any() else np.full(len(self.jaw_sample), 40.0)
+        return stray, bare
 
 
-def wrist_fit_data(demos: Demos, held: dict, episodes: list[int], units: arm.Units, starts: dict[int, dict], scene: dict, seed: int = 0) -> WristFit:
-    """`starts` is each demo's entry in the scene's `starts`: its block as [x, y, yaw] and its jar as [x, y]."""
-    rng = np.random.default_rng(seed)
-    model = arm.arm_model()
-    surface = arm.printed_surface()
-    jaw_body = model.body("moving_jaw_so101_v1")
-    table_height, block, jar = scene["table"]["height"], scene["block"], scene["jar"]
-    faces, wall = block_surface(block), jar_surface(jar)
-    data = WristFit([])
-
-    def sample(mask, count=100):
-        ys, xs = np.nonzero(mask)
-        pick = rng.choice(len(xs), count, replace=len(xs) < count)
-        return np.minimum(cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3), data.cap), np.c_[xs[pick], ys[pick]].astype(np.float64)
-
+def wrist_views(demos: Demos, held: dict, episodes: list[int], units: arm.Units, scene: dict) -> WristViews:
+    """Each demo's block in calm frames of its approach, from 3 s before the jaws close up to when they do."""
+    points, normals = block_views(scene["block"])
+    sightings = {}
     for episode in episodes:
         state = demos.episode(episode)[0]
-        hold = held[episode][0]
-        x, y, yaw = starts[episode]["block"]
-        flat = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1.0]])
-        world = {"block": faces @ flat.T + [x, y, table_height + block["height"] / 2], "jar": wall + [*starts[episode]["jar"], table_height]}
-        for moment in (0.0, 0.35, 0.6, 0.8, 0.95):
-            index = calm_frame(state[: hold - 5], int((hold - 6) * moment), limit=STILL)
-            if index is None:
-                continue
-            image = demos.frame(episode, index, "wrist")
-            real_block, real_jaws = wrist_masks(image)
-            seen = blob(real_block, 300)
-            if seen is None or not whole(seen[2]):
-                continue
-            qpos = units.to_qpos(state[index])
-            rotations, positions = arm.gripper_poses(qpos[None])
-            swing = arm._matrix(jaw_body.quat) @ arm._axis_rotations(model.jnt_axis[model.joint("gripper").id], np.array([qpos[5]]))[0]
-            frame = {"block": ((world["block"] - positions[0]) @ rotations[0], *sample(real_block))}
-            if real_jaws is not None and real_jaws.sum() > 400:
-                frame["jaws"] = (np.concatenate([surface["gripper"], surface["moving_jaw_so101_v1"] @ swing.T + jaw_body.pos]), *sample(real_jaws))
-            real_jar = wrist_jar_mask(image)
-            if real_jar.sum() > 1500:
-                frame["jar"] = ((world["jar"] - positions[0]) @ rotations[0], *sample(real_jar))
-            data.frames.append(frame)
-    return data
+        start = closing_starts(state, held[episode][0])
+        speed = np.abs(np.gradient(state[:, :5], axis=0)).max(axis=1) * FPS
+        frames = [frame for frame in range(max(2, start - 90), start + 1, 3) if speed[frame] <= 10.0]
+        found = []
+        for frame in frames:
+            seen = red_blob(demos.frame(episode, frame, "wrist"), 300)
+            if seen is not None and whole(seen[2], 4):
+                rotations, positions = arm.gripper_poses(units.to_qpos(state[frame])[None])
+                found.append((rotations[0], positions[0], np.asarray(seen[0], dtype=np.float64), float(seen[1]), (start - frame) / FPS))
+        if len(found) >= 3:
+            sightings[episode] = found
+    return WristViews(
+        sightings, points, normals, scene["table"]["height"] + scene["block"]["height"] / 2,
+        arm.printed_surface(2000)["gripper"], fixed_jaw_core(demos, held, episodes),
+    )  # fmt: skip
 
 
-def fit_wrist_camera(data: WristFit, report=print) -> dict:
-    """The wrist camera's pose on the gripper and its lens: the ones whose drawn jaws, block and jar cover
-    the real ones in frames before each grasp. The jaws are fixed to the camera, so they pin its place;
-    the block, at a known place on the mat, checks that against the arm's joints; and the jar, out at the
-    picture's edge, shows how much the lens bends there."""
-    start_pose, start_lens = wrist_start()
-    steps = np.r_[np.full(3, 0.002), np.full(3, 0.01), 5.0, 0.02, 0.02]
+def fit_wrist_camera(views: WristViews, places: dict[int, list[float]], report=print, rounds: int = 5, reach: float = 0.012, previous: dict | None = None) -> dict:
+    """The wrist camera's pose on the gripper and its lens, and where each demo's block lay as it saw it.
+
+    The fixed jaw is part of the gripper the camera rides on, so it pins where the camera sits. A block seen
+    from far and near as the gripper comes down to it pins how the lens draws one thing at many distances:
+    in each demo's frames its drawn centre has to fall on the real one and be as big. Each block's place is
+    fitted with the camera, within `reach` of where the top camera put it (`places`), turn by turn.
+    `previous` is the scene's last wrist camera, one more place to start from.
+
+    The fit used to judge the camera against the top camera's places, the jar's among them, and took on
+    whatever error they had: on the build of 14 November it drew blocks 14% too big near each grasp, and on
+    demos it hadn't seen put them 30 px from where their own far frames placed them. This way the miss is
+    11 px at 4% too big, and the ACT policy's actions on sim frames moved 0.87° from those on real frames at
+    the mat's far right instead of 1.25°.
+    """
+    start_pose, _ = wrist_start()
+    steps = np.r_[np.full(3, 0.001), np.full(3, 0.01), 4.0, 0.01, 0.01, 2.0, 2.0]
+    low, high = np.r_[np.full(3, -0.02), np.full(3, -0.25), 250.0, -0.3, -0.5, -30.0, -30.0], np.r_[np.full(3, 0.02), np.full(3, 0.25), 550.0, 0.6, 0.5, 30.0, 30.0]
+    low[:6] += start_pose
+    high[:6] += start_pose
+    episodes = sorted(views.sightings)
+    placed: dict[int, np.ndarray] = {}
+
+    def camera(x):
+        return x[:6], Lens(x[6], x[7], x[8], centre=(x[9], x[10]))
 
     def errors(x):
-        found = data.residuals(x[:6], Lens(x[6], x[7], x[8]))
-        return np.concatenate([values / np.sqrt(max(len(values), 1)) for values in found.values()])
+        pose, lens = camera(x)
+        blocks = np.concatenate([views.block_misses(pose, lens, e, placed[e]) for e in episodes])
+        stray, bare = views.jaw_misses(pose, lens)
+        # The block's misses count by their mean square; the jaw's 8 times as much, since it's one thing seen
+        # sharp in every frame. The lens's centre is held near the picture's middle.
+        return np.concatenate([
+            np.clip(blocks, -60, 60) / np.sqrt(len(blocks) / 3), stray / np.sqrt(max(1.0, len(stray) * 0.3)) * 8, bare / np.sqrt(len(bare)) * 8,
+            x[9:11] / LENS_CENTRE_SLACK * 3,
+        ])  # fmt: skip
 
-    def solve(x, free):
-        def moved(z):
-            trial = x.copy()
-            trial[free] += z * steps[free]
-            return errors(trial)
+    def solve(x, evaluations=200):
+        lo, hi = (low - x) / steps, (high - x) / steps
+        result = least_squares(lambda z: errors(x + z * steps), np.zeros(len(x)), bounds=(np.minimum(lo, -1e-9), np.maximum(hi, 1e-9)), diff_step=0.3, loss="soft_l1", f_scale=1.0, max_nfev=evaluations)
+        return x + result.x * steps, float(2 * result.cost)
 
-        low, high = (np.r_[np.full(6, -np.inf), 180.0, -0.3, -0.5] - x) / steps, (np.r_[np.full(6, np.inf), 600.0, 0.6, 0.5] - x) / steps
-        result = least_squares(moved, np.zeros(len(free)), bounds=(low[free], high[free]), diff_step=0.5, max_nfev=60)
-        x = x.copy()
-        x[free] += result.x * steps[free]
-        return x, float(2 * result.cost)
+    def place_block(pose, lens, e, start, when=None):
+        first = np.asarray(places[e], dtype=np.float64)
+        bound = np.r_[reach, reach, np.radians(10.0)]
 
-    best = None
-    for focal in (260.0, 330.0, 420.0):
-        for k1 in (0.0, 1 / 3):  # a fisheye, and a lens that keeps straight lines straight
-            x, cost = solve(np.r_[start_pose, focal, k1, 0.0], np.arange(8))
-            if best is None or cost < best[1]:
-                best = (x, cost)
-    x, cost = solve(best[0], np.arange(9))
-    found = data.residuals(x[:6], Lens(x[6], x[7], x[8]))
+        def misses(v):
+            found = views.block_misses(pose, lens, e, v, when).reshape(-1, 3)
+            return (found * [1.0, 1.0, 0.5]).ravel()  # its size says less about where it is
+
+        result = least_squares(misses, np.clip(start, first - bound + 1e-9, first + bound - 1e-9), bounds=(first - bound, first + bound), x_scale=[0.003, 0.003, 0.05], loss="soft_l1", f_scale=6.0)
+        return result.x
+
+    def foresight(x) -> float:
+        """How well the camera draws a block near from where it saw it far: each block placed from its
+        sightings over 1 s before the jaws closed, then its centre's median miss in those under 0.5 s."""
+        pose, lens = camera(x)
+        near = []
+        for e in episodes:
+            if sum(before > 1.0 for *_, before in views.sightings[e]) < 3 or not any(before < 0.5 for *_, before in views.sightings[e]):
+                continue
+            place = place_block(pose, lens, e, placed[e], lambda before: before > 1.0)
+            found = views.block_misses(pose, lens, e, place, lambda before: before < 0.5).reshape(-1, 3)
+            near += list(np.hypot(found[:, 0], found[:, 1]))
+        return float(np.median(near))
+
+    # The jaw and the blocks leave a few lenses that fit about as well, and they draw the near block quite
+    # differently. Each start is followed to the end, and the one that draws near blocks best from far is kept.
+    starts = [(np.r_[start_pose, focal, k1, 0.0, 0.0, 0.0], f"a {focal:.0f} px lens bent {k1:.1f}") for focal in (330.0, 400.0) for k1 in (0.0, 0.3)]
+    if previous is not None:
+        lens = previous["lens"]
+        starts.append((np.clip(np.r_[previous["pose"], lens["focal"], lens["k1"], lens["k2"], lens.get("centre", (0.0, 0.0))], low, high), "the last build's camera"))
+    candidates = []
+    for first, name in starts:
+        placed = {e: np.asarray(places[e], dtype=np.float64) for e in episodes}
+        x, cost = solve(first, 80)
+        for _ in range(rounds):
+            pose, lens = camera(x)
+            placed = {e: place_block(pose, lens, e, placed[e]) for e in episodes}
+            x, cost = solve(x)
+        candidates.append((foresight(x), x, dict(placed)))
+        report(f"  starting from {name}: near blocks drawn {candidates[-1][0]:.1f} px (median) from where far ones put them")
+    score, x, placed = min(candidates, key=lambda candidate: candidate[0])
+    pose, lens = camera(x)
+    misses = np.concatenate([views.block_misses(pose, lens, e, placed[e]) for e in episodes]).reshape(-1, 3)
+    stray, bare = views.jaw_misses(pose, lens)
+    moved = [float(np.linalg.norm(placed[e][:2] - np.asarray(places[e][:2]))) * 1000 for e in episodes]
+    report(f"  {len(episodes)} demos' blocks placed by the wrist camera's own frames, {np.median(moved):.1f} mm (median) from the top camera's places")
     return {
-        "pose": [float(v) for v in x[:6]],
-        "lens": Lens(x[6], x[7], x[8]).to_scene(),
-        "errors": {f"{name}_px": round(float((found[f"{name}_stray"].mean() + found[f"{name}_missed"].mean()) / 2), 2) for name in ("jaws", "block", "jar") if f"{name}_stray" in found},
+        "pose": [float(v) for v in pose],
+        "lens": lens.to_scene(),
+        "places": {int(e): [round(float(v), 4) for v in placed[e]] for e in episodes},
+        "errors": {
+            "foresight_px": round(score, 1),
+            "jaws_px": round(float((stray[stray > 0].mean() if (stray > 0).any() else 0.0) + bare.mean()) / 2, 2),
+            "block_px": round(float(np.median(np.hypot(misses[:, 0], misses[:, 1]))), 2),
+            "block_size_pct": round(float(np.median(misses[:, 2])), 1),
+        },
     }
 
 

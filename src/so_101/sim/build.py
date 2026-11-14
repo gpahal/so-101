@@ -235,11 +235,16 @@ def build(
     report(f"Blocks: the drawn block covers {np.mean(seen):.0%} of the real one, and lay {np.median(apart):.1f} mm (median) from where the jaws later closed.")
     fit.save_json(scene_path, scene)
 
-    if "errors" not in wrist or refit_cameras:
-        report("Fitting the wrist camera to the real jaws and block...")
-        starts = {layout["episode"]: layout for layout in scene["starts"]}
-        wrist = fit.fit_wrist_camera(fit.wrist_fit_data(demos, held, fit_on[::2], units, starts, scene), report)
-    report("Wrist camera: its drawn outlines are " + ", ".join(f"{px:.1f} px from the real {name[:-3]}" for name, px in wrist["errors"].items()) + ".")
+    if "block_size_pct" not in wrist.get("errors", {}) or refit_cameras:
+        report("Fitting the wrist camera to the fixed jaw and to each demo's block, seen as the gripper came down to it...")
+        places = {layout["episode"]: layout["block"] for layout in scene["starts"]}
+        wrist = fit.fit_wrist_camera(fit.wrist_views(demos, held, fit_on, units, scene), places, report, previous=previous.get("cameras", {}).get("wrist"))
+    errors = wrist["errors"]
+    report(
+        f"Wrist camera: its drawn fixed jaw is {errors['jaws_px']:.1f} px from the real one, and each block's centre "
+        f"{errors['block_px']:.1f} px (median) from the real one's, drawn {errors['block_size_pct']:+.0f}% its size. Placed from far, "
+        f"near blocks are drawn {errors['foresight_px']:.1f} px from the real ones."
+    )
     scene["cameras"]["wrist"] = {"pose": wrist["pose"], "lens": wrist["lens"]}
     scene["fits"]["wrist"] = wrist
     fit.save_json(scene_path, scene)

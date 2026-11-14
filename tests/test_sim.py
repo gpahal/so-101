@@ -216,6 +216,27 @@ class ArmTest(unittest.TestCase):
 
         self.assertIsNone(fit.push_while_closing(Hidden(), 0, 72))
 
+    def test_a_block_seen_from_above_is_drawn_where_and_as_big_as_it_was_seen(self) -> None:
+        from so_101.sim import fit
+        from so_101.sim.camera import Lens
+
+        block = {"width": 0.0318, "height": 0.0192, "stud": {"radius": 0.0047, "height": 0.0045, "pitch": 0.016}}
+        points, normals = fit.block_views(block)
+        # A gripper 0.15 m above the block, its axes the arm's, and a camera at its origin looking straight down.
+        lens, pose = Lens(360.0, 0.0, 0.0), np.zeros(6)
+        gripper = (np.eye(3), np.array([0.25, 0.0, 0.17]))
+        top = np.array([0.25, 0.0, 0.0096 + 0.0096])
+        views = fit.WristViews({0: [(*gripper, np.zeros(2), 1.0, 1.5)]}, points, normals, 0.0096, np.zeros((1, 3)), np.ones((480, 640), bool))
+        # Read the real centre and size off the camera itself, then check the misses are zero there and grow away.
+        drawn = views.block_misses(pose, lens, 0, [0.25, 0.0, 0.0])
+        centre = drawn[:2]
+        area = (1 + drawn[2] / 100) ** 2
+        views.sightings[0] = [(*gripper, centre, area, 1.5)]
+        np.testing.assert_allclose(views.block_misses(pose, lens, 0, [0.25, 0.0, 0.0]), 0.0, atol=1e-6)
+        self.assertGreater(abs(views.block_misses(pose, lens, 0, [0.255, 0.0, 0.0])[0]), 5.0)  # 5 mm across: about 12 px
+        self.assertEqual(views.block_misses(pose, lens, 0, [0.25, 0.0, 0.0], lambda before: before < 0.5).size, 0)
+        self.assertAlmostEqual(float(lens.project((top - gripper[1])[None] * [1, 1, 1])[0, 0]), 319.5, places=3)
+
     def test_units_convert_both_ways(self) -> None:
         from so_101.sim.arm import Units
 
