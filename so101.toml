@@ -249,11 +249,11 @@ jar_tint_height = 0.052
 # jar_mass = 0.03  # measure
 # How far the mat's top is above the surface the arm's base stands on; negative if the base stands on
 # something higher than the mat. The base is clamped to the table the mat lies on (photos of
-# 2026-11-14), so this is the mat's thickness, taken as 3 mm until it's measured. The joint offsets are
-# fitted so that every demo's grasp lands on the mat, so a wrong value here tilts the fitted arm. "fit"
-# fits it from how big the block looks to the top camera instead, which matched the arm's outline worse
-# on the first 100 demos (6.0 px against 3.8).
-# mat_height = 0.003  # measure
+# 2026-11-14), so this is the mat's thickness, measured at 3 mm. The joint offsets are fitted so that
+# every demo's grasp lands on the mat, so a wrong value here tilts the fitted arm. "fit" fits it from
+# how big the block looks to the top camera instead, which matched the arm's outline worse on the first
+# 100 demos (6.0 px against 3.8).
+mat_height = 0.003
 # How the block and the jar slide on the mat. `so101 sim physics` fits this from recorded pushes;
 # setting it here wins.
 # table_friction = 0.6

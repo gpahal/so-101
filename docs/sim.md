@@ -47,11 +47,11 @@ Physics, which doesn't depend on how things are drawn:
 
 ## What the measurements and photos of 14 November settled
 
-A ruler gave the block and the jar, and nine photos showed the setup from around the table. The follower wasn't connected to the computer with the sim, so no joint readings go with the photos.
+A ruler gave the block, the jar and the mat, and nine photos showed the setup from around the table. The follower wasn't connected to the computer with the sim, so no joint readings go with the photos.
 
 - **The jar is 70 mm tall, not 63.** The top camera's fit had its diameter (64 mm against 62 to 64 measured) and its tinted band (50 mm against 52), which checks that camera's scale to about 3%. The clear neck above the band was a guess, 13 mm where it's 18. With the measured jar and nothing else changed, the wrist camera's drawn jar fitted 1 px closer, its picture was 9.4 from the real frame instead of 11.1, and the policy's actions moved 1.9° instead of 2.2°. The build after it, which refitted the top camera with the mat against the base's underside, reads 10.0 and 2.0°: the difference is the size of what a refit changes.
 - **The block is the DUPLO brick assumed.** The ruler read 32 x 32 x 19 mm against 31.8 and 19.2.
-- **The base stands on the table the mat lies on.** It's clamped there by its plate, with nothing under it. So the mat's top is the mat's thickness above the base's underside, which the arm model has 2.4 mm below its origin; the build now puts the mat there (`arm.base_underside`). The thickness is still taken as 3 mm: the note with the photos says the mat is "30 mm deep", which the photos rule out as a thickness.
+- **The base stands on the table the mat lies on.** It's clamped there by its plate, with nothing under it. So the mat's top is the mat's thickness above the base's underside, which the arm model has 2.4 mm below its origin; the build now puts the mat there (`arm.base_underside`). The mat is 3 mm thick, as assumed, and 30 cm from front to back.
 - **The elbow's offset is real.** The fit's -6° at the elbow looked wrong, because the follower's calibrated range is as wide as the arm model's. But the model's range isn't where its parts meet: its forearm meets its upper arm at 91°, 6° before its limit of 96.8°. In the photos the follower rests with its forearm lying on its upper arm, where it reads 96.3°. So the real elbow reads about 5° more than the model's angle, as fitted.
 - **The demos can't say how the offsets split between the joints.** Holding the elbow's offset and refitting gives the two cameras the same fit:
 
@@ -62,7 +62,8 @@ A ruler gave the block and the jar, and nine photos showed the setup from around
   | 0° (held) | -4.7° | -6.5° | +1.5° | 4.0, 3.7 px | 6.5, 7.0, 8.8 px |
 
   Their sum, how far the gripper is pitched from its readings, stays near -10°. The splits draw the same pictures, so the choice matters little to a policy; the photos favour the first.
-- **Nor can they place the mat.** With the mat's top held 15, 30 and 43 mm lower, the top camera's outline fits within 0.25 px (3.8, 3.9, 4.1 and 4.0 px) and the offsets move by up to 16° to keep each grasp on the mat. Only the photos say where it is.
+- **The top camera's scale is right to about 1%.** Its fit lays the mat out 300 mm from front to back where it's clear of the arm (301, 300 and 300 mm at three places), against 30 cm by ruler. Nothing in the fit knew the mat's size.
+- **Nor can the demos place the mat.** With the mat's top held 15, 30 and 43 mm lower, the top camera's outline fits within 0.25 px (3.8, 3.9, 4.1 and 4.0 px) and the offsets move by up to 16° to keep each grasp on the mat. Only the photos say where it is.
 - **The wrist camera is where the arm model mounts one.** The fit puts its lens 9 mm from the model's own wrist camera and pitches it 5° from it, and the photos show the follower's camera on that mount.
 - **The jaws' friction was too high.** See the next section.
 
@@ -114,13 +115,12 @@ So a sim result for this ACT policy is still a lower bound, not a prediction. Co
 
 ## What to measure at the arm
 
-In order of what they would fix. Each `[sim]` setting is in `so101.toml`. Measured on 2026-11-14 and no longer needed: the block's and the jar's sizes, and photos of the whole setup.
+In order of what they would fix. Each `[sim]` setting is in `so101.toml`. Measured on 2026-11-14 and no longer needed: the block's, the jar's and the mat's sizes, and photos of the whole setup.
 
-1. **The mat's thickness.** With a ruler at its edge, in millimetres (`mat_height`; 3 mm is assumed).
-2. **A checkerboard on the mat.** A printed checkerboard (squares of 25 mm, measured after printing) flat on the mat, and `uv run so101 check` run once to save a frame from each camera; then the same at two more places, one of them with the board propped at a slope so the wrist camera sees it at an angle. This gives each camera's lens from points known to the millimetre, which is what the wrist camera's fit lacks. With the distance from the shoulder's pan axis to the board's near corner measured, it also gives the top camera's pose.
-3. **The arm at known poses.** `uv run so101 pose` (read-only) with the arm's power on and the jaws closed, their tips resting on the mat, at three distances from the base measured with the ruler. A tip on the mat at a known distance is two numbers the joints must agree with, so three of them give the offsets of shoulder_lift, elbow_flex and wrist_flex, which the demos can't split.
-4. **The weights.** The block and the jar on kitchen scales (`block_mass`, `jar_mass`), and the jar's opening across.
-5. **Pushes for the mat's friction.** `uv run so101 sim nudge --episodes 3` (README). This moves the arm and hasn't been run yet.
+1. **A checkerboard on the mat.** A printed checkerboard (squares of 25 mm, measured after printing) flat on the mat, and `uv run so101 check` run once to save a frame from each camera; then the same at two more places, one of them with the board propped at a slope so the wrist camera sees it at an angle. This gives each camera's lens from points known to the millimetre, which is what the wrist camera's fit lacks. With the distance from the shoulder's pan axis to the board's near corner measured, it also gives the top camera's pose.
+2. **The arm at known poses.** `uv run so101 pose` (read-only) with the arm's power on and the jaws closed, their tips resting on the mat, at three distances from the base measured with the ruler. A tip on the mat at a known distance is two numbers the joints must agree with, so three of them give the offsets of shoulder_lift, elbow_flex and wrist_flex, which the demos can't split.
+3. **The weights.** The block and the jar on kitchen scales (`block_mass`, `jar_mass`), and the jar's opening across.
+4. **Pushes for the mat's friction.** `uv run so101 sim nudge --episodes 3` (README). This moves the arm and hasn't been run yet.
 
 ## What else would close the gap
 

@@ -269,7 +269,7 @@ After moving a camera or recalibrating the follower, record new demos and add `-
 
 To make it more accurate, at the arm:
 
-1. Measure what the demos can't show, and set it in `[sim]` in `so101.toml`: the block's and jar's weight, the jar's diameter and height (set on 2026-11-14: 63 mm across, 70 mm tall, taped to 52 mm), and how far the mat's top is above the surface the arm's base stands on, which is the mat's thickness while both are on the same table. Then run `sim build`, which refits what a changed value feeds: the top camera after `mat_height`, the wrist camera after the jar's size.
+1. Measure what the demos can't show, and set it in `[sim]` in `so101.toml`: the block's and jar's weight, the jar's diameter and height (set on 2026-11-14: 63 mm across, 70 mm tall, taped to 52 mm), and how far the mat's top is above the surface the arm's base stands on, which is the mat's thickness while both are on the same table (set: 3 mm). Then run `sim build`, which refits what a changed value feeds: the top camera after `mat_height`, the wrist camera after the jar's size.
 2. Record pushes, so the sim knows how the block slides. These never go into training, and this command doesn't need MuJoCo or the demos:
    ```bash
    uv run so101 sim nudge --episodes 3
