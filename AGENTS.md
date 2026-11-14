@@ -5,8 +5,8 @@
 `docs/` holds plans for unbuilt work and notes too long for the README, each opening with a `Status:` line. Before building a feature, check `docs/` for its plan. Once it's built, move the user-facing part into the README and update `Status:`.
 
 `results/` holds reviews of policy runs on the arm, kept in git: what ran, which attempts succeeded and why the others failed.
-- Each review is one Markdown file named `<policy>-<task>-<label>.md`, with no date, such as `act-block-container-baseline.md`; the label says what the run tested, and the date goes in the review's title. Its images go in a folder of the same name beside it, as JPEGs (quality 80 keeps a contact sheet of 7 attempts near 300 KB).
-- Name a run by the command, date and time it ran, never by where it's stored. Never mention a local folder or path: `outputs/`, `data/`, `.scratch/`, a scratchpad or an absolute path. They're git-ignored or machine-specific, so a reader of the repo can't open them. Copy anything the review needs into its image folder.
+- Each review is one Markdown file named `<policy>-<task>-<label>.md`, with no date, such as `act-block-container-baseline.md`; the label says what the run tested. Its images go in a folder of the same name beside it, as JPEGs (quality 80 keeps a contact sheet of 7 attempts near 300 KB).
+- Leave out dates and times of day: none in the title, the text or an image's name. Name a run by its command and what it tested, or by its order when a review covers several (`the first run`), never by when it ran or where it's stored. Times within an attempt (`at 8.5 s`) stay. Never mention a local folder or path: `outputs/`, `data/`, `.scratch/`, a scratchpad or an absolute path. They're git-ignored or machine-specific, so a reader of the repo can't open them. Copy anything the review needs into its image folder.
 - Judge each outcome from the camera frames, and say how. Give the setup the result depends on: the policy and revision, the block spots, the lighting.
 
 ## Commands
