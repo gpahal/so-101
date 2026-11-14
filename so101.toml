@@ -234,23 +234,31 @@ preview_fps = 5
 # optional and in metres or kilograms; the defaults are in DEFAULTS in src/so_101/sim/build.py. Measure
 # the ones marked "measure" for accuracy: the demos can't show them.
 [sim]
-# The block: a LEGO DUPLO 2x2 brick by default, 31.8 mm square and 19.2 mm tall under its studs.
+# The block: a LEGO DUPLO 2x2 brick by default, 31.8 mm square and 19.2 mm tall under its studs. A ruler
+# on 2026-11-14 read 32 x 32 x 19 mm, which agrees.
 # block_width = 0.0318
 # block_height = 0.0192
 # block_mass = 0.0055  # measure: kitchen scales
-# The jar. Without jar_diameter, its diameter and the height of its tinted band are fitted to the top
-# camera's frames, and its height is the band plus jar_rim_height of clear neck.
-# jar_diameter = 0.064  # measure
-# jar_height = 0.063  # measure
-# jar_tint_height = 0.05
+# The jar, measured with a ruler on 2026-11-14: 62 to 64 mm across and 70 mm tall, taped over its lower
+# 52 mm with a clear threaded neck above. Without jar_diameter, its diameter and the height of its
+# tinted band are fitted to the top camera's frames (that fit gave 64 and 50 mm), and its height is the
+# band plus jar_rim_height of clear neck.
+jar_diameter = 0.063
+jar_height = 0.070
+jar_tint_height = 0.052
 # jar_mass = 0.03  # measure
 # How far the mat's top is above the surface the arm's base stands on; negative if the base stands on
-# something higher than the mat. The joint offsets are fitted so that every demo's grasp lands on the
-# mat, so a wrong value here tilts the fitted arm. "fit" fits it from how big the block looks to the
-# top camera instead, which matched the arm's outline worse on the first 100 demos (6.0 px against 3.8).
+# something higher than the mat. The base is clamped to the table the mat lies on (photos of
+# 2026-11-14), so this is the mat's thickness, taken as 3 mm until it's measured. The joint offsets are
+# fitted so that every demo's grasp lands on the mat, so a wrong value here tilts the fitted arm. "fit"
+# fits it from how big the block looks to the top camera instead, which matched the arm's outline worse
+# on the first 100 demos (6.0 px against 3.8).
 # mat_height = 0.003  # measure
 # How the block and the jar slide on the mat. `so101 sim physics` fits this from recorded pushes;
 # setting it here wins.
 # table_friction = 0.6
+# How the block slides against the jaws. The arm model's own 1.0 kept hold of blocks the real jaws let
+# go; 0.3 to 0.45 lets the most demos replay (`uv run so101 sim replay`).
+# jaw_friction = 0.35
 # How far the floor is below the table top. Only the wrist camera's view past the table's edge uses it.
 # floor_below = 0.74

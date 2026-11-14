@@ -166,6 +166,11 @@ class ArmTest(unittest.TestCase):
             tips = np.mean([data.geom(f"{jaw}_jaw_sph_tip{i}").xpos for jaw in ("fixed", "moving") for i in (1, 2, 3)], axis=0)
             np.testing.assert_allclose(positions[row] + rotations[row] @ arm.between_jaws_local(qpos[row, 5]), tips, atol=1e-9)
 
+    def test_base_stands_just_below_the_models_origin(self) -> None:
+        from so_101.sim import arm
+
+        self.assertAlmostEqual(arm.base_underside(), -0.0024, places=4)
+
     def test_units_convert_both_ways(self) -> None:
         from so_101.sim.arm import Units
 

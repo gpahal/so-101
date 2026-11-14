@@ -39,6 +39,22 @@ def arm_model() -> mujoco.MjModel:
     return mujoco.MjSpec.from_file(str(arm_xml())).compile()
 
 
+@cache
+def base_underside() -> float:
+    """How far the base's underside is above the arm model's z = 0, in metres: 2.4 mm below it. The real
+    base stands on the table, so that's where the table top is in the model's axes."""
+    model = arm_model()
+    data = mujoco.MjData(model)
+    mujoco.mj_kinematics(model, data)
+    lowest = []
+    for geom in range(model.ngeom):
+        if model.body(model.geom_bodyid[geom]).name == "base" and model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_MESH:
+            mesh = model.geom_dataid[geom]
+            vertices = model.mesh_vert[model.mesh_vertadr[mesh] : model.mesh_vertadr[mesh] + model.mesh_vertnum[mesh]]
+            lowest.append(float((data.geom_xpos[geom] + vertices @ data.geom_xmat[geom].reshape(3, 3).T)[:, 2].min()))
+    return min(lowest)
+
+
 @dataclass(frozen=True)
 class Units:
     """Converts between the follower's numbers and the model's joint angles, in radians."""

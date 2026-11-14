@@ -214,8 +214,8 @@ def fit_top_camera(data: TopFit, gripper_closed: float, deg_per_percent: float, 
     in, the block's sightings are nearly flat, its size says how far the mat is from the camera but not
     from the arm, and only a grasp on the mat ties the arm's reach to it.
 
-    `table_height` is the mat's top above the plane the arm model's base stands on, if it was measured;
-    otherwise it's fitted, and comes out negative when the real base stands on something.
+    `table_height` is the mat's top in the arm model's axes, if it was measured (the model's base has its
+    underside at `arm.base_underside()`); otherwise it's fitted.
     `limits` is each joint's calibrated range, which says how far an offset can plausibly be from zero
     (`offset_slack`). Offsets are pulled towards zero by that measure, but only weakly: on the first 100
     demos the arm's outline wanted 6.5 degrees at the elbow, where the ranges allow under 2, and a pull

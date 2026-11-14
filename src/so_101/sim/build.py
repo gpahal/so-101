@@ -21,7 +21,11 @@ DEFAULTS = {
     "stud_pitch": 0.016,
     "block_mass": 0.0055,
     "block_friction": 0.3,  # plastic on plastic; against the jaws and the mat, theirs counts if it's higher
-    "jaw_friction": 1.0,  # the arm model's own
+    # The printed jaws against the block. Printed plastic on a smooth brick is around 0.3 to 0.5, and the
+    # arm model's own 1.0 kept hold of blocks the real jaws let go. Replaying the first 100 demos on two
+    # builds put 79 and 82 of 96 blocks in the jar at 1.0, 85 at 0.6, 84 at 0.5, 87 and 90 at 0.45, 83 and 89
+    # at 0.4, 88 and 89 at 0.35, and 86 and 87 at 0.3.
+    "jaw_friction": 0.35,
     "table_friction": 0.6,  # the mat, against the block and the jar: `so101 sim physics` fits this from real pushes
     # The mat's top above the surface the arm's base stands on: a thin mat on the same table. The joint
     # offsets are fitted so that every demo's grasp lands on it. Set to "fit", it's fitted with the top
@@ -102,7 +106,8 @@ def build(
 
     if options["mat_height"] != "fit" and not isinstance(options["mat_height"], (int, float)):
         raise ValueError(f'mat_height in [sim] in so101.toml is {options["mat_height"]!r}: give it in metres, or "fit".')
-    mat_height = None if options["mat_height"] == "fit" else float(options["mat_height"])
+    # In the arm model's axes: its base's underside, which stands on the table, is 2.4 mm below its z = 0.
+    mat_height = None if options["mat_height"] == "fit" else round(float(options["mat_height"]) + arm.base_underside(), 4)
     top = kept.get("top")
     if top is None or refit_cameras or (mat_height is not None and top.get("table_height") != mat_height):
         report("Fitting the top camera, the arm's joint offsets and the mat's height, which takes a few minutes...")
@@ -113,8 +118,8 @@ def build(
     errors = top["errors"]
     report(
         f"Top camera: the drawn arm's outline is {errors['outline_px']:.1f} px from the real one, and the block appears "
-        f"{errors['block_px']:.1f} px from where the jaws closed on it. The mat's top is {table_height * 1000:+.0f} mm from the "
-        f"plane the arm model's base stands on{'' if mat_height is not None else ' (fitted)'}. Joint offsets (degrees): "
+        f"{errors['block_px']:.1f} px from where the jaws closed on it. The mat's top is {(table_height - arm.base_underside()) * 1000:+.0f} mm from the "
+        f"surface the arm's base stands on{'' if mat_height is not None else ' (fitted)'}. Joint offsets (degrees): "
         + ", ".join(f"{name} {offset:+.1f}" for name, offset in zip(arm.ARM_JOINTS, top["offsets_deg"]))
     )
     units = arm.Units(tuple(top["offsets_deg"]), gripper_closed, deg_per_percent)
@@ -172,7 +177,9 @@ def build(
         for camera in sim_env.CAMERAS
     }  # fmt: skip
     wrist_pose, wrist_lens = fit.wrist_start()
-    wrist = (None if refit_cameras else kept.get("wrist")) or {"pose": wrist_pose.tolist(), "lens": wrist_lens}
+    # The wrist camera is fitted to the jar's outline among others, so a jar of another size needs it again.
+    same_jar = all(previous.get("jar", {}).get(key) == jar[key] for key in ("radius", "height", "tint_height"))
+    wrist = (None if refit_cameras or not same_jar else kept.get("wrist")) or {"pose": wrist_pose.tolist(), "lens": wrist_lens}
     scene = {
         "prompt": prompt,
         "demos": source.describe(demos_root, repo),
