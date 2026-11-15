@@ -19,14 +19,14 @@ DEFAULTS = {
     "stud_diameter": 0.0094,
     "stud_height": 0.0045,
     "stud_pitch": 0.016,
-    "block_mass": 0.0055,
+    "block_mass": 0.00675,  # BrickLink's weight for the DUPLO 2x2 brick, part 3437
     "block_friction": 0.3,  # plastic on plastic; against the jaws and the mat, theirs counts if it's higher
     # The printed jaws against the block. Printed plastic on a smooth brick is around 0.3 to 0.5, and the
     # arm model's own 1.0 kept hold of blocks the real jaws let go. Replaying the first 100 demos on two
     # builds put 79 and 82 of 96 blocks in the jar at 1.0, 85 at 0.6, 84 at 0.5, 87 and 90 at 0.45, 83 and 89
     # at 0.4, 88 and 89 at 0.35, and 86 and 87 at 0.3.
     "jaw_friction": 0.35,
-    "table_friction": 0.6,  # the mat, against the block and the jar: `so101 sim physics` fits this from real pushes
+    "table_friction": 0.4,  # the mat, against the block and the jar: a smooth cloth mouse pad. `so101 sim physics` fits this from real pushes
     # The mat's top above the surface the arm's base stands on: a thin mat on the same table. The joint
     # offsets are fitted so that every demo's grasp lands on it. Set to "fit", it's fitted with the top
     # camera instead, from how big the block looks; on these demos that fit matched the arm's outline

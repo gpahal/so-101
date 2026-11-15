@@ -114,7 +114,7 @@
   "texel": 0.001,
   "height": 0.0006,
   "texture": "table.png",
-  "friction": 0.6,
+  "friction": 0.4,
   "friction_from": null
  },
  "wall": {
@@ -136,7 +136,7 @@
  "block": {
   "width": 0.0318,
   "height": 0.0192,
-  "mass": 0.0055,
+  "mass": 0.00675,
   "friction": 0.3,
   "stud": {
    "radius": 0.0047,
@@ -310,7 +310,7 @@
     0.001
    ],
    "jar_tint": [
-    0.389,
+    0.39,
     0.222,
     0.031,
     0.985
@@ -3949,10 +3949,10 @@
    },
    "placed": "seen_clear",
    "replays_into_jar": {
-    "seen_clear": 66,
-    "by_wrist_clear": 66,
-    "seen": 65,
-    "by_wrist": 64
+    "seen_clear": 65,
+    "by_wrist_clear": 65,
+    "seen": 63,
+    "by_wrist": 63
    }
   },
   "wrist": {
