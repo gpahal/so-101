@@ -110,7 +110,9 @@ def run_manifest(
     """Everything a `so101 serve` run ran with: a session's record, plus how the arm was driven and
     `policy`: its type, repo, revision, commit, action steps, and whether it ran here or remotely; for a
     model `train --target local` saved, `checkpoint` is its folder, and repo and revision are None. For a
-    remote run, `so101-control` adds the checkpoint the server admitted it to (`artifact_identity`)."""
+    remote run, `so101-control` adds the checkpoint the server admitted it to (`artifact_identity`), and
+    `pin_unused_actions` says whether a pi0.5 server pinned the model's unused action columns, which
+    that identity doesn't cover (None for any other run)."""
     manifest = session_manifest(s, task, cameras, report, note="")
     # run.json is never changed after the start, so it holds no finish time or attempt count: the
     # `run_end` event at the end of events.jsonl has them.

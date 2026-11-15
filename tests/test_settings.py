@@ -28,5 +28,22 @@ class TeleopTest(ConfigTest):
         self.assertEqual(settings.load().teleop.max_relative_target, 0.0, "0 turns the limit off")
 
 
+class RemoteTest(ConfigTest):
+    def test_pi05_pins_its_unused_action_columns_unless_the_file_turns_it_off(self) -> None:
+        section = '\n[remote.pi05]\njob_target = "l4x1"\njob_timeout = "1h"\n'
+        self.config.write_text(ARMS + section)
+        self.assertTrue(settings.load().remote["pi05"].pin_unused_actions)
+        self.config.write_text(ARMS + section + "pin_unused_actions = false\n")
+        self.assertFalse(settings.load().remote["pi05"].pin_unused_actions)
+
+    def test_a_pin_setting_that_is_not_true_or_false_is_refused(self) -> None:
+        for value in ('"yes"', "1", "0"):
+            with self.subTest(value):
+                self.config.write_text(
+                    ARMS + f'\n[remote.pi05]\njob_target = "l4x1"\njob_timeout = "1h"\npin_unused_actions = {value}\n')
+                with self.assertRaisesRegex(settings.ConfigError, "pin_unused_actions"):
+                    settings.load()
+
+
 if __name__ == "__main__":
     unittest.main()

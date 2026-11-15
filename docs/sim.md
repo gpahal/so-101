@@ -227,9 +227,30 @@ What stands between the sim and the arm's 24 of 25 is a few millimetres at the e
 2. **The weights.** The block and the jar on kitchen scales (`block_mass`, `jar_mass`), and the jar's opening across.
 3. **New demos if the top camera has moved.** It had by 14 November, by 4 to 13 px. The sim is built for where the camera was on 12 November, and so is a policy trained on those demos.
 
+## An ACT policy trained with augmentation
+
+Every policy now trains with LeRobot's image augmentation (README, training). ACT retrained that way on the same 100 demos (`gpahal/act_so101_block-container` at commit `8db5cf0e`, 200k steps) reacts less to the sim's pictures, on the build of 15 November:
+
+| | ACT, `100-demos` | ACT with augmentation |
+| --- | --- | --- |
+| `sim check`: error from the demo on real images | 0.62° | 0.66° |
+| On sim images | 1.79° | 1.56° |
+| Extra error on sim images | 1.17° | 0.89° |
+| `sim eval`, the same 50 starts (seeds 1000 to 1049) | 39 | 43 |
+
+The 50 attempts split 11 placed by the new model alone and 7 by the old alone, which chance gives about half the time (p = 0.48, exact sign test). It hasn't run on the arm yet.
+
+It also cares less where the top camera is. Shifting the demos' top frames by a camera's measured move and asking each model for its next 50 actions moved the jaw tips' path by these medians, over 60 moments before a grasp on held-back demos:
+
+| Top camera | ACT, `100-demos` | ACT with augmentation |
+| --- | --- | --- |
+| As on 13 November (1.7 px, 0.2°), the run that placed 24 of 25 | 2.9 mm | 1.0 mm |
+| 8 px higher, as on 15 November before re-aiming | 9.4 to 10.5 mm | 1.8 to 2.2 mm |
+
+`so101 sim aim` (README) puts the camera back.
+
 ## What else would close the gap
 
-- **Train with augmentation.** Blur, noise and colour jitter in training would make a policy less sensitive to exactly the detail a sim lacks, and should help on the arm too.
 - **A held block from real pixels.** Once the block is grasped, the top camera draws it rendered; in the wrist camera it comes from demo frames of a carried block, placed by where the model thinks that demo's block was.
 
 ## What was tried and dropped

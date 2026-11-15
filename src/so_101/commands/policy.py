@@ -85,7 +85,13 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
     if ns.remote:
         remote.refuse_action_steps(ns.policy, ns.action_steps)
     action_steps = resolve_action_steps(ns.action_steps, config)
-    server = remote.require_server(task.name, ns.policy, ns.revision or "main", action_steps) if ns.remote else None
+    server = None
+    if ns.remote:
+        if ns.policy not in s.remote:
+            sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
+        server = remote.require_server(
+            task.name, ns.policy, ns.revision or "main", action_steps, s.remote[ns.policy].pin_unused_actions
+        )
 
     # Capture each camera at the size the checkpoint was trained on.
     sizes = tasks.image_sizes(config)

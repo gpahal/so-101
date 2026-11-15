@@ -18,13 +18,17 @@ from contextlib import contextmanager, suppress
 from so_101 import svtshim
 
 # LeRobot publishes no image tagged for a release, so this is what `latest` was on 2026-11-11, by
-# digest: a job must not change under a working setup when `latest` moves. Move it on purpose. No job
-# has run this image against the 0.7.0 client yet.
+# digest: a job must not change under a working setup when `latest` moves. Move it on purpose. ACT and
+# pi0.5 have both run on it against the 0.7.0 client, on 2026-11-13. `wait_until_ready` checks what
+# PI05_SERVER changes in it took effect, so a new image that renames them fails at `server start`.
 SERVER_IMAGE = "huggingface/lerobot-gpu@sha256:aed1a4990fedee463b545050f33a38afce4f6ec18f7ceb8be17f850737860d6c"
 PORT = 7447
 DEPLOYMENT = "so101"
 SEMANTICS = "so101-degrees-gripper-percent-v1"
 SERVER_LABEL = "policy-server"
+PIN_LABEL = "pin_unused_actions"
+# What the pi0.5 job prints the first time it pins the unused action columns, during warm-up.
+PIN_MARKER = "so101: unused action columns pinned"
 SSH_KEYS_URL = "https://huggingface.co/settings/keys"
 DONE_STAGES = {"COMPLETED", "CANCELED", "ERROR", "DELETED"}
 JOINTS = ["shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos", "wrist_roll.pos", "gripper.pos"]
@@ -54,12 +58,35 @@ RTC_STARVATION_GRACE_S = 2.0
 # the refill. Seams are steered while the turnaround stays under it.
 RTC_HORIZON_S = RTC_REFILL_S
 
+# The script the pi0.5 job runs in place of `lerobot-policy-server`. `setup_script` writes it after a
+# line that sets PIN_UNUSED_ACTIONS. It changes four things in LeRobot before starting its server.
+#
 # LeRobot 0.7's server requires every input the model declares, but the client can only send cameras
 # that exist. pi0.5 pads and masks a missing camera itself, which is what it saw in training, so
 # accept its empty camera slots missing. This follows LeRobot's own override for SmolVLA.
+#
+# pi0.5 has 32 action columns and this arm uses 6. Training gives the other 26 a target of 0 and
+# leaves them out of the loss, so at every denoising step the model saw them as `time * noise`, and
+# nothing taught it where to move them. LeRobot's sampler moves them by the model's output anyway:
+# they end the last step 1.5 times as wide as in training (0.149 against 0.100), and the 6 real
+# columns, which read them, wobble. `pin_unused_actions` gives the model those columns as training
+# did, at every step. On 24 demo frames with 3 samples each, on an L4, the motion the arm would play
+# across two chunks went from 0.73 to 0.23 degrees per step squared (RMS second difference; the demos
+# measure 0.11 and ACT's plans 0.23) and from 25.7 direction changes per 50 steps to 3.4. The error
+# against the demos didn't change (3.28 to 3.26 degrees), nor the time per chunk (0.41 s).
+#
+# Training keeps the weights in 32-bit, and LeRobot serves a model in the precision it was trained
+# in. Serve in bfloat16 instead: on an L4 a chunk took 0.36 s against 0.77 s in 32-bit, and the plans
+# differed by 0.09 degrees. A model trained compiled would be served compiled too, so that is turned
+# off: the pin above is plain Python that must run at every step.
+#
+# LeRobot's server downloads the whole model repo, and training leaves its checkpoints there, about
+# 72 GB each for pi0.5. Download the model without them.
 PI05_SERVER = '''\
+import torch
 from lerobot.configs import FeatureType
-from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+from lerobot.remote_inference import deployment
+from lerobot.policies.pi05.modeling_pi05 import PI05Policy, PI05Pytorch
 from lerobot.scripts.lerobot_policy_server import main
 
 
@@ -78,7 +105,54 @@ def validate(self, features):
             raise ValueError(f"Tensor shape differs: {name}")
 
 
+def pin_unused_actions():
+    sample, denoise = PI05Pytorch.sample_actions, PI05Pytorch.denoise_step
+    start, pinned = {}, []
+
+    def sample_actions(self, *args, **kwargs):
+        start.clear()  # every chunk starts from new noise, which its first step below records
+        return sample(self, *args, **kwargs)
+
+    def denoise_step(self, prefix_pad_masks, past_key_values, x_t, timestep):
+        used = self.config.output_features["action"].shape[0]
+        if "noise" not in start:  # the first step's input is the starting noise, at time 1
+            start["noise"] = x_t[:, :, used:].detach().clone()
+        time = timestep.reshape(timestep.shape + (1,) * (x_t.ndim - timestep.ndim)).to(x_t.dtype)
+        x_t = x_t.clone()
+        x_t[:, :, used:] = time * start["noise"]
+        if not pinned:  # `so101 server start` waits for this line
+            pinned.append(True)
+            print(f"so101: unused action columns pinned (columns {used} to {x_t.shape[2] - 1})", flush=True)
+        return denoise(
+            self, prefix_pad_masks=prefix_pad_masks, past_key_values=past_key_values, x_t=x_t, timestep=timestep
+        )
+
+    PI05Pytorch.sample_actions = sample_actions
+    PI05Pytorch.denoise_step = denoise_step
+
+
+load = PI05Policy.from_pretrained.__func__
+
+
+def from_pretrained(cls, *args, config=None, **kwargs):
+    if config is not None:
+        config.dtype = torch.bfloat16
+        config.compile_model = False
+    return load(cls, *args, config=config, **kwargs)
+
+
+download = deployment.snapshot_download
+
+
+def download_model(*args, **kwargs):
+    return download(*args, ignore_patterns=["checkpoints/**"], **kwargs)
+
+
+deployment.snapshot_download = download_model
+PI05Policy.from_pretrained = classmethod(from_pretrained)
 PI05Policy.validate_chunk_input_features = validate
+if PIN_UNUSED_ACTIONS:
+    pin_unused_actions()
 main()
 '''
 
@@ -136,8 +210,9 @@ def steps_flag(policy_type: str, action_steps: int) -> str:
     return f" --action-steps {action_steps}" if EXECUTION[policy_type] == "chunk" else ""
 
 
-def setup_script(policy_type: str, config: dict) -> tuple[str, str]:
-    """Shell lines that write the job's files, and the command that then starts the server."""
+def setup_script(policy_type: str, config: dict, pin_unused_actions: bool) -> tuple[str, str]:
+    """Shell lines that write the job's files, and the command that then starts the server.
+    `pin_unused_actions` applies to pi0.5 only: see PI05_SERVER."""
 
     def write(path: str, text: str) -> str:
         return f"echo {base64.b64encode(text.encode()).decode()} | base64 -d > {path}\n"
@@ -145,7 +220,8 @@ def setup_script(policy_type: str, config: dict) -> tuple[str, str]:
     # JSON is valid YAML, and LeRobot picks the parser from the file's extension.
     script = write("/tmp/server.yaml", json.dumps(config))
     if policy_type == "pi05":
-        return script + write("/tmp/serve.py", PI05_SERVER), "python /tmp/serve.py --config_path=/tmp/server.yaml"
+        serve = f"PIN_UNUSED_ACTIONS = {pin_unused_actions!r}\n{PI05_SERVER}"
+        return script + write("/tmp/serve.py", serve), "python /tmp/serve.py --config_path=/tmp/server.yaml"
     return script, "lerobot-policy-server --config_path=/tmp/server.yaml"
 
 
@@ -185,22 +261,28 @@ def describe(job) -> str:
     execution = labels.get("execution")
     steps = (f"{labels.get('action_steps')} action steps" if execution == "chunk"
              else "real-time chunking" if execution else "plain chunks from before real-time chunking")
+    pin = {"true": ", unused action columns pinned", "false": ", unused action columns not pinned"}.get(
+        labels.get(PIN_LABEL), ", started before the unused action columns setting" if labels.get("policy") == "pi05" else "")
     return (
-        f"{labels.get('policy')} for {labels.get('task')} at {labels.get('revision')}, {steps}, "
+        f"{labels.get('policy')} for {labels.get('task')} at {labels.get('revision')}, {steps}{pin}, "
         f"on {job.flavor} (job {job.id}, {job.status.stage})"
     )
 
 
-def _labels(task: str, policy_type: str, revision: str, action_steps: int) -> dict[str, str]:
-    """The job labels that say which model a server serves, and how its chunks are joined:
-    `start_server` sets them, and `require_server` matches them."""
-    return {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps),
-            "execution": EXECUTION[policy_type]}
+def _labels(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool) -> dict[str, str]:
+    """The job labels that say which model a server serves, how its chunks are joined and, for pi0.5,
+    whether its unused action columns are pinned: `start_server` sets them, and `require_server`
+    matches them."""
+    labels = {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps),
+              "execution": EXECUTION[policy_type]}
+    if policy_type == "pi05":
+        labels[PIN_LABEL] = "true" if pin_unused_actions else "false"
+    return labels
 
 
 def start_server(
     *, repo: str, task: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int,
-    fps: int, target: str, timeout: str,
+    fps: int, target: str, timeout: str, pin_unused_actions: bool,
 ) -> None:
     """Start the job and wait until the model is loaded and serving."""
     from huggingface_hub import HfApi, get_token
@@ -208,7 +290,9 @@ def start_server(
     check_ssh_key()
     if server := active_server():
         sys.exit(f"A policy server is already running: {describe(server)}.\nStop it first: uv run so101 server stop")
-    setup, serve = setup_script(policy_type, server_config(repo, policy_type, revision, image_sizes, action_steps, fps))
+    setup, serve = setup_script(
+        policy_type, server_config(repo, policy_type, revision, image_sizes, action_steps, fps), pin_unused_actions
+    )
     api = HfApi()
     job = api.run_job(
         image=SERVER_IMAGE,
@@ -217,13 +301,13 @@ def start_server(
         secrets={"HF_TOKEN": get_token()},
         flavor=target,
         timeout=timeout,
-        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps)},
+        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps, pin_unused_actions)},
         ssh=True,
     )
     print(f"Started job {job.id} on {target}. It bills until `uv run so101 server stop`, or {timeout} at most.")
     print(f"Logs: {job.url}\nCtrl+C stops watching but leaves it running. Loading the model takes a few minutes...\n")
     try:
-        wait_until_ready(job.id, policy_type)
+        wait_until_ready(job.id, policy_type, pin_unused_actions)
     except KeyboardInterrupt:
         sys.exit("\nStopped watching. The job is still running and billing: uv run so101 server stop")
     steps = steps_flag(policy_type, action_steps)
@@ -235,19 +319,26 @@ def start_server(
     )
 
 
-def wait_until_ready(job_id: str, policy_type: str) -> None:
+def wait_until_ready(job_id: str, policy_type: str, pin_unused_actions: bool) -> None:
     from huggingface_hub import HfApi
 
     api = HfApi()
-    weights_loaded = False
+    weights_loaded = pinned = False
     for line in api.fetch_job_logs(job_id=job_id, follow=True):
         print(line, flush=True)
         weights_loaded = weights_loaded or "All keys loaded successfully!" in line
+        pinned = pinned or PIN_MARKER in line
         if "Policy server ready" in line:
             # pi0.5 only warns when its weights fail to load, and would then serve random ones.
             if policy_type == "pi05" and not weights_loaded:
                 api.cancel_job(job_id=job_id)
                 sys.exit("The model's weights didn't load cleanly, so the job was cancelled. See the log above.")
+            # The pin wraps two of LeRobot's methods by name. If an image renamed one, the server would
+            # run unpinned under a label that says pinned.
+            if policy_type == "pi05" and pin_unused_actions and not pinned:
+                api.cancel_job(job_id=job_id)
+                sys.exit("The server warmed up without pinning the unused action columns, so the job was cancelled: "
+                         "LeRobot in this image no longer matches PI05_SERVER in src/so_101/remote.py.")
             return
     status = api.inspect_job(job_id=job_id).status
     sys.exit(f"The job stopped before the server was ready: {status.stage} {status.message or ''}")
@@ -274,15 +365,16 @@ def stop_server() -> None:
                  + "\n  ".join(failed))
 
 
-def require_server(task: str, policy_type: str, revision: str, action_steps: int):
-    """The running server, if it serves what this run asks for. Starting one bills, so never do it implicitly."""
+def require_server(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool):
+    """The running server, if it serves what this run asks for, as so101.toml sets it. Starting one
+    bills, so never do it implicitly."""
     start = (f"uv run so101 server start {task} --policy {policy_type} --revision {revision}"
              f"{steps_flag(policy_type, action_steps)}")
     server = active_server()
     if server is None:
         sys.exit(f"No policy server is running. Start one first:\n  {start}")
     labels = server.labels or {}
-    wanted = _labels(task, policy_type, revision, action_steps)
+    wanted = _labels(task, policy_type, revision, action_steps, pin_unused_actions)
     if {key: labels.get(key) for key in wanted} != wanted or server.status.stage != "RUNNING":
         sys.exit(f"The policy server isn't serving this model: {describe(server)}.\nStop it, then: {start}")
     return server

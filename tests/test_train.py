@@ -17,17 +17,54 @@ class BaseTest(unittest.TestCase):
         self.assertEqual(flags[:2], ["--policy.pretrained_path=gpahal/pi05_so101_block-container",
                                      "--policy.pretrained_revision=100-demos"])
         self.assertNotIn("--policy.pretrained_path=lerobot/pi05_base", flags)
-        self.assertEqual(flags[2:], cli.POLICY_FLAGS["pi05"][1:])
+        self.assertEqual(flags[2:], [*cli.POLICY_FLAGS["pi05"][1:], *cli.TRAIN_FLAGS])
 
     def test_a_base_without_a_revision_starts_from_main(self) -> None:
         self.assertEqual(cli.policy_flags("act", cli.parse_base("gpahal/act_so101_block-container")),
-                         ["--policy.pretrained_path=gpahal/act_so101_block-container"])
+                         ["--policy.pretrained_path=gpahal/act_so101_block-container", *cli.TRAIN_FLAGS])
 
     def test_without_a_base_each_policy_keeps_its_default(self) -> None:
-        self.assertEqual(cli.policy_flags("act", None), [])
-        self.assertEqual(cli.policy_flags("pi05", None), cli.POLICY_FLAGS["pi05"])
+        self.assertEqual(cli.policy_flags("act", None), cli.TRAIN_FLAGS)
+        self.assertEqual(cli.policy_flags("pi05", None), [*cli.POLICY_FLAGS["pi05"], *cli.TRAIN_FLAGS])
         self.assertIsNone(cli.default_base("act"))
         self.assertEqual(cli.default_base("pi05"), "lerobot/pi05_base")
+
+    def test_pi05s_flags_train_the_whole_model_with_32_bit_weights(self) -> None:
+        # Parsed by LeRobot's own training config, so a renamed or mistyped flag fails here, not in a paid job.
+        import draccus
+        import lerobot.policies  # noqa: F401  registers the policy types
+        import torch
+        from lerobot.configs.train import TrainPipelineConfig
+
+        config = draccus.parse(TrainPipelineConfig, args=[
+            "--policy.type=pi05", "--dataset.repo_id=x/y", "--policy.push_to_hub=false", *cli.policy_flags("pi05", None)])
+        policy = config.policy
+        self.assertEqual((policy.train_expert_only, policy.freeze_vision_encoder), (False, False))
+        # bfloat16 weights can't hold an update under 1/512 of a weight: only the arithmetic may be bfloat16.
+        self.assertEqual((policy.dtype, config.accelerator.mixed_precision), (torch.float32, "bf16"))
+        self.assertTrue(policy.gradient_checkpointing)
+        self.assertEqual(policy.empty_cameras, 0)  # a blank third camera only costs time
+        self.assertTrue(config.dataset.image_transforms.enable)
+        self.assertEqual((config.ema.type, config.ema.decay), ("constant", 0.99))
+        self.assertEqual((policy.compile_model, policy.compile_mode), (True, "default"))
+
+    def test_every_policy_trains_with_image_augmentation(self) -> None:
+        # Parsed by LeRobot's own training config, as each training job parses it.
+        import draccus
+        import lerobot.policies  # noqa: F401  registers the policy types
+        from lerobot.configs.train import TrainPipelineConfig
+
+        for policy in cli.POLICY_FLAGS:
+            for base in (None, cli.parse_base(f"gpahal/{policy}_so101_block-container@100-demos")):
+                with self.subTest(policy=policy, base=base):
+                    config = draccus.parse(TrainPipelineConfig, args=[
+                        f"--policy.type={policy}", "--dataset.repo_id=x/y", "--policy.push_to_hub=false", *cli.policy_flags(policy, base)])
+                    self.assertTrue(config.dataset.image_transforms.enable)
+        # A flag forwarded after them, as `so101 train` passes the rest of its command line, turns it off.
+        config = draccus.parse(TrainPipelineConfig, args=[
+            "--policy.type=act", "--dataset.repo_id=x/y", "--policy.push_to_hub=false", *cli.policy_flags("act", None),
+            "--dataset.image_transforms.enable=false"])
+        self.assertFalse(config.dataset.image_transforms.enable)
 
     def test_a_base_must_be_a_hub_model_name(self) -> None:
         for text in ("act_so101_block-container", "gpahal/", "/act", "a/b/c", "gpahal/act@"):
