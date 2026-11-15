@@ -44,7 +44,7 @@ COARSE = ((0, 0, 240, 175), (100, 350, 120, 130))
 COARSE_MATCHES = 12
 SEARCH = 12
 MAT_SEARCH = 20  # beyond where the camera's move puts the mat's edges
-PAD = 80  # the live picture's border, so a search can run past its edge
+PAD = 80  # the live picture's border, so a search can run a little past its edge
 MATCH = 0.6  # the weakest normalised cross-correlation a window's match is used at
 
 
@@ -78,29 +78,30 @@ class Offset:
     def mat_aligned(self) -> bool:
         return bool(np.hypot(self.mat_dx, self.mat_dy) <= MAT_PX)
 
+    def _camera_steps(self, decimals: int) -> list[str]:
+        steps = []
+        if abs(self.dx) > ALIGNED_PX / 2:
+            steps.append((abs(self.dx), f"turn it {'right' if self.dx > 0 else 'left'} ({abs(self.dx):.{decimals}f} px)"))
+        if abs(self.dy) > ALIGNED_PX / 2:
+            steps.append((abs(self.dy), f"tilt it {'down' if self.dy > 0 else 'up'} ({abs(self.dy):.{decimals}f} px)"))
+        if abs(self.degrees) > ALIGNED_DEG:
+            way = "clockwise" if self.degrees > 0 else "anticlockwise"
+            steps.append((abs(self.degrees) * 4, f"roll it {way}, looking out through it ({abs(self.degrees):.{decimals + 1}f} deg)"))
+        return [text for _, text in sorted(steps, reverse=True)]
+
     def advice(self) -> list[str]:
         """What to do, the camera first, its largest correction first. Turning a camera left slides its
         picture right, tilting it up slides the picture down, and rolling it clockwise (looking out
         through it) turns the picture anticlockwise."""
-        if not self.found:
-            return [line for line in [
-                "Can't match the demos' view closely enough to measure.",
-                f"Roughly: moved {self.dx:+.0f} px right, {self.dy:+.0f} px down, turned {self.degrees:+.1f} deg." if self.dx or self.dy else "",
-                "Line the green outlines up by eye (b blends the pictures).",
-            ] if line]
+        if not self.found and not (self.dx or self.dy or self.degrees):
+            return ["Can't find the demos' view: line the green outlines up by eye (b blends the pictures)."]
+        if not self.found:  # only `coarse` matched: far off, so steer by it until the windows match
+            return ["Far off, roughly:"] + [f"Camera: {text}" for text in self._camera_steps(0)]
         lines = []
         if self.camera_aligned:
             lines.append("Camera: aligned, leave it here.")
         else:
-            steps = []
-            if abs(self.dx) > ALIGNED_PX / 2:
-                steps.append((abs(self.dx), f"turn it {'right' if self.dx > 0 else 'left'} ({abs(self.dx):.1f} px)"))
-            if abs(self.dy) > ALIGNED_PX / 2:
-                steps.append((abs(self.dy), f"tilt it {'down' if self.dy > 0 else 'up'} ({abs(self.dy):.1f} px)"))
-            if abs(self.degrees) > ALIGNED_DEG:
-                way = "clockwise" if self.degrees > 0 else "anticlockwise"
-                steps.append((abs(self.degrees) * 4, f"roll it {way}, looking out through it ({abs(self.degrees):.2f} deg)"))
-            lines += [f"Camera: {text}" for _, text in sorted(steps, reverse=True)]
+            lines += [f"Camera: {text}" for text in self._camera_steps(1)]
         if self.mat_aligned:
             lines.append("Mat: where it was.")
         else:
@@ -122,7 +123,10 @@ def _shift(reference_gray: np.ndarray, live_padded: np.ndarray, window: tuple[in
     x, y, w, h = window
     ox, oy = (int(round(v)) for v in guess)
     template = reference_gray[y + search : y + h - search, x + search : x + w - search]
-    area = live_padded[PAD + y + oy : PAD + y + h + oy, PAD + x + ox : PAD + x + w + ox]
+    top, left = PAD + y + oy, PAD + x + ox
+    if top < 0 or left < 0 or top + h > live_padded.shape[0] or left + w > live_padded.shape[1]:
+        return 0.0, 0.0, False  # the camera's so far off that this window has left the picture
+    area = live_padded[top : top + h, left : left + w]
     scores = cv2.matchTemplate(area, template, cv2.TM_CCOEFF_NORMED)
     _, best, _, (px, py) = cv2.minMaxLoc(scores)
     inside = 0 < px < 2 * search and 0 < py < 2 * search
@@ -141,7 +145,8 @@ def coarse(reference_gray: np.ndarray, live_gray: np.ndarray) -> tuple[float, fl
     for x, y, w, h in COARSE:
         mask[y : y + h, x : x + w] = 255
     orb = cv2.ORB_create(1500)
-    found = [orb.detectAndCompute(cv2.convertScaleAbs(image), mask) for image in (reference_gray, live_gray)]
+    # The live picture is searched whole: a big move carries the fixed areas out of where they were.
+    found = [orb.detectAndCompute(cv2.convertScaleAbs(reference_gray), mask), orb.detectAndCompute(cv2.convertScaleAbs(live_gray), None)]
     if any(descriptors is None for _, descriptors in found):
         return None
     matches = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(found[0][1], found[1][1])
@@ -235,7 +240,7 @@ def overlay(live: np.ndarray, reference_rgb: np.ndarray, offset: Offset, blend: 
         cv2.rectangle(picture, (x, y), (x + w - 1, y + h - 1), colour, 1)
         _text(picture, f"{dx:+.1f},{dy:+.1f}" + ("" if used else " (left out)"), (x + 3, y + h - 5), 0.4, colour)
     middle = np.array([picture.shape[1] // 2, picture.shape[0] // 2])
-    if offset.found and not offset.camera_aligned:
+    if not offset.camera_aligned:
         _arrow(picture, middle, -offset.dx, -offset.dy, ORANGE)
     if not offset.mat_aligned:
         for x, y, w, h in MAT.values():
@@ -253,7 +258,7 @@ def _arrow(picture: np.ndarray, start: np.ndarray, dx: float, dy: float, colour:
     size = np.hypot(dx, dy)
     if size < 0.5:
         return
-    end = start + np.array([dx, dy]) / size * max(12.0, 6 * size)
+    end = start + np.array([dx, dy]) / size * min(max(12.0, 6 * size), 120.0)
     cv2.arrowedLine(picture, tuple(int(v) for v in start), tuple(int(v) for v in end), (0, 0, 0), 5, tipLength=0.3)
     cv2.arrowedLine(picture, tuple(int(v) for v in start), tuple(int(v) for v in end), colour, 2, tipLength=0.3)
 

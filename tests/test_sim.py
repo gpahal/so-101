@@ -553,7 +553,17 @@ class AimTest(unittest.TestCase):
         offset = aim.measure(aim.gray(self.view()), aim.gray(np.full((480, 640, 3), 128, np.uint8)))
         self.assertFalse(offset.found)
         self.assertFalse(offset.camera_aligned)
-        self.assertIn("Can't match", offset.advice()[0])
+        self.assertIn("Can't find the demos' view", offset.advice()[0])
+
+    def test_a_camera_too_far_off_to_measure_still_gets_steered(self):
+        from so_101.sim import aim
+
+        view = self.view()
+        offset = aim.measure(aim.gray(view), aim.gray(self.moved(view, -61, 16, -6.7)))
+        self.assertAlmostEqual(offset.dx, -61, delta=3)
+        self.assertAlmostEqual(offset.degrees, -6.7, delta=0.5)
+        self.assertFalse(offset.camera_aligned)
+        self.assertIn("Camera: turn it left", " ".join(offset.advice()))
 
 
 if __name__ == "__main__":
