@@ -16,7 +16,7 @@ from so_101.tasks import get_task
 SCENE_DIR_ENV = "SO101_SIM_SCENE"  # `so_101.sim.env.SCENE_DIR_ENV`, which imports MuJoCo
 DEMOS_DIR_ENV = "SO101_SIM_DEMOS"  # `so_101.sim.env.DEMOS_DIR_ENV`
 CAMERAS = ("top", "wrist")
-ACTIONS = ("build", "replay", "score", "nudge", "physics", "check", "eval")
+ACTIONS = ("build", "replay", "score", "nudge", "physics", "check", "eval", "aim")
 
 
 def record_nudges(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
@@ -56,9 +56,73 @@ def record_nudges(s: settings.Settings, ns: argparse.Namespace, extra: list[str]
         sys.exit(code)
 
 
+def aim_camera(s: settings.Settings, ns: argparse.Namespace) -> None:
+    """Show the top camera's live picture against the demos' view, and how to turn it back. Reads the
+    camera only (and sets its controls, as `check` does); `s` saves a picture under outputs/sim/aim/."""
+    import cv2
+
+    from so_101.check import find_cameras, open_cameras
+    from so_101.report import Report
+    from so_101.sim import aim
+    from so_101.sim.demos import Demos
+
+    task = get_task(ns.task)
+    root = data.train_root(s, task)
+    if not (root / "meta" / "info.json").is_file():
+        sys.exit(f"No built demos in {root}: the demos' view comes from them. Build them with `uv run so101 build {task.name}`.")
+    demos = Demos(root)
+    print(f"Taking the demos' view from the first frames of {len(demos)} demos...", flush=True)
+    reference = aim.reference([demos.frame(episode, 0) for episode in range(0, len(demos), 4)])
+    reference_gray = aim.gray(reference)
+    report = Report()
+    lookups = find_cameras(report, [s.camera("top")])
+    cameras, _ = open_cameras(report, lookups)
+    if "top" not in cameras:
+        report.print("Top camera")
+        sys.exit(1)
+    camera = cameras["top"]
+    print(
+        "Take the block off the mat. The arm may stay at rest or at the start pose. In the window: b blends the live "
+        "picture with the demos' view, s saves it, q quits.",
+        flush=True,
+    )
+    steady, blend, last_print = aim.Steady(), False, 0.0
+    saved = s.outputs_dir / "sim" / "aim"
+    try:
+        while True:
+            live = camera.read()
+            offset = steady.add(aim.measure(reference_gray, aim.gray(live)))
+            picture = aim.overlay(live, reference, offset, blend)
+            cv2.imshow("so101 sim aim: top camera", cv2.resize(picture, None, fx=1.5, fy=1.5))
+            if time.monotonic() - last_print > 1:
+                last_print = time.monotonic()
+                print(" | ".join(offset.advice()), flush=True)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
+            if key == ord("b"):
+                blend = not blend
+            if key == ord("s"):
+                saved.mkdir(parents=True, exist_ok=True)
+                stem = saved / time.strftime("%Y%m%d-%H%M%S")
+                cv2.imwrite(str(stem.with_suffix(".jpg")), picture)
+                cv2.imwrite(str(stem.with_name(stem.name + "-live.png")), live[:, :, ::-1])
+                fields = ("dx", "dy", "degrees", "mat_dx", "mat_dy", "found")
+                stem.with_suffix(".json").write_text(json.dumps({key: getattr(offset, key) for key in fields}, indent=1))
+                print(f"Saved {stem}.jpg, -live.png and .json", flush=True)
+    finally:
+        camera.disconnect()
+        cv2.destroyAllWindows()
+
+
 def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
     if ns.action == "nudge":  # on the arm's computer, which needs neither MuJoCo nor the demos
         record_nudges(s, ns, extra)
+        return
+    if ns.action == "aim":  # needs the camera and the built demos, not MuJoCo
+        if extra:
+            sys.exit(f"so101 sim aim doesn't take {' '.join(extra)}.")
+        aim_camera(s, ns)
         return
     if extra and ns.action != "eval":
         sys.exit(f"so101 sim {ns.action} doesn't take {' '.join(extra)}.")

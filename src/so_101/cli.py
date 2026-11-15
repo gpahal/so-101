@@ -774,7 +774,7 @@ def main() -> None:
     p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
     p.set_defaults(fn=cmd_scan)
 
-    p = sub.add_parser("sim", help="build a simulated twin of a task from its demos, and try policies in it")
+    p = sub.add_parser("sim", help="build a simulated twin of a task from its demos, try policies in it, and aim the top camera back at the demos' view")
     p.add_argument("action", choices=SIM_ACTIONS)
     add_task(p)
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="for check and eval: which model (default: act, the only one that runs on this Mac)")

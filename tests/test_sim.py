@@ -506,5 +506,55 @@ class PhotoTest(unittest.TestCase):
             self.assertFalse((self.env.render_camera(camera) == colour).all(axis=2).any())
 
 
+class AimTest(unittest.TestCase):
+    """`so101 sim aim` reads how far the top camera's picture moved and turned from the demos' view, on a
+    textured stand-in for it. It needs only OpenCV, so it runs without the sim extra."""
+
+    @staticmethod
+    def view() -> np.ndarray:
+        rng = np.random.default_rng(0)
+        noise = cv2.resize(rng.random((120, 160)).astype(np.float32), (640, 480), interpolation=cv2.INTER_CUBIC)
+        fine = cv2.GaussianBlur(rng.random((480, 640)).astype(np.float32), (0, 0), 1.5)
+        gray = np.clip(255 * (0.6 * noise + 0.4 * fine), 0, 255).astype(np.uint8)
+        return np.repeat(gray[:, :, None], 3, axis=2)
+
+    @staticmethod
+    def moved(image: np.ndarray, dx: float, dy: float, degrees: float) -> np.ndarray:
+        turn = cv2.getRotationMatrix2D((320, 240), -degrees, 1.0)  # OpenCV's angles are anticlockwise
+        turn[:, 2] += (dx, dy)
+        return cv2.warpAffine(image, turn, (640, 480), borderMode=cv2.BORDER_REFLECT)
+
+    def test_a_moved_and_turned_camera_is_read_back(self):
+        from so_101.sim import aim
+
+        view = self.view()
+        for dx, dy, degrees in ((0, 0, 0), (4, -2, 0), (-25, 14, 1.0), (3, 6, -0.5)):
+            offset = aim.measure(aim.gray(view), aim.gray(self.moved(view, dx, dy, degrees)))
+            self.assertTrue(offset.found)
+            self.assertAlmostEqual(offset.dx, dx, delta=0.5)
+            self.assertAlmostEqual(offset.dy, dy, delta=0.5)
+            self.assertAlmostEqual(offset.degrees, degrees, delta=0.1)
+            self.assertLess(np.hypot(offset.mat_dx, offset.mat_dy), 1.0)  # the mat moved with the picture
+
+    def test_the_advice_turns_the_camera_against_the_picture(self):
+        from so_101.sim import aim
+
+        windows = {name: (0.0, 0.0, True) for name in {**aim.FIXED, **aim.MAT}}
+        right_and_down = aim.Offset(5.0, 3.0, 0.0, 0.0, 0.0, windows)
+        self.assertEqual(right_and_down.advice()[:2], ["Camera: turn it right (5.0 px)", "Camera: tilt it down (3.0 px)"])
+        turned = aim.Offset(0.0, 0.0, -0.5, 0.0, 0.0, windows)
+        self.assertIn("anticlockwise", turned.advice()[0])
+        self.assertEqual(aim.Offset(0.3, -0.2, 0.05, 0.5, 0.0, windows).advice(), ["Camera: aligned, leave it here.", "Mat: where it was."])
+        self.assertEqual(aim.Offset(0.0, 0.0, 0.0, 4.0, 0.0, windows).advice()[1], "Mat: slide it left 4 px in the picture (blue arrows)")
+
+    def test_a_picture_with_nothing_to_match_says_so(self):
+        from so_101.sim import aim
+
+        offset = aim.measure(aim.gray(self.view()), aim.gray(np.full((480, 640, 3), 128, np.uint8)))
+        self.assertFalse(offset.found)
+        self.assertFalse(offset.camera_aligned)
+        self.assertIn("Can't match", offset.advice()[0])
+
+
 if __name__ == "__main__":
     unittest.main()

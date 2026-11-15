@@ -234,6 +234,7 @@ uv run so101 sim replay --recording outputs/rollouts/<run>/dataset   # and a rea
 uv run so101 sim score                       # how real is it? No model involved
 uv run so101 sim eval --episodes 25          # run the task's ACT policy in it
 uv run so101 sim check                       # how differently does the model act on sim images? Read-only
+uv run so101 sim aim                         # guide the top camera and the mat back to the demos' view
 ```
 
 What `build` works out, and from what:
@@ -261,7 +262,15 @@ Without the demos it draws everything from the arm model and the fitted colours,
 
 Everything goes in `sims/block-container/`, which is committed: fitting again gives a slightly different fit, so the repo keeps the one in use. A rebuild keeps the fits already there and takes about 2 minutes. The first build takes about 25: 3 for the cameras and 15 for the motors, which `--refit-cameras` and `--refit-motors` redo. The scene records the Hub revision of the demos it was built from, and commands download that revision when a computer has no demos. Commit `sims/block-container/` after each `build`.
 
-After moving a camera or recalibrating the follower, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`. If the demos aren't on the Hub yet, `build` warns that only this computer can rebuild the sim; a cloud `so101 train` uploads them.
+**Putting the top camera back.** The sim, and every policy trained on the demos, expect the top camera's view of the demos. It had moved 2 px and turned 0.2° by the runs of 13 November, and 4 to 13 px and up to 2.5° by those of 14 November, and the mat (a loose mouse pad) had slid a few pixels on its own. To put both back:
+
+```bash
+uv run so101 sim aim          # reads the top camera only; needs the built demos, not MuJoCo
+```
+
+It shows the live picture with the demos' view drawn over it in green, and says which way to turn, tilt and roll the camera, and then which way to slide the mat, until it reads "aligned": within 1 px and 0.15°, about as close as the demos were to each other. Take the block off the mat first; the arm may be at rest or at the start pose. It compares the live picture with the median of the demos' first frames in windows on things that never move (the socket and skirting, the floor tiles, the arm's base plate), finding big moves first from features and then each window's to a tenth of a pixel, and reads the mat's slide from its edges beyond that. A window something covers is left out and shown grey. `b` blends the two pictures, `s` saves the picture and the numbers under `outputs/sim/aim/`. It reads only the top camera: the wrist camera's view depends on the arm's pose.
+
+After moving a camera for good or recalibrating the follower, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`. If the demos aren't on the Hub yet, `build` warns that only this computer can rebuild the sim; a cloud `so101 train` uploads them.
 
 - `replay` gives the sim each demo's real commands, with the block and jar where that demo's stood, and counts the demos that lift the block and the ones that drop it in the jar. Nothing corrects the arm along the way as a policy would, so a few millimetres' error costs a grasp: expect most demos to succeed, not all. It saves the first one, real beside sim, in `outputs/sim/`. With `--recording`, it replays another recording instead, such as the `dataset` folder of a `so101 run` under `outputs/rollouts/`: commands that worked on the arm should work in the sim whoever gave them, and no fit ever saw these. It places each attempt's block from the top camera's frame 3 s in, so it needs the top camera where it was for the demos.
 - `score` compares the sim with real frames held back from the fits, the arm's and the block's shapes, and the replays, and saves real and sim side by side. Its "real, same pose" column is how much two real moments differ, for scale.
