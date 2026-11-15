@@ -451,6 +451,14 @@ def push_dataset(root: Path, repo_id: str) -> None:
 
 
 # Flags each policy needs beyond its `[train.<policy>]` recipe in so101.toml.
+# Every policy's training: LeRobot's random brightness, contrast, colour, sharpness, shifts and rotations
+# of up to 5 degrees, at most 3 per frame. openpi always trains pi0.5 with augmentation of this kind. The
+# first pi0.5 saw only the demos' light: under light that blew out 41% of the top camera's pixels it held
+# the block in 4 of 8 attempts, against 9 of 10 under the demos' light. The ACT trained without it moved
+# its actions 1 degree for a demo frame blurred by a single pixel. `--dataset.image_transforms.enable=false`
+# after the command turns it off.
+TRAIN_FLAGS = ["--dataset.image_transforms.enable=true"]
+
 POLICY_FLAGS = {
     "act": [],
     "pi05": [
@@ -473,11 +481,6 @@ POLICY_FLAGS = {
         # model is masked from reading, so it changes nothing the model learns: on 8 demo frames the
         # loss differed by 1e-7 and the actions by 0.0001 degrees with and without it. It does cost a
         # third of the vision model's work and 256 of the 968 tokens: 2.33 s a step against 1.7 s.
-        # LeRobot's random brightness, contrast, colour, sharpness, shifts and rotations of up to 5
-        # degrees, at most 3 per frame. openpi always trains with augmentation of this kind. The first
-        # model saw only the demos' light: under light that blew out 41% of the top camera's pixels it
-        # held the block in 4 of 8 attempts, against 9 of 10 under the demos' light.
-        "--dataset.image_transforms.enable=true",
         # Publish a running average of the weights, with openpi's default decay.
         "--ema.type=constant",
         "--ema.decay=0.99",
@@ -512,12 +515,13 @@ def parse_base(text: str) -> tuple[str, str | None]:
 
 
 def policy_flags(policy: str, base: tuple[str, str | None] | None) -> list[str]:
-    """POLICY_FLAGS for `policy`, starting from `base` instead of its default base model when given."""
+    """POLICY_FLAGS for `policy`, starting from `base` instead of its default base model when given, then
+    TRAIN_FLAGS, which every policy trains with."""
     if base is None:
-        return list(POLICY_FLAGS[policy])
+        return [*POLICY_FLAGS[policy], *TRAIN_FLAGS]
     repo, revision = base
     rest = [f for f in POLICY_FLAGS[policy] if not f.startswith("--policy.pretrained_path=")]
-    return [f"--policy.pretrained_path={repo}", *([f"--policy.pretrained_revision={revision}"] if revision else []), *rest]
+    return [f"--policy.pretrained_path={repo}", *([f"--policy.pretrained_revision={revision}"] if revision else []), *rest, *TRAIN_FLAGS]
 
 
 def check_base(repo: str, revision: str | None, policy: str) -> None:
