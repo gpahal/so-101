@@ -270,6 +270,7 @@ class Settings:
     train: dict[str, Train]
     remote: dict[str, Remote]
     control: Control
+    sim: dict
     data_dir: Path
     path: Path
 
@@ -375,6 +376,7 @@ def _parse(path: Path) -> Settings:
         train={policy: recipe(policy, section) for policy, section in train.items()},
         remote={policy: _remote(policy, section, path) for policy, section in data.get("remote", {}).items()},
         control=_control(data.get("control", {})),
+        sim=data.get("sim", {}),
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,
     )

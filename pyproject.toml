@@ -14,6 +14,10 @@ dependencies = [
     "pyobjc-framework-avfoundation>=13.0 ; sys_platform == 'darwin'",
 ]
 
+[project.optional-dependencies]
+# The simulator: `uv sync --extra sim`. Pinned because LeRobot's SO-101 env is built on this version.
+sim = ["mujoco==3.3.7", "scipy"]
+
 [project.scripts]
 so101 = "so_101.cli:main"
 so101-rollout = "so_101.rollout:main"

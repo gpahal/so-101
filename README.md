@@ -39,6 +39,7 @@ Run `uv run so101 check` first: it checks both arms, both cameras and the rest o
 | `uv run so101 check [task] [--live] [--json]` | Check arms, cameras and setup. Moves nothing unless `--live`, and sets only the cameras' UVC controls. `--json` prints the results as JSON, and can't be combined with `--live`. See [Checking the setup](#checking-the-setup) |
 | `uv run so101 info` | Show config, resolved ports, camera indices and calibration status |
 | `uv run so101 find-port follower` | Detect a board by unplugging it, and save its port and serial number to `so101.toml` |
+| `uv run so101 sim build\|replay\|score\|eval\|check\|nudge\|physics` | Build a simulated twin of the block-container setup from its demos, check it, and try a policy in it. See [Try a policy in simulation](#try-a-policy-in-simulation) |
 | `uv run so101 pose [task]` | Compare the follower's current pose with the demos' start pose (read-only) |
 | `uv run so101 pose --save-rest` | Save the follower's current pose as its rest pose in `so101.toml`. Reads the motors only. See [Saving a rest pose](#saving-a-rest-pose) |
 | `uv run so101 motors [follower\|leader] [--watch S]` | Show each motor's temperature, voltage, load, position within its calibrated range, and alarms. Read-only; `--watch 2` refreshes every 2 seconds |
@@ -221,6 +222,74 @@ One-time setup: create a write token at https://huggingface.co/settings/tokens, 
    - Retraining replaces the model in the same repo. A tag keeps a trained model you can still run later: `uv run hf repos tag create <you>/<policy>_so101_<task> <tag>` before you retrain, then `--revision <tag>` runs that model, and leaving it out runs the newest. `run`, `serve` and `server start` all take `--revision`.
 
 If it fails at some block positions, record 10 to 20 more demos there (`--episodes 20`), review them, and train again. Tag the current model first; `--base <you>/<policy>_so101_<task>@<tag>` then starts the new run from it instead of from scratch.
+
+### Try a policy in simulation
+
+`so101 sim` builds a MuJoCo twin of the `block-container` setup from its demos: the arm, the red block, the jar, the mat, and both cameras. It only ever learns from real recordings, never from a policy, so a result means the same for every model.
+
+```bash
+uv sync --extra sim
+uv run so101 sim build                       # after new demos or changing [sim] in so101.toml
+uv run so101 sim replay                      # can the sim redo the real demos?
+uv run so101 sim replay --recording outputs/rollouts/<run>/dataset   # and a real run a policy drove?
+uv run so101 sim score                       # how real is it? No model involved
+uv run so101 sim eval --episodes 25          # run the task's ACT policy in it
+uv run so101 sim check                       # how differently does the model act on sim images? Read-only
+uv run so101 sim aim                         # guide the top camera and the mat back to the demos' view
+```
+
+What `build` works out, and from what:
+
+| | From |
+| --- | --- |
+| Top camera's pose and lens, and each joint's offset from the arm model | The arm's outline and the block in top camera frames, against the joint angles. The fit also makes every demo's grasp land on the mat, since outlines alone can't tell a low arm from a far camera |
+| Top camera's picture | The real empty scene: each pixel's median over frames where no arm, block or jar covers it. The arm and block are drawn on it, so most of its pixels are real |
+| Jar | Its size from `[sim]` in `so101.toml`, where it was measured, or else from the first top camera frames; each demo's position from its first top camera frame. The top camera shows a real photo of it, moved to where the simulated jar stands; it's only drawn as a shape once knocked over |
+| Block's start in each demo | Its outline in the first top camera frame, turned square to how the jaws later closed on it |
+| Wrist camera's pose and lens | The real jaws and block in wrist frames before each grasp |
+| Mat, table and wall for the wrist camera | The top camera's picture laid flat, the mat's edges in it, and colours matched to wrist frames |
+| Each joint's motor | The real commands replayed: stiffness, speed, gear friction and inertia that track the real joint best |
+| Gripper's zero | The reading while holding the block, which is as wide as the block |
+| How old each camera's picture is, and how many it gives a second | The block's place in the picture against the joints while the arm moves fast, and the frames that repeat the one before |
+| Where each demo's block starts | Where the top camera saw it or where the wrist camera did, a few millimetres apart, and each of those moved to the nearest spot the demo's real jaws didn't pass through on their way down: whichever of the four lets most of the replayed demos put the block in the jar |
+
+**Real pixels.** A rendered arm has none of the real one's cables, print lines and shading, and a policy trained on real frames reads those. So when the built demos are on the computer (`data/block-container/train/`), every `sim` command but `build` draws from their frames instead:
+
+- the arm in the top camera's picture, from the nearest demo frame, with each spot on each link carried across to the pose being drawn;
+- the wrist camera's whole view the same way, from the frame taken from the most similar place: the mat, wall, block, jar and jaws;
+- the block and jar in the top camera's picture, from the first frame of the demo whose layout the attempt starts from, until the block is touched.
+
+Without the demos it draws everything from the arm model and the fitted colours, which looks right but moves the policy about twice as far (see How close it is). `score` and `check` draw from the 72 demos the fits used and compare with the other 24.
+
+Everything goes in `sims/block-container/`, which is committed: fitting again gives a slightly different fit, so the repo keeps the one in use. A rebuild keeps the fits already there and takes about 2 minutes. The first build takes about 25: 3 for the cameras and 15 for the motors, which `--refit-cameras` and `--refit-motors` redo. The scene records the Hub revision of the demos it was built from, and commands download that revision when a computer has no demos. Commit `sims/block-container/` after each `build`.
+
+**Putting the top camera back.** The sim, and every policy trained on the demos, expect the top camera's view of the demos. It had moved 2 px and turned 0.2° by the runs of 13 November, and 4 to 13 px and up to 2.5° by those of 14 November, and the mat (a loose mouse pad) had slid a few pixels on its own. To put both back:
+
+```bash
+uv run so101 sim aim          # reads the top camera only; needs the built demos, not MuJoCo
+```
+
+It shows the live picture with the demos' view drawn over it in green, and says which way to turn, tilt and roll the camera, and then which way to slide the mat, until it reads "aligned": within 1 px and 0.15°, about as close as the demos were to each other. Take the block off the mat first; the arm may be at rest or at the start pose. It compares the live picture with the median of the demos' first frames in windows on things that never move (the socket and skirting, the floor tiles, the arm's base plate), finding big moves first from features and then each window's to a tenth of a pixel, and reads the mat's slide from its edges beyond that. A window something covers is left out and shown grey. `b` blends the two pictures, `s` saves the picture and the numbers under `outputs/sim/aim/`. It reads only the top camera: the wrist camera's view depends on the arm's pose.
+
+After moving a camera for good or recalibrating the follower, record new demos and add `--refit-cameras` to `build`. After changing the arm, add `--refit-motors`. If the demos aren't on the Hub yet, `build` warns that only this computer can rebuild the sim; a cloud `so101 train` uploads them.
+
+- `replay` gives the sim each demo's real commands, with the block and jar where that demo's stood, and counts the demos that lift the block and the ones that drop it in the jar. Nothing corrects the arm along the way as a policy would, so a few millimetres' error costs a grasp: expect most demos to succeed, not all. It saves the first one, real beside sim, in `outputs/sim/`. With `--recording`, it replays another recording instead, such as the `dataset` folder of a `so101 run` under `outputs/rollouts/`: commands that worked on the arm should work in the sim whoever gave them, and no fit ever saw these. It places each attempt's block from the top camera's frame 3 s in, so it needs the top camera where it was for the demos.
+- `score` compares the sim with real frames held back from the fits, the arm's and the block's shapes, and the replays, and saves real and sim side by side. Its "real, same pose" column is how much two real moments differ, for scale.
+- `eval` runs the task's ACT policy from the demos' start pose, with each attempt's block and jar where a randomly chosen demo's were, shifted by a few millimetres. An attempt succeeds once the block has lain in the standing jar for half a second, and gets `[run]` `duration_s` seconds. It takes `--revision`, `--checkpoint` and `--action-steps` as `so101 run` does, and saves a video of each attempt. π0.5 doesn't run on the Mac, so it can't be evaluated here.
+- `check` asks the model for actions from real frames and from sim frames of the same moments. Don't change the sim to improve `check` or `eval` on a model: that fits the sim to that model.
+
+To make it more accurate, at the arm:
+
+1. Measure what the demos can't show, and set it in `[sim]` in `so101.toml`: the block's and jar's weight, the jar's diameter and height (set on 2026-11-14: 63 mm across, 70 mm tall, taped to 52 mm), and how far the mat's top is above the surface the arm's base stands on, which is the mat's thickness while both are on the same table (set: 3 mm). Then run `sim build`, which refits what a changed value feeds: the top camera after `mat_height`, the wrist camera after the jar's size.
+2. Record pushes, so the sim knows how the block slides. These never go into training, and this command doesn't need MuJoCo or the demos:
+   ```bash
+   uv run so101 sim nudge --episodes 3
+   ```
+   Start each at the demos' start pose with the block on the mat, in the top camera's view and clear of the arm. Push it a few centimetres with the jaws, then return to the start pose and hold still until the end. Copy `data/<task>/nudges/` to the computer with the sim if it's a different one, then run `uv run so101 sim physics` followed by `uv run so101 sim replay`. `physics` uploads the recordings to the private Hub dataset `<you>/so101_<task>_nudges` and records which revision the friction came from, so it can be fitted again anywhere.
+
+**How close it is.** On the first 100 demos, replaying each demo's real commands lifts the block in 96 of 96 and puts it in the jar in 90, and replaying the commands of a real run that the ACT policy drove on the arm puts it there in 19 of the 24 attempts that held it. With real pixels the top camera's picture is 5.3 of 255 from the real frame per pixel, closer than two real frames of the same pose are to each other (7.2); the wrist camera's is 10 against 14. The ACT policy that placed 24 of 25 on the arm placed 19, 15, 17 and 18 of 25 in four runs in the sim with real pixels, which 25 attempts can't tell apart, 39 of 50 on the current build (41 on the one before, which assumed a grippier mat and a lighter block), and 17 of 25 with everything rendered. Run from the 25 starts of that real run, it puts 20 or 21 in the jar, ending as on the arm in 21 or 22. It fails there as it does on the arm, with a jaw on the block instead of beside it, but more often, and nearly always where the block lies at the edge of where the demos put it, furthest to the arm's right or left: the policy's jaw clears the block by a few millimetres. Its actions move 1.8° on the sim's pictures against 0.6° on real ones (3.1° rendered). The same policy retrained with image augmentation moves 1.6° against 0.7°, and placed 43 of the same 50. So a sim result for that policy is still a lower bound, not a prediction. The measurements, what limits them and what to measure at the arm to improve them are in [`docs/sim.md`](docs/sim.md).
+
+What the sim doesn't have: shadows the arm casts on the wall and table, motion blur, and, without the demos on the computer, the arm's cables and print texture. The block's and jar's weights and frictions are typical values until measured. Sim results only predict real ones once they've been compared: run the same few models for real and in the sim, and see whether they rank the same.
 
 ### Run on a cloud GPU
 
