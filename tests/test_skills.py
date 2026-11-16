@@ -210,9 +210,40 @@ class StalenessTest(unittest.TestCase):
 class RunLabelTest(unittest.TestCase):
     """Each frame of a run's attempt labelled by what happened (`skills.label_run`), as a demo is cut."""
 
-    def label(self, state, skills_=SKILLS, scripted=None, told=None) -> np.ndarray:
+    def label(self, state, skills_=SKILLS, scripted=None, told=None, teleop=None) -> np.ndarray:
         scripted = np.zeros(len(state), dtype=bool) if scripted is None else scripted
-        return skills.label_run(skills_, state, NAMES, FPS, GRASP, scripted, told)
+        return skills.label_run(skills_, state, NAMES, FPS, GRASP, scripted, told, teleop=teleop)
+
+    def test_a_regrip_in_teleop_during_the_carry_stays_in_place(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        # The model carries the block; a person takes Teleop, opens the jaws and closes them on it again,
+        # and hands back; the model carries it on and lets go over the jar.
+        split, n = at["carry"] + 15, 30
+        self.assertLess(state[split, 5], GRASP.gripper.closed_below, "the block is held when the person takes over")
+        regrip = np.repeat(state[split][None], n, axis=0)
+        regrip[:, 5] = np.concatenate([np.linspace(state[split, 5], 40, n // 2), np.linspace(40, state[split, 5], n // 2)])
+        joined = np.concatenate([state[:split], regrip, state[split:]])
+        teleop = np.zeros(len(joined), dtype=bool)
+        teleop[split: split + n] = True
+        labels = self.label(joined, THREE, teleop=teleop)
+        release = at["release"] + n
+        np.testing.assert_array_equal(labels[: at["carry"]], 0)
+        np.testing.assert_array_equal(labels[at["carry"]: release], 1, "the re-open isn't a release: still place")
+        np.testing.assert_array_equal(labels[release:], 2, "the model's own release switches to the return")
+
+    def test_a_grasp_in_teleop_during_pick_is_place_from_its_carry(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        # The model reaches; a person takes Teleop before the close, grasps and carries, and hands back
+        # with the block held; the model lets go over the jar.
+        takeover, back = at["close"] - 10, at["carry"] + 20
+        teleop = np.zeros(len(state), dtype=bool)
+        teleop[takeover:back] = True
+        labels = self.label(state, THREE, teleop=teleop)
+        np.testing.assert_array_equal(labels[: at["carry"]], 0)
+        np.testing.assert_array_equal(labels[at["carry"]: at["release"]], 1, "a person's grasp counts")
+        np.testing.assert_array_equal(labels[at["release"]:], 2)
 
     def test_a_person_alone_is_labelled_by_the_events_of_what_they_did(self) -> None:
         state = trace()
@@ -269,6 +300,80 @@ class RunLabelTest(unittest.TestCase):
         self.assertLessEqual(abs(second - (restart + at["carry"] - (at["close"] - 20))), 1,
                              "the second carry switches to place again")
         self.assertEqual(labels[-1], 2)
+
+    def dropped_and_rewound(self) -> tuple[np.ndarray, np.ndarray, int]:
+        """The model lets go outside the jar, a Rewind plays the arm back to before the close with the jaws
+        open, and the model reaches, grasps and lets go again: the trace, its scripted frames, and the
+        first frame after the Rewind."""
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        dropped = state[: at["release"] + 10]
+        back = state[at["close"] - 20: at["release"] + 10][::-1]
+        again = state[at["close"] - 20:]
+        joined = np.concatenate([dropped, back, again])
+        scripted = np.zeros(len(joined), dtype=bool)
+        scripted[len(dropped): len(dropped) + len(back)] = True
+        return joined, scripted, len(dropped) + len(back)
+
+    def test_a_rewind_that_undoes_the_release_starts_again_on_pick(self) -> None:
+        joined, scripted, restart = self.dropped_and_rewound()
+        labels = self.label(joined, THREE, scripted=scripted)
+        self.assertEqual(labels[restart - 1], 2, "the return, until the model drives again")
+        self.assertEqual(labels[restart], 0, "the jaws read open after the rewind, and nothing is held: back on pick")
+        second = restart + int(np.flatnonzero(labels[restart:] == 1)[0])
+        np.testing.assert_array_equal(labels[restart: second], 0)
+        self.assertEqual(labels[-1], 2, "the second release switches to the return again")
+
+    def runtime(self, state: np.ndarray, scripted: np.ndarray, skills_=THREE) -> np.ndarray:
+        """Each frame's skill as serve records it (control.skill), with the stack paused through the
+        scripted frames and handed back with `moved` after them."""
+        h = Stack(skills_)
+        skill, paused = [], False
+        for row, moved in zip(state, scripted, strict=True):
+            if moved:
+                if not paused:
+                    h.top.pause()
+                    paused = True
+                skill.append(skill[-1])
+                continue
+            if paused:
+                h.top.run(Handback(PERSON, moved=True))
+                paused = False
+            h.feed(row[None])
+            skill.append(h.outputs[-1].skill)
+        return np.array(skill, dtype=np.int8)
+
+    def test_labels_switch_where_the_runtime_does(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+
+        def rewound(stop: int, back_to: int) -> tuple[np.ndarray, np.ndarray]:
+            """The trace to `stop`, a Rewind back to `back_to`, and the trace again from there."""
+            back = state[back_to:stop][::-1]
+            joined = np.concatenate([state[:stop], back, state[back_to:]])
+            scripted = np.zeros(len(joined), dtype=bool)
+            scripted[stop: stop + len(back)] = True
+            return joined, scripted
+
+        cases = {
+            "the drop and the rewind to before the close": self.dropped_and_rewound()[:2],
+            "a rewind that keeps the block held": rewound(at["carry"] + 15, at["carry"]),
+            "a rewind in pick from after the close to before it": rewound(at["close"] + 20, at["close"] - 20),
+            # The replay's hold timer mustn't run on across the frames the Rewind skipped.
+            "a rewind in pick that keeps the jaws closed": rewound(at["close"] + 40, at["close"] + 5),
+        }
+
+        def switches(skill: np.ndarray) -> list[tuple[int, int]]:
+            return [(i, int(skill[i])) for i in range(len(skill)) if i == 0 or skill[i] != skill[i - 1]]
+
+        for case, (joined, scripted) in cases.items():
+            with self.subTest(case):
+                labelled, ran = switches(self.label(joined, THREE, scripted=scripted)), switches(self.runtime(joined, scripted))
+                self.assertEqual([s for _, s in labelled], [s for _, s in ran], "the same skills in the same order")
+                # The perception sums its clock tick by tick, so float rounding can move a switch on a
+                # threshold of time, such as the carry's hold, by one frame.
+                for (a, _), (b, _) in zip(labelled, ran, strict=True):
+                    self.assertLessEqual(abs(a - b), 1, f"a switch at frame {a}, at runtime at {b}")
 
 
 def grey(self, *args, **kwargs) -> np.ndarray:
@@ -372,6 +477,31 @@ class BuildTest(unittest.TestCase):
         policy = {"skills": [skill.record() for skill in SKILLS]} if with_skills else {}
         (run_dir / "run.json").write_text(json.dumps({"policy": policy}))
         return run_dir
+
+    def test_a_runs_teleop_frames_reach_the_replay_as_a_persons(self) -> None:
+        from test_controller import Rig
+
+        from so_101 import build as builder
+        from so_101.control import analysis
+        from so_101.control.recorder import Phase
+
+        name = "20260101-130000"
+        run_dir = data.task_dir(self.s, TASK) / "runs" / name
+        rig = Rig(run_dir, wrap=lambda driver, recorder, clock: stack.build(
+            driver, LayerContext(recorder.event, clock, GRASP, PROGRAM)))
+        rig.start_policy(ticks=FPS)
+        rig.teleop(1.0)
+        rig.reset("succeeded")
+        rig.close()
+        (run_dir / "run.json").write_text(json.dumps({"policy": {}}))
+        run = next(r for r in data.runs(self.s, TASK) if r.name == name)
+        attempt = analysis.analyse(run, self.s.control.blame_s).attempts[0]
+        with mock.patch.object(skills, "label_run", wraps=skills.label_run) as label:
+            per_frame, why = builder.run_skills(run, attempt, TASK, GRASP)
+        self.assertEqual(why, "")
+        teleop = label.call_args.kwargs["teleop"]
+        np.testing.assert_array_equal(teleop, attempt.phases == Phase.TELEOP)
+        self.assertGreaterEqual(teleop.sum(), FPS - 1, "the second of Teleop")
 
     def test_run_cuts_are_split_where_the_skill_changes(self) -> None:
         for name, with_skills in (("20260101-110000", False), ("20260101-120000", True)):
@@ -499,7 +629,7 @@ class SequencerTest(unittest.TestCase):
         h.feed(state[at["carry"] + 10: at["carry"] + 15])  # still holding at 18.4
         self.assertEqual(h.switches(), [("pick", "start"), ("place", "carry")])
 
-    def test_the_release_switches_to_the_return_and_a_handback_with_the_jaws_open_keeps_it(self) -> None:
+    def test_the_release_switches_to_the_return_and_a_handback_after_a_move_with_the_jaws_open_goes_back_to_pick(self) -> None:
         h = Stack(THREE)
         state = trace()
         at = skills.events(state, NAMES, FPS, GRASP)
@@ -508,10 +638,44 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual(h.leaf.conditions[-1].prompt, "Return to the rest pose")
         self.assertEqual(h.leaf.conditions[-1].values(), {"skill.pick": 0.0, "skill.place": 0.0, "skill.return": 1.0})
         h.top.pause()
-        h.top.run(Handback(PERSON, moved=True))  # the jaws are open after a release: nothing was undone
-        h.feed(state[at["release"] + 5:])
+        h.top.run(Handback(PERSON))  # a pause that moved nothing: the release stands
+        h.feed(state[at["release"] + 5: at["release"] + 10])
         self.assertEqual(h.switches()[-1], ("return", "release"))
         self.assertEqual(h.outputs[-1].skill, 2)
+        h.top.pause()
+        # A person moved the arm with the jaws open: the perception can't tell a release from a block put
+        # back on the mat, so the attempt starts again on pick, as the user decided.
+        h.top.run(Handback(PERSON, moved=True))
+        h.feed(state[at["release"] + 10:])
+        self.assertEqual(h.switches()[-1], ("pick", "reopened"))
+        self.assertEqual(h.leaf.conditions[-1].prompt, SKILLS[0].prompt)
+        self.assertEqual(h.outputs[-1].skill, 0)
+
+    def test_a_drop_outside_the_jar_rewound_to_before_the_close_goes_back_to_pick(self) -> None:
+        h = Stack(THREE)
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        h.feed(state[: at["release"] + 10])  # let go outside the jar: on the return
+        self.assertEqual(h.outputs[-1].skill, 2)
+        h.top.pause()  # a Rewind plays the arm back to before the close, the jaws open
+        h.top.run(Handback(PERSON, moved=True))
+        h.feed(state[at["close"] - 20: at["close"] - 18])
+        self.assertEqual(h.switches()[-1], ("pick", "reopened"))
+        self.assertEqual(h.leaf.conditions[-1].prompt, SKILLS[0].prompt)
+        self.assertEqual(h.leaf.conditions[-1].values(), {"skill.pick": 1.0, "skill.place": 0.0, "skill.return": 0.0})
+        self.assertEqual([o.skill for o in h.outputs[-2:]], [0, 0], "from the first tick the model drives again")
+        h.feed(state[at["close"] - 18:])  # the model grasps again and lets go
+        self.assertEqual([s for s, _ in h.switches()], ["pick", "place", "return", "pick", "place", "return"])
+
+    def test_a_handback_with_the_jaws_closed_after_the_release_keeps_the_return(self) -> None:
+        h = Stack(THREE)
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        h.feed(state[: at["release"] + 10])
+        h.top.pause()
+        h.top.run(Handback(PERSON, moved=True))  # a person closed the empty jaws: the release stands
+        h.feed(state[-5:])
+        self.assertEqual(h.switches()[-1], ("return", "release"))
 
     def test_an_error_conditioning_the_model_is_the_models_and_reaches_the_loop(self) -> None:
         h = Stack()
@@ -665,16 +829,22 @@ class ModelTest(unittest.TestCase):
         self.s = settings.load()
 
     def check(self, build: dict | None = None, task: Task = TASK, one_hot: int | None = 2, with_skills: bool = True,
-              policy: str = "act") -> None:
+              policy: str = "act", pinned: bool = True, rebuilt: bool = False) -> None:
+        """Check a local checkpoint trained on `build`, whose train_config.json records that build as
+        `train --target local` does (`pinned`), and whose dataset was then built again (`rebuilt`)."""
         from so_101.commands.policy import check_skills_model
 
         root = self.folder / "dataset"
         root.mkdir(exist_ok=True)
-        (root / "build.json").write_text(json.dumps(self.build if build is None else build))
+        (root / "build.json").write_text(json.dumps({"built": "first", **(self.build if build is None else build)}))
         model = self.folder / "model"
         model.mkdir(exist_ok=True)
-        (model / "train_config.json").write_text(json.dumps({"dataset": {"repo_id": "local/so101_test_skills",
-                                                                         "root": str(root)}}))
+        dataset = {"repo_id": "local/so101_test_skills", "root": str(root), "revision": None}
+        if pinned:
+            dataset["revision"] = data.build_revision(root / "build.json")
+        (model / "train_config.json").write_text(json.dumps({"dataset": dataset}))
+        if rebuilt:  # the same skills and thresholds, built again after training
+            (root / "build.json").write_text(json.dumps({"built": "second", **(self.build if build is None else build)}))
         inputs = {} if one_hot is None else {skills.STATE_KEY: {"type": "ENV", "shape": [one_hot]}}
         ns = types.SimpleNamespace(policy=policy, revision=None)
         check_skills_model(self.s, ns, task, {"input_features": inputs}, model, with_skills)
@@ -711,10 +881,20 @@ class ModelTest(unittest.TestCase):
         self.refused("can't be told which skill it's on", one_hot=None)
         self.check(one_hot=None, with_skills=False)  # a whole-demo model, run as one
 
-    def test_a_hub_model_is_checked_against_the_build_uploaded_with_its_dataset(self) -> None:
+    def test_a_local_checkpoint_is_checked_against_the_build_it_was_trained_on(self) -> None:
+        self.check()
+        # Rebuilt since, even with the same skills: the build.json there no longer says what it was trained on.
+        self.refused("was rebuilt after this model was trained", rebuilt=True)
+        # Trained before `train` recorded its build: its train_config.json has no dataset.revision.
+        self.refused("recorded no build", pinned=False)
+
+    def hub_model(self, revision: str | None) -> mock.MagicMock:
+        """Check a Hub model whose train_config.json records the dataset `revision`, as LeRobot writes it;
+        returns the Hub download mock."""
         from so_101.commands.policy import skills_build
 
-        (self.folder / "train_config.json").write_text(json.dumps({"dataset": {"repo_id": "me/so101_test_skills"}}))
+        (self.folder / "train_config.json").write_text(json.dumps({"dataset": {
+            "repo_id": "me/so101_test_skills", "root": None, "revision": revision, "episodes": None}}))
         (self.folder / "build.json").write_text(json.dumps(self.build))
 
         def download(repo, name, **kwargs):
@@ -722,9 +902,24 @@ class ModelTest(unittest.TestCase):
 
         with mock.patch("huggingface_hub.hf_hub_download", side_effect=download) as hub:
             self.assertEqual(skills_build(None, "me/act_so101_test_skills", "v1"), self.build)
+        return hub
+
+    def test_a_hub_model_is_checked_against_the_build_uploaded_at_the_commit_it_trained_from(self) -> None:
+        commit = "0123456789abcdef0123456789abcdef01234567"
+        hub = self.hub_model(commit)
         self.assertEqual(hub.call_args_list, [
             mock.call("me/act_so101_test_skills", "train_config.json", revision="v1"),
-            mock.call("me/so101_test_skills", "build.json", repo_type="dataset", revision=None)])
+            mock.call("me/so101_test_skills", "build.json", repo_type="dataset", revision=commit)])
+
+    def test_a_hub_model_trained_before_train_pinned_its_dataset_is_refused(self) -> None:
+        # As train_config.json reads for a model trained before this: LeRobot read the dataset's moving
+        # format tag, so the dataset's build.json may since describe another build.
+        for revision in (None, "v3.0", "main"):
+            with self.subTest(revision=revision):
+                with self.assertRaises(SystemExit) as stop:
+                    self.hub_model(revision)
+                self.assertIn("recorded no build", str(stop.exception.code))
+                self.assertIn("Train it again with `so101 train --skills`", str(stop.exception.code))
 
 
 class CommandTest(unittest.TestCase):

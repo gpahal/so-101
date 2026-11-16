@@ -61,8 +61,9 @@ Why these spans, from the 144 demos:
   + 0.2 s every demo's jaws are at least 12.6 above the hold.
 - **return runs from the release to the demo's end**, so the model drives the arm home as the demos do,
   rather than leave it to Reset. It starts at its handover, the release, which place runs on past by 0.70 s
-  (median; 0.57 to 0.83 s for 90% of the demos), so the switch is inside both. The jaws read open
-  throughout, so a handback after it never sends the run back to pick.
+  (median; 0.57 to 0.83 s for 90% of the demos), so the switch is inside both. A handback after it
+  that moved the arm with the jaws open sends the run back to pick (step 6 of
+  [Running a skills model](#running-a-skills-model)).
 
 Measured with `so101 skills` on the 144 demos, all of which cut:
 
@@ -101,16 +102,21 @@ uv run so101 serve --skills --policy pi05 --remote
 
 - **`build --skills --with ...`** adds runs, each cut split where the skill changes, labelled by what
   happened (`skills.label_run`, called from `build.run_skills`):
-  1. The attempt's joint readings go through the detector frame by frame, as a demo's do, whoever drove.
-     The attempt starts on the first skill and moves to the next at its handover event.
+  1. The attempt's joint readings go through one detector frame by frame, as the perception's do at
+     runtime. The attempt starts on the first skill and moves to the next at its handover event.
   2. Frames a script moved aren't replayed: the move to the start pose, a Rewind, the return to rest
-     (`control.phase`) and a layer's playback (`control.driver`). If the jaws read open after one while
-     the skill expects the block held (one handed over on a carry), the replay starts again on the first
-     skill with a new detector, as the sequencer does at runtime.
-  3. A frame a skills model drove (an Autonomous frame with a `control.skill`) keeps the skill it was told;
+     (`control.phase`) and a layer's playback (`control.driver`). Frames a person drove in Teleop are
+     replayed only while nothing is carried: a person's close and carry count, but a person opening the
+     jaws on a carried block is never a release, since the perception never sees Teleop at runtime. A
+     person who opens the jaws on the block during the carry and closes them again is still in place.
+  3. After either, the next frame replayed tells the detector the arm moved (`Detector.resumed`), as the
+     perception does after a handback, so its timers start again. If it then shows neither a carry nor a
+     release, the replay starts again on the first skill, as the sequencer does at runtime. The tests check
+     that the labels switch within a frame of where the sequencer does, across Rewinds.
+  4. A frame a skills model drove (an Autonomous frame with a `control.skill`) keeps the skill it was told;
      every other frame takes the replay's. So a correction that starts in pick and carries the block is
      place from the carry, whatever the model was told, and a person's attempt alone is cut like a demo.
-  4. Each skill's `to` bound applies, from the events of the replay its frame is in: a frame past it is in
+  5. Each skill's `to` bound applies, from the events of the replay its frame is in: a frame past it is in
      no skill and is left out, as the return was before it was a skill. A bound whose event didn't happen
      (pick's carry, in an attempt that never held the block) doesn't apply.
 
@@ -204,9 +210,18 @@ commands; it conditions the model through the stack, and only the model acts on 
 5. Deciding to switch is the sequencer's own logic, and a failure there turns it into a pass-through
    (`Layer.safely`); telling the model below about the switch runs outside that, so an error from the
    model reaches the control loop as the model's.
-6. With the supervisor on, a missed grasp still plays back and retries inside pick. Later, a block dropped
-   during place could switch back to pick from where the arm is; that needs pick demos that start from
-   such states, which the demos don't have.
+6. After a handback that moved the arm (a Teleop, a Rewind, a layer's playback), the sequencer follows the
+   perception: on the first tick the model drives, the detector is told the arm moved
+   (`Detector.resumed`), and if it then shows neither a carry nor a release, the attempt starts again on
+   the first skill, whatever skill it was on. So a missed grasp the supervisor plays back retries inside
+   pick, and a block let go outside the jar and rewound to before the close is picked again rather than
+   left to return. With the jaws closed after the move nothing changes: a block still held keeps place,
+   and jaws a person closed on the block count as a close. A person who teleoperates after a real release
+   and resumes with the jaws open also sends it back to pick, because the detector can't tell that from a
+   block put back; that was chosen over leaving a dropped block on return. The model drives that first
+   tick on the skill it had, and the switch conditions it from the next tick on.
+7. Later, a block dropped during place could switch back to pick from where the arm is, without a Rewind;
+   that needs pick demos that start from such states, which the demos don't have.
 
 ## When a build is current
 
@@ -233,10 +248,23 @@ A rebuild renames the old dataset aside, renames the new one in, and only then d
 
 - a model that reads the one-hot without `--skills`, and an ACT model without it with `--skills`;
 - a one-hot of another size than `[<task>.skills]`;
-- a model whose dataset's `build.json` lists other skills (names, prompts or order) or was cut with other
-  `[gripper]` thresholds, or recorded none. The build is found from the model's `train_config.json`: its
-  `dataset.root` for a local checkpoint, or else the Hub dataset its `dataset.repo_id` names, where `train`
-  uploads `build.json` with the dataset.
+- a model whose build's `build.json` lists other skills (names, prompts or order) or was cut with other
+  `[gripper]` thresholds, or recorded none.
+
+The build is the one the model was trained on, which `train --skills` records as `dataset.revision` in
+the model's `train_config.json` (`commands.policy.skills_build`):
+
+- On Hugging Face Jobs, `train` uploads the dataset with its `build.json`, and the job trains from that
+  upload's commit, not the moving format tag, so the record names the very data it trained on. The
+  check reads `build.json` at that commit of the Hub dataset `dataset.repo_id` names. A later
+  `train --skills` uploads over `main` and leaves that commit as it was.
+- With `--target local`, the record is `so101-build-` and the sha256 of the `build.json` it trained on
+  (`data.build_revision`). Every build writes that file anew, with the time it was built, so the sha256
+  names one build. LeRobot reads a local dataset from `dataset.root` and never uses the revision. The
+  check reads the `build.json` in `dataset.root` and refuses the model if the dataset there was rebuilt
+  since, even with the same skills, since the folder holds only the newest build.
+- A model trained before `train` recorded either has `dataset.revision` null and is refused, saying so:
+  train it again.
 
 The prompts and the thresholds are what the model is told and when it switches at runtime, so a model
 trained on other ones would be told the wrong skill at the wrong time. `train --skills --base` refuses a

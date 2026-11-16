@@ -269,11 +269,13 @@ def run_skills(run: data.Run, attempt: analysis.Attempt, task: Task, grasp) -> t
     thresholds `grasp`.
 
     Frames a script moved (the move to the start pose, a Rewind, the return to rest, a layer's playback)
-    aren't replayed. In a skills run, Autonomous frames take the skill the model was told (control.skill,
+    aren't replayed, and Teleop frames are replayed only while nothing is carried, as the runtime sees
+    neither. In a skills run, Autonomous frames take the skill the model was told (control.skill,
     indexed in its own run.json's policy.skills and mapped onto the task's by name; of those, the ones the
     model didn't drive, waiting or a layer's hold, are in no cut anyway, `control.analysis`); every other frame,
     such as a correction in Teleop, takes the skill the replay finds, so a person who grasps during pick
-    is in place from the carry on, whatever the model was told."""
+    is in place from the carry on, whatever the model was told, and a person who opens the jaws on a
+    carried block and closes them again is still in place."""
     from so_101 import skills
     from so_101.policy.base import PLAYBACK
 
@@ -296,7 +298,8 @@ def run_skills(run: data.Run, attempt: analysis.Attempt, task: Task, grasp) -> t
             return None, f"its skills ({', '.join(r.get('name', '?') for r in recorded)}) aren't all the task's"
         told = np.array([index.get(int(k), -1) if p == Phase.AUTONOMOUS else -1
                          for k, p in zip(attempt.skills, phases, strict=True)], dtype=np.int8)
-    return skills.label_run(task.skills, state, names, run.meta.fps, grasp, scripted, told), ""
+    return skills.label_run(task.skills, state, names, run.meta.fps, grasp, scripted, told,
+                            teleop=phases == Phase.TELEOP), ""
 
 
 def split_by_skill(per_frame: np.ndarray, start: int, stop: int) -> list[tuple[int, int, int]]:

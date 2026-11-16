@@ -82,8 +82,10 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
   handover signal it conditions the model on that skill and logs a `skill` event. Deciding to switch runs
   under `safely`; telling the model (`inner.condition`) runs outside it, right after in the same call, so
   an error from the model reaches the loop as the model's, not as a broken sequencer. On a handback with
-  `moved`, it checks the gripper on its next tick: reading open, it goes back to the first skill, since
-  whatever was held was let go or undone. This covers a playback that undid a grasp and your own Rewind.
+  `moved`, it reads the perception's readings on the first tick the perception feeds, after its
+  `Detector.resumed`: if neither a carry nor a release still stands, it goes back to the first skill,
+  whatever skill it was on, since whatever was held or let go was undone. This covers a playback that
+  undid a grasp, your own Rewind, and a block let go outside the jar and rewound to before the close.
 - **`Supervisor`** (`supervisor/layer.py`): as before, but reads the perception's signals and readings
   instead of keeping its own detector, hands the arm back with `Handback(LAYER, moved=True)` after a
   playback and `moved=False` after a hold, and returns its requests for a person in `Output.asks`.
@@ -111,9 +113,11 @@ Every `serve` and `run` recording gets two columns:
 
 `build --skills --with corrections,policy-successes,...` cuts runs as `build --with` does, then splits each
 cut where the skill changes, by what happened (`build.run_skills`, `skills.label_run`): the attempt's joint
-readings go through the detector as a demo's do, frames a script or a layer's playback moved aren't
-replayed, each skill's `to` bound applies, and only the frames a skills model drove keep the skill it was
-told (`control.skill`). So a person's correction is cut by what the arm did, whatever the model was told.
+readings go through one detector as the perception's do, frames a script or a layer's playback moved aren't
+replayed, Teleop frames only while nothing is carried, the sequencer's handback rule applies after each,
+each skill's `to` bound applies, and only the frames a skills model drove keep the skill it was told
+(`control.skill`). So a person's correction is cut by what the arm did, whatever the model was told, and a
+person's re-grip during the carry is never a release.
 [`skills.md`](skills.md) has the steps.
 
 Each piece is an episode with its skill's prompt and one-hot. A piece under 0.5 s is left out.

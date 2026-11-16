@@ -39,7 +39,7 @@ EVENTS = ("start", "close", "lift", "carry", "release", "widest", "end")
 HANDOVERS = ("carry", "release")  # what the detector sees as the policy drives and can switch skills on
 # Raise with any change to LIFT_DEG, WIDEST_WITHIN_S, MIN_SPAN_S or how `events` and `spans` cut a demo, or
 # `label_run` a run: a skills build records it (`data.build_inputs`), so one made under other rules is stale.
-CUT_RULES_VERSION = 2
+CUT_RULES_VERSION = 3
 LIFT_DEG = 4.0  # shoulder_lift travel after the close that counts as the block leaving the mat
 WIDEST_WITHIN_S = 2.0  # the widest opening is looked for this long after the release
 MIN_SPAN_S = 0.5  # a skill's shortest span in any demo
@@ -222,17 +222,20 @@ def spans(skills: tuple[Skill, ...], at: dict[str, int], fps: float, length: int
 
 
 def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fps: float, thresholds,
-              scripted: np.ndarray, told: np.ndarray | None = None) -> np.ndarray:
+              scripted: np.ndarray, told: np.ndarray | None = None, teleop: np.ndarray | None = None) -> np.ndarray:
     """Each frame's skill, as an index in `skills`, for one attempt of a run, or -1 for a frame in none:
-    what happened, found as in a demo.
+    what happened, found as the runtime finds it (`policy.skills.SkillSequencer` over the perception).
 
-    The attempt's joint readings (`state`, frames x joints named `names`) go through the detector frame
-    by frame, as `events` replays a demo, whoever drove: the policy, a person in Teleop, or both. Each
-    attempt starts on the first skill and moves to the next at its handover event. A frame a script
-    moved (`scripted`: the move to the start pose, a Rewind, a layer's playback, the return to rest) isn't
-    fed to the detector. When the frames after one show the jaws open while the skill expects the block
-    held (its handover is a carry), what was held was let go or undone: the replay starts again on the
-    first skill, with a new detector, as `policy.skills.SkillSequencer` does at runtime.
+    The attempt's joint readings (`state`, frames x joints named `names`) go through one detector frame
+    by frame, as the perception's does at runtime. Each attempt starts on the first skill and moves to the
+    next at its handover event. A frame a script moved (`scripted`: the move to the start pose, a Rewind,
+    a layer's playback, the return to rest) isn't fed to the detector, and a frame a person drove in
+    Teleop (`teleop`) is fed only while nothing is carried: a person's close and carry count, so a
+    correction that starts in pick is place from its carry, but a person opening the jaws on a carried
+    block is never a release, because the perception never sees Teleop at runtime. After either, the next
+    frame fed tells the detector the arm moved (`Detector.resumed`), as the perception does after a
+    handback; if it then shows neither a carry nor a release, what was held or let go was undone, and the
+    replay starts again on the first skill, as the sequencer does.
 
     `told` is, per frame, the skill a skills model was told to do (control.skill, mapped onto `skills`),
     -1 where it wasn't driving: it labels those frames, and the replay labels the rest. Last, each skill's
@@ -241,30 +244,32 @@ def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fp
     bound whose event didn't happen doesn't apply."""
     from so_101.grasp.detector import Detector
 
-    gripper, closed_below = names.index(GRIPPER), thresholds.gripper.closed_below
     labels = np.zeros(len(state), dtype=np.int8)
     replays = []  # (first frame, one past the last, closes, first carry and release) of each replay
-    current, start, moved = 0, 0, False
-    detector, closes, found = Detector(thresholds), [], {}
+    current, start, closes, found = 0, 0, [], {}
+    detector = Detector(thresholds)
+    gap = handback = False  # frames since the last one fed weren't fed; a script or a person had the arm
     for i, row in enumerate(state):
-        if scripted[i]:
-            moved = True
+        person = teleop is not None and bool(teleop[i])
+        if scripted[i] or (person and detector.carried):
+            gap = handback = True
             labels[i] = current
             continue
-        if moved:
-            moved = False
-            if current and skills[current].handover == "carry" and row[gripper] >= closed_below:
-                replays.append((start, i, closes, found))
-                current, start = 0, i
-                detector, closes, found = Detector(thresholds), [], {}
         pose = dict(zip(names, map(float, row), strict=True))
-        for signal in detector.step((i - start) / fps, pose, True):
+        if gap or (handback and not person):
+            detector.resumed(True, pose)
+            gap, handback = False, person
+            if not (detector.carried or detector.released) and (current or found):
+                replays.append((start, i, closes, found))
+                current, start, closes, found = 0, i, [], {}
+        for signal in detector.step(i / fps, pose, True):
             if signal.kind == "close":
                 closes.append(i - start)
             elif signal.kind in ("carry", "release") and signal.kind not in found:
                 found[signal.kind] = i - start
             if current + 1 < len(skills) and signal.kind == skills[current + 1].handover:
                 current += 1
+        handback |= person
         labels[i] = current
     replays.append((start, len(state), closes, found))
     if told is not None:

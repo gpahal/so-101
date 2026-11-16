@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -157,33 +158,48 @@ def check_skills_model(s: settings.Settings, ns: argparse.Namespace, task: tasks
 
 
 def skills_build(local: Path | None, repo: str | None, revision: str | None) -> dict:
-    """The build.json of the skills dataset a model was trained on, which its train_config.json names:
-    beside a local checkpoint's dataset (`dataset.root`), or else in the Hub dataset it was trained from,
-    where `train` uploads it with the dataset. Exits when there's none to read."""
+    """The build.json of the skills build a model was trained on, pinned by the dataset revision that
+    `train --skills` records in its train_config.json:
+    - after a Hub job, the commit of the Hub dataset it uploaded and trained from: build.json at that commit;
+    - after `--target local`, `data.build_revision` of the build.json it trained on: the one beside its
+      dataset (`dataset.root`), which must still be that file, since every build replaces it.
+    Exits when the model records neither, as one trained before `train` recorded them does, or when the
+    build can't be read: which skills it was trained on would be a guess."""
     from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
 
+    from so_101 import data
+
     model = str(local or repo)
+    retrain = "Train it again with `so101 train --skills`"
     try:
         path = local / "train_config.json" if local else Path(hf_hub_download(repo, "train_config.json", revision=revision))
         train = json.loads(path.read_text())
     except (OSError, EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError, json.JSONDecodeError) as error:
         sys.exit(f"{model} has no readable train_config.json ({type(error).__name__}), so which skills it was "
-                 "trained on is unknown. Train it again with `so101 train --skills`.")
-    dataset = train.get("dataset") or {}
-    root = dataset.get("root")
-    if root and (Path(root) / "build.json").is_file():
-        return json.loads((Path(root) / "build.json").read_text())
-    source = dataset.get("repo_id")
+                 f"trained on is unknown. {retrain}.")
+    dataset = train.get("dataset") if isinstance(train, dict) else None
+    dataset = dataset if isinstance(dataset, dict) else {}
+    pinned, source, root = dataset.get("revision"), dataset.get("repo_id"), dataset.get("root")
+    if isinstance(pinned, str) and pinned.startswith(data.BUILD_REVISION) and root:
+        build = Path(root) / "build.json"
+        if not build.is_file() or data.build_revision(build) != pinned:
+            sys.exit(f"{model} was trained on the skills dataset in {root}, which was rebuilt after this model was "
+                     "trained (or removed), so its build.json no longer says which skills the model was trained "
+                     f"on. {retrain} --target local.")
+        return json.loads(build.read_text())
+    if not (isinstance(pinned, str) and re.fullmatch(r"[0-9a-f]{40}", pinned)) or not source or source.startswith("local/"):
+        sys.exit(f"{model} recorded no build it was trained on: its train_config.json's dataset.revision is "
+                 f"{pinned!r}, where `so101 train` now records the Hub dataset's commit, or the build's sha256 on "
+                 "this Mac. It was trained before that, and its dataset's build.json may since describe a later "
+                 f"build, so which skills it was trained on can't be checked. {retrain}"
+                 f"{' --target local' if root else ''}.")
     try:
-        if not source or source.startswith("local/"):
-            raise FileNotFoundError(source)
-        return json.loads(Path(hf_hub_download(source, "build.json", repo_type="dataset",
-                                               revision=dataset.get("revision"))).read_text())
+        return json.loads(Path(hf_hub_download(source, "build.json", repo_type="dataset", revision=pinned)).read_text())
     except (OSError, EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError, json.JSONDecodeError) as error:
-        sys.exit(f"{model} was trained on {source or 'a dataset'}, whose build.json can't be read "
-                 f"({type(error).__name__}), so which skills it was trained on is unknown. Train it again with "
-                 "`so101 train --skills`, which uploads it with the dataset.")
+        sys.exit(f"{model} was trained on commit {pinned} of {source}, whose build.json can't be read "
+                 f"({type(error).__name__}), so which skills it was trained on is unknown. {retrain}, which "
+                 "uploads it with the dataset.")
 
 
 def require_skills_contract(model: str, task: tasks.Task, gripper, build: dict) -> None:

@@ -452,8 +452,9 @@ def refuse_public(api, repo: str, repo_type: str, command: str) -> None:
                  f"{command} again.")
 
 
-def push_dataset(root: Path, repo_id: str) -> None:
-    """Upload a built dataset, replacing whatever an earlier build left in the repo, which must be private."""
+def push_dataset(root: Path, repo_id: str) -> str:
+    """Upload a built dataset, replacing whatever an earlier build left in the repo, which must be private.
+    Returns the upload's commit, which `train --skills` trains from and records."""
     from huggingface_hub import HfApi
     from huggingface_hub.errors import RevisionNotFoundError
     from lerobot.datasets.dataset_metadata import CODEBASE_VERSION
@@ -461,16 +462,17 @@ def push_dataset(root: Path, repo_id: str) -> None:
     api = HfApi()
     api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
     refuse_public(api, repo_id, "dataset", "train")
-    api.upload_folder(
+    commit = api.upload_folder(
         repo_id=repo_id, repo_type="dataset", folder_path=root, commit_message="so101 build",
         delete_patterns=["data/**", "meta/**", "videos/**"],
-    )
+    ).oid  # an upload that changes nothing returns the commit already there
     # LeRobot loads the revision tagged with its dataset format version; point it at this upload.
     try:
         api.delete_tag(repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
     except RevisionNotFoundError:
         pass
-    api.create_tag(repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
+    api.create_tag(repo_id, tag=CODEBASE_VERSION, revision=commit, repo_type="dataset")
+    return commit
 
 
 # Flags each policy needs beyond its `[train.<policy>]` recipe in so101.toml.
@@ -697,6 +699,10 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     if target == "local":
         local, output = local_train_args(s, task, ns.policy, root, skills)
         args += local
+        if skills:
+            # The checkpoint's train_config.json keeps it, and `run --skills` checks the skills against the
+            # build.json it names (`commands.policy.skills_build`). LeRobot reads the dataset from its root.
+            args.append(f"--dataset.revision={data.build_revision(data.build_manifest_path(s, task, kind))}")
         if (forwarded(extra, "policy.push_to_hub") or "").lower() in ("true", "1", "yes"):
             from huggingface_hub import HfApi
 
@@ -712,9 +718,13 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         # LeRobot's private=true doesn't change an existing one.
         refuse_public(HfApi(), forwarded(extra, "policy.repo_id") or policy, "model", "train")
         print(f"Uploading the training dataset to the private Hub dataset {dataset_repo}...")
-        push_dataset(root, dataset_repo)
+        commit = push_dataset(root, dataset_repo)
         timeout = recipe.job_timeout(steps, target)
-        args += [f"--dataset.repo_id={dataset_repo}", f"--job.timeout={timeout}",
+        # A skills model trains from the very commit uploaded, which its train_config.json then records, so
+        # `run --skills` checks it against that commit's build.json, not a later build's
+        # (`commands.policy.skills_build`).
+        args += [*([f"--dataset.revision={commit}"] if skills else []),
+                 f"--dataset.repo_id={dataset_repo}", f"--job.timeout={timeout}",
                  "--save_checkpoint_to_hub=true",
                  # This Mac's decoder is sent along otherwise. That's PyAV when TorchCodec can't load here,
                  # and PyAV ran out of memory on the job's 192-core host.

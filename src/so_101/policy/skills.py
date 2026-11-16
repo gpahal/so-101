@@ -7,11 +7,17 @@ clears the model's queued actions in the leaf, and logs a `skill` event. Each ti
 current skill's index in `skill`, which the recording writes as control.skill.
 
 A handback with `moved` (a layer above played motion back, or a person rewound or teleoperated) means
-what was held may have been let go or undone: on its next tick, in a skill that holds the block (one
-handed over on a carry), a gripper reading open sends it back to the first skill. A gripper still closed
-keeps the skill it was on, and a block a person closed the jaws on counts as a close in the perception
-below, so its carry switches to the next skill as usual. A skill handed over on a release expects the
-jaws open, so a handback never moves it.
+what was held or let go may have been undone. The sequencer follows the perception below: on the first
+tick it feeds after the handback, the perception tells its detector the arm moved
+(`Detector.resumed`), and the Output's readings say whether a carry or a release still stands. If
+neither does, whatever the current skill, the sequencer starts again on the first skill, as for a
+missed grasp: a block dropped outside the jar and rewound to before the close is picked again. With
+the jaws closed after the move the detector keeps what it had, so a block still held keeps its skill,
+and a block a person closed the jaws on counts as a close, whose carry switches to the next skill as
+usual. A person who teleoperates after a real release, with the jaws open, also sends the attempt back
+to the first skill: the perception can't tell a release from a block put back. The model drove that
+first tick on the skill it had; the switch conditions it from the next, and the frame records the new
+skill, as at a handover.
 
 Deciding to switch is the layer's own logic and runs under `safely`; conditioning the model below runs
 outside it, so an error from the model reaches the loop as the model's.
@@ -19,9 +25,7 @@ outside it, so an error from the model reaches the loop as the model's.
 
 from dataclasses import replace
 
-from so_101.policy.base import Conditioning, Handback, Layer, LayerContext, Output, Tick
-
-GRIPPER = "gripper.pos"
+from so_101.policy.base import Conditioning, Handback, Layer, LayerContext, Output, Readings, Tick
 
 
 class SkillSequencer(Layer):
@@ -29,7 +33,7 @@ class SkillSequencer(Layer):
         super().__init__(inner, ctx, "skills")
         self.skills = skills
         self.current = 0
-        self._recheck = False
+        self._recheck = False  # a handback moved the arm: check the perception's next readings
         self._tell: Conditioning | None = None  # what the next public call tells the model, outside `safely`
 
     @property
@@ -46,16 +50,13 @@ class SkillSequencer(Layer):
 
     def run(self, handback: Handback) -> None:
         self.inner.run(handback)
-        self._recheck = handback.moved
+        self._recheck = self._recheck or handback.moved
 
     def step(self, robot, tick: Tick) -> Output:
-        if self._recheck:
-            self._recheck = False
-            self.safely(self._after_handback, tick)
-            if (told := self._tell) is not None:
-                self._tell = None
-                self.inner.condition(told)
         out = self.inner.step(robot, tick)
+        if self._recheck and out.readings is not None:  # the perception fed this tick, after `resumed`
+            self._recheck = False
+            self.safely(self._after_handback, out.readings)
         self.safely(self._handover, out)
         if (told := self._tell) is not None:
             self._tell = None
@@ -70,10 +71,9 @@ class SkillSequencer(Layer):
                        **({"previous": previous} if cause != "start" else {}))
         return True
 
-    def _after_handback(self, tick: Tick) -> bool:
-        holds = self.current and self.skill.handover == "carry"
-        return bool(holds and tick.pose.get(GRIPPER, 0.0) >= self.ctx.grasp.gripper.closed_below
-                    and self._move(0, "reopened"))
+    def _after_handback(self, readings: Readings) -> bool:
+        undone = not (readings.carried or readings.released)
+        return bool(self.current and undone and self._move(0, "reopened"))
 
     def _handover(self, out: Output) -> bool:
         nxt = self.current + 1

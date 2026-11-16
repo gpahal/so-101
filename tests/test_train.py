@@ -1,5 +1,9 @@
-"""`so101 train --base`: which model a training job starts from, checked before anything uploads or bills."""
+"""`so101 train`: which model a training job starts from, checked before anything uploads or bills, and
+which build a skills model trains on, recorded where `run --skills` reads it."""
 
+import argparse
+import dataclasses
+import hashlib
 import json
 import tempfile
 import unittest
@@ -125,6 +129,72 @@ class LocalTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as stop:
                 local_checkpoint(str(output), "pi05")
             self.assertIn("holds a model of type act, not pi05", str(stop.exception))
+
+
+class PinTest(unittest.TestCase):
+    """`train --skills` records which build the model trains on as the dataset.revision in its
+    train_config.json, which `run --skills` and `serve --skills` check (`commands.policy.skills_build`)."""
+
+    COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+    def train(self, target: str | None) -> tuple[list[str], Path, mock.MagicMock]:
+        """`so101 train test --skills` with nothing uploaded or run: lerobot-train's arguments, the build's
+        build.json and the upload."""
+        from test_skills import TASK
+
+        from so_101 import data
+
+        temp = tempfile.TemporaryDirectory(prefix="so101-pin-")
+        self.addCleanup(temp.cleanup)
+        s = dataclasses.replace(settings.load(), data_dir=Path(temp.name) / "data")
+        manifest = data.build_manifest_path(s, TASK, data.SKILLS)
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({"built": "now", "episodes": []}))
+        ns = argparse.Namespace(task="test", policy="act", target=target, base=None, skills=True, keep_labels=False,
+                                with_=None)
+        with mock.patch.object(cli, "get_task", return_value=TASK), \
+                mock.patch.object(data, "sessions", return_value=[object()]), \
+                mock.patch.object(data, "build_is_current", return_value=True), \
+                mock.patch.object(data, "kept_episodes", return_value=10), \
+                mock.patch("so_101.tasks.hf_user", return_value="me"), \
+                mock.patch.object(cli, "refuse_public"), \
+                mock.patch.object(cli, "push_dataset", return_value=self.COMMIT) as push, \
+                mock.patch.object(cli, "lerobot") as lerobot, \
+                mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+            cli.cmd_train(s, ns, [])
+        return lerobot.call_args.args[1], manifest, push
+
+    def parsed(self, args: list[str]):
+        """The training config LeRobot builds from `args`, as the job parses them."""
+        import draccus
+        import lerobot.policies  # noqa: F401  registers the policy types
+        from lerobot.configs.train import TrainPipelineConfig
+
+        return draccus.parse(TrainPipelineConfig, args=args)
+
+    def test_a_hub_job_trains_from_the_commit_it_uploaded_and_records_it(self) -> None:
+        args, _, push = self.train(None)
+        push.assert_called_once()
+        self.assertIn(f"--dataset.revision={self.COMMIT}", args)
+        config = self.parsed(args)
+        self.assertEqual((config.dataset.repo_id, config.dataset.revision), ("me/so101_test_skills", self.COMMIT))
+
+    def test_a_local_run_records_the_sha256_of_the_build_json_it_trains_on(self) -> None:
+        args, manifest, push = self.train("local")
+        push.assert_not_called()
+        pin = f"so101-build-{hashlib.sha256(manifest.read_bytes()).hexdigest()}"
+        self.assertIn(f"--dataset.revision={pin}", args)
+        self.assertEqual(self.parsed(args).dataset.revision, pin)
+
+    def test_the_upload_is_tagged_and_its_commit_returned(self) -> None:
+        api = mock.Mock()
+        api.repo_info.return_value = mock.Mock(private=True)
+        api.upload_folder.return_value = mock.Mock(oid=self.COMMIT)
+        with mock.patch("huggingface_hub.HfApi", return_value=api):
+            self.assertEqual(cli.push_dataset(Path("/data/train"), "me/so101_test_skills"), self.COMMIT)
+        # LeRobot loads the dataset at its format tag by default: it marks this very upload.
+        api.create_tag.assert_called_once_with("me/so101_test_skills", tag=mock.ANY, revision=self.COMMIT,
+                                               repo_type="dataset")
 
 
 class ForwardedTest(unittest.TestCase):

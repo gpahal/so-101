@@ -85,6 +85,17 @@ def build_manifest_path(s: Settings, task: "Task", kind: str = WHOLE) -> Path:
     return dataset_root(s, task, kind) / "build.json"
 
 
+BUILD_REVISION = "so101-build-"
+
+
+def build_revision(path: Path) -> str:
+    """What `train --skills --target local` records as the dataset revision in the checkpoint's
+    train_config.json: the sha256 of the build.json at `path`, which every build writes anew (with the
+    time it was built), so it names one build. LeRobot reads a local dataset from its root and never
+    uses the revision."""
+    return BUILD_REVISION + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 @dataclass(frozen=True)
 class Recording:
     """A folder of sessions/ or runs/: one dataset and the manifest it was recorded with."""
