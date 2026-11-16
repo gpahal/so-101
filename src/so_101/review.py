@@ -121,7 +121,9 @@ def keep_all(suggestion: Suggestion) -> data.Edit:
 
 
 def delete(suggestion: Suggestion, reason: str) -> data.Edit:
-    return data.Edit(suggestion.edit.session, suggestion.edit.episode, delete=reason)
+    """Delete the episode for `reason`, its words joined by single spaces, as the prompt's answer is
+    split into words, so a reason from the page is written as the same one typed at the prompt."""
+    return data.Edit(suggestion.edit.session, suggestion.edit.episode, delete=" ".join(reason.split()))
 
 
 def keep_range(suggestion: Suggestion, start: float, end: float) -> data.Edit | str:

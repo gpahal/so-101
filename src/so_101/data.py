@@ -325,16 +325,31 @@ def load_edits(s: Settings, task: "Task") -> dict[tuple[str, int], Edit]:
 
 
 def save_edits(s: Settings, task: "Task", edits: dict[tuple[str, int], Edit]) -> None:
+    """Write `edits` as edits.toml. A delete reason loses its control characters and lone surrogates:
+    TOML takes no DEL in a string, escaped or not, and UTF-8 can't hold a lone surrogate. The text is
+    parsed before it replaces the file, so a file that wouldn't load is never written: that raises
+    ConfigError and leaves the old one."""
+    import unicodedata
+
+    def clean(text: str) -> str:
+        return "".join(c for c in text if unicodedata.category(c) not in ("Cc", "Cs"))
+
     lines = [EDITS_HEADER]
     for edit in sorted(edits.values(), key=lambda e: e.key):
         lines.append(f"\n[[episode]]\nsession = {json.dumps(edit.session, ensure_ascii=False)}\nepisode = {edit.episode}\n")
         if edit.keep:
             lines.append(f"keep = [{edit.keep[0]:.2f}, {edit.keep[1]:.2f}]\n")
         if edit.delete is not None:
-            lines.append(f"delete = {json.dumps(edit.delete, ensure_ascii=False)}\n")
+            lines.append(f"delete = {json.dumps(clean(edit.delete), ensure_ascii=False)}\n")
     path = edits_path(s, task)
+    text = "".join(lines)
+    try:
+        tomllib.loads(text)
+        text.encode()
+    except (tomllib.TOMLDecodeError, UnicodeError) as e:
+        raise ConfigError(f"{path} wasn't changed: the edits would write text that doesn't read back ({e}).") from e
     path.parent.mkdir(parents=True, exist_ok=True)
-    replace_file(path, "".join(lines))
+    replace_file(path, text)
 
 
 def kept_episodes(s: Settings, task: "Task") -> int:

@@ -37,7 +37,6 @@ HTTPS.
 """
 
 import secrets
-import subprocess  # noqa: F401  (tests stub `subprocess.run` here, to check that only the Tailscale CLI runs)
 from collections.abc import Callable
 from concurrent.futures import TimeoutError as FutureTimeout
 from http import HTTPStatus
@@ -46,25 +45,10 @@ from urllib.parse import SplitResult, parse_qs, unquote
 
 from so_101.control.commands import OPTIONS, TOOLS
 from so_101.web import server as web
-from so_101.web.server import (  # noqa: F401  (re-exported: the names this module had before web/server.py)
-    LOOPBACK,
-    MAX_BODY,
-    THIS_MAC,
-    Bind,
-    Route,
-    serve_routes,
-    tailscale_ip,
-    tailscale_name,
-)
+from so_101.web.server import Bind
 
 SITE = web.Site(page="control page", command="so101 serve", posts="Commands", guards="the arm's controls",
                 remote="remote operator", thread="control-page")
-NO_TAILSCALE = SITE.say(web.NO_TAILSCALE)
-ROUTES_UNREAD = SITE.say(web.ROUTES_UNREAD)
-# Read from this module, not web/server.py, so a test can change them for the control page alone.
-ROUTES_EVERY_S = web.ROUTES_EVERY_S
-_tailscale = web._tailscale
-_tailscale_cli = web._tailscale_cli
 COMMAND_WAIT_S = 2.0  # a command waits one tick, 33 ms at 30 fps; longer means the loop is stuck
 # Run checks samples the cameras for 2.5 s and reads the arms' motors: about 3 s, with room for a
 # slow bus or a camera that takes long to answer.
@@ -74,21 +58,17 @@ VISIBLE_HEADER = "X-SO101-Visible"  # "0" when the page polling is out of sight
 MAX_CLIENT = 64  # characters: the page sends 32
 
 
-def _ask_tailscale(*args: str) -> str | None:
-    return _tailscale(*args)  # looked up at each call, so a stub set on this module is the one asked
-
-
 def resolve_bind(control) -> Bind:
     """Where the control page listens for `control`, so101.toml's `[control]` section: on its `port`,
     by its `bind` (`web.server.resolve_bind`). A TCP forward to the port while it would listen on
     127.0.0.1 raises ValueError."""
-    return web.resolve_bind(control.bind, control.port, SITE, tailscale=_ask_tailscale)
+    return web.resolve_bind(control.bind, control.port, SITE)
 
 
 def route_warning(bind: Bind, port: int) -> str | None:
     """What makes a request to the control page unsafe now (`web.server.route_warning`), or None.
     Raises RuntimeError when Tailscale's status can't be read."""
-    return web.route_warning(bind, port, SITE, tailscale=_ask_tailscale)
+    return web.route_warning(bind, port, SITE)
 
 
 def page() -> bytes:
@@ -107,12 +87,6 @@ class ControlServer(web.PageServer):
         self.controller = None
         self.task = task
         self.id = secrets.token_hex(8)  # tells the page a restarted server from the one it watched
-
-    def tailscale_installed(self) -> bool:
-        return _tailscale_cli() is not None
-
-    def routes_every_s(self) -> float:
-        return ROUTES_EVERY_S
 
     def status(self, client: str | None = None) -> dict:
         return {**self.controller.status(client), "task": self.task, "server_warning": self.warning,

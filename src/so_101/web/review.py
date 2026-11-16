@@ -8,37 +8,46 @@ each decision goes through `review.save` (edits.toml) or `review_runs.apply` (th
 labels.toml), so both ways write identical files.
 
     GET  /                 the page (review.html beside this file)
-    GET  /items            {"kind": "demos" or "runs", "task", "warning", "items": [...]}: what this
-                           review covers, oldest first, each {"id", "title", "seconds", "now" (its
-                           decision so far, in words), "reviewed"}. An id is SESSION/N or RUN/N, as
-                           `--episode` takes them
+    GET  /items            {"kind": "demos" or "runs", "task", "warning", "notes", "items": [...]}:
+                           what this review covers, oldest first, each {"id", "title", "seconds",
+                           "now" (its decision so far, in words), "reviewed"}. An id is SESSION/N or
+                           RUN/N, as `--episode` takes them. "notes" are the attempts left out
+                           because their episode isn't in the run's episode index, as after a kill
+                           during its save
     GET  /item/<id>        everything the page draws for one item: "fps", "frames", "seconds",
                            "cameras", "joints" ({"names", "values"}, one list per joint), "bands"
-                           (spans of each `control.skill` or `control.driver` column a recording has),
+                           (spans of each `control.skill` or `control.driver` column a recording has,
+                           each span with its "value" and "label", the skill's or driver's name),
                            and for a demo "suggestion" ({"keep", "delete", "hint"}), "edit" and
                            "min_seconds"; for an attempt "phases", "interruptions", "events" (each
                            with "type", "frame" and "text", and "start_frame" and "end_frame" when
-                           it marks a range), "outcome", "recorded_outcome" and "labelled". Opening
-                           an item makes it the one shown
+                           it marks a range), "outcome", "recorded_outcome" and "labelled"
     GET  /frames/<id>/<camera>?from=A&to=B
                            frames A up to B (stop not included, at most FRAMES_PER_REQUEST) of the
                            camera, as JPEGs up to WIDTH px wide, packed one after another, each
                            behind its length as 4 bytes, big-endian, in an application/octet-stream
-                           body. The server decodes each episode's video once and keeps the last
-                           KEEP_EPISODES episodes' JPEGs (`FrameCache`)
+                           body. Only the frames asked for are decoded, and the server keeps the
+                           last KEEP_BYTES of JPEGs (`FrameCache`). When the video stops decoding
+                           partway, as one cut short does, the frames before that are sent; a
+                           request that decodes none is a 500 that says why
     POST /decision         for a demo {"item", "edit": "accept" | "keep" | "trim" | "delete",
                            "keep"?: [start_s, end_s], "reason"?: ...}; for an attempt {"item",
                            "outcome"} or {"item", "interruption": its frame, "suspect": [start,
-                           stop] or [] for none} or {"item", "interruption", "auto": true}. Refused
-                           with 409 unless "item" is the item shown, and with 400 for anything
-                           else it doesn't take. Replies {"saved", "item", "entry"}: what was
-                           written, in words, the item and its list entry as they are now
+                           stop] or [] for none} or {"item", "interruption", "auto": true}. Each
+                           names its item, so a tab may decide on its item whichever another tab
+                           opened since. Refused with 404 for an item the review doesn't cover, and
+                           with 400 for anything else it doesn't take. Replies {"saved", "item",
+                           "entry"}: what was written, in words, the item and its list entry as they
+                           are now
 
-Errors close the connection, as every page server's do (`web.server.Handler._send`).
+A request that finds edits.toml or a labels.toml it can't read, as one changed by hand mid-review, is
+refused with 409 and the file's error; one whose recording can't be read, a 500 that says why. Errors
+close the connection, as every page server's do (`web.server.Handler._send`).
 """
 
 import contextlib
 import math
+import re
 import sys
 import threading
 from collections import OrderedDict
@@ -53,6 +62,7 @@ from so_101 import data, review, review_runs, settings
 from so_101.build import MIN_EPISODE_S
 from so_101.control import analysis
 from so_101.control.recorder import Phase
+from so_101.policy.base import DRIVERS
 from so_101.dataset_io import column, episode_frames
 from so_101.settings import ConfigError, Settings
 from so_101.tasks import Task
@@ -63,7 +73,11 @@ SITE = web.Site(page="review page", command="so101 review", posts="Decisions", g
 WIDTH = 480  # px: enough to judge a grasp, small enough that a 15 s episode of two cameras is about 25 MB
 JPEG_QUALITY = 75
 FRAMES_PER_REQUEST = 150  # 5 s at 30 fps, so the page shows the start while the rest loads
-KEEP_EPISODES = 3  # episodes whose JPEGs the server keeps, both cameras each
+# JPEGs the server keeps, for a reload or a second tab: about three 15 s episodes of two cameras.
+KEEP_BYTES = 80_000_000
+# The slowest link a frames body is given time for: 1 Mbit/s, so a 150-frame chunk of about 4 MB
+# may take 32 s to send, where any other reply has the connection's 10 s (`web.server.Handler.timeout`).
+SLOWEST_LINK_BYTES_PER_S = 125_000
 # Columns a recording may have that split it into spans worth a band of their own on the timeline.
 BAND_COLUMNS = ("control.skill", "control.driver")
 # Events the timeline draws in other ways (`state` as the phases, the attempt's own start and end), or
@@ -105,33 +119,49 @@ def unpack(body: bytes) -> list[bytes]:
     return out
 
 
+def send_timeout(length: int) -> float:
+    """Seconds a body of `length` bytes may take to send: at SLOWEST_LINK_BYTES_PER_S, and never less
+    than any reply has."""
+    return max(float(web.Handler.timeout), length / SLOWEST_LINK_BYTES_PER_S)
+
+
+Decoded = tuple[list[bytes], str | None]  # the JPEGs that decoded, and why the rest didn't, or None
+
+
 class FrameCache:
-    """Each (item, camera)'s JPEGs, decoded once, for the last `keep` of them. Two requests for the
-    same one wait for one decode."""
+    """JPEGs by key, decoded once, the newest up to `keep_bytes` of them. Two requests for the same key
+    wait for one decode. A decode that failed partway isn't kept, so asking again decodes again."""
 
-    def __init__(self, keep: int) -> None:
-        self.keep = keep
-        self._done: OrderedDict[tuple[str, str], list[bytes]] = OrderedDict()
+    def __init__(self, keep_bytes: int) -> None:
+        self.keep_bytes = keep_bytes
+        self._done: OrderedDict[tuple, list[bytes]] = OrderedDict()
         self._lock = threading.Lock()
-        self._decoding: dict[tuple[str, str], threading.Lock] = {}
+        self._decoding: dict[tuple, threading.Lock] = {}
 
-    def get(self, key: tuple[str, str], decode: Callable[[], list[bytes]]) -> list[bytes]:
+    def get(self, key: tuple, decode: Callable[[], Decoded]) -> Decoded:
         with self._lock:
             if key in self._done:
                 self._done.move_to_end(key)
-                return self._done[key]
+                return self._done[key], None
             one = self._decoding.setdefault(key, threading.Lock())
         with one:
             with self._lock:
                 if key in self._done:
-                    return self._done[key]
-            frames = decode()
-            with self._lock:
-                self._done[key] = frames
-                while len(self._done) > self.keep:
-                    self._done.popitem(last=False)
-                self._decoding.pop(key, None)
-        return frames
+                    return self._done[key], None
+            try:
+                frames, error = decode()
+            finally:
+                with self._lock:
+                    self._decoding.pop(key, None)
+            if error is None:
+                with self._lock:
+                    self._done[key] = frames
+                    while len(self._done) > 1 and self._bytes() > self.keep_bytes:
+                        self._done.popitem(last=False)
+        return frames, error
+
+    def _bytes(self) -> int:
+        return sum(len(j) for jpegs in self._done.values() for j in jpegs)
 
 
 def _joints(meta, table) -> dict:
@@ -140,20 +170,44 @@ def _joints(meta, table) -> dict:
     return {"names": list(names), "values": [[v if math.isfinite(v) else None for v in row] for row in values.tolist()]}
 
 
-def _bands(table) -> list[dict]:
-    """The spans of equal value of each BAND_COLUMNS column the table has."""
+NO_SKILL = -1  # control.skill without skills
+
+
+def _bands(table, skills: list[str] = ()) -> list[dict]:
+    """The spans of equal value of each BAND_COLUMNS column the table has, each labelled with the
+    name of the driver (`policy.base.DRIVERS`) or of the skill (`skills`, run.json's policy.skills, by
+    index). A skill column that is NO_SKILL throughout, as every run without skills records, has no
+    band."""
     bands = []
     for name in BAND_COLUMNS:
         if name not in table.columns:
             continue
         values = [_scalar(v) for v in table[name]]
+        if name == "control.skill" and all(v == NO_SKILL for v in values):
+            continue
+        names = DRIVERS if name == "control.driver" else {NO_SKILL: "no skill", **dict(enumerate(skills))}
         spans, start = [], 0
         for i in range(1, len(values) + 1):
             if i == len(values) or values[i] != values[start]:
-                spans.append({"value": values[start], "start": start, "stop": i})
+                value = values[start]
+                spans.append({"value": value, "label": str(names.get(value, value)), "start": start, "stop": i})
                 start = i
         bands.append({"name": name.removeprefix("control."), "spans": spans})
     return bands
+
+
+def _skill_names(run: data.Run) -> list[str]:
+    """The skills a run's control.skill indexes, from its run.json's policy.skills."""
+    try:
+        recorded = (run.manifest().get("policy") or {}).get("skills") or []
+    except (OSError, ValueError, AttributeError):  # run.json unreadable: the bands show the indices
+        return []
+    return [str(r.get("name", n)) if isinstance(r, dict) else str(r) for n, r in enumerate(recorded)]
+
+
+def notes_for(notes: list[str], number: int) -> list[str]:
+    """The notes that name attempt `number`, as a whole number: attempt 1's, never attempt 12's."""
+    return [note for note in notes if re.search(rf"\battempt {number}\b", note)]
 
 
 def _scalar(value):
@@ -198,6 +252,7 @@ class Demos:
     """`so101 review`: the demos to review, and their decisions, written by `review.save`."""
 
     kind = "demos"
+    notes: tuple[str, ...] = ()  # a demo is never left out
 
     def __init__(self, s: Settings, task: Task, only: str | None, everything: bool) -> None:
         self.s, self.task = s, task
@@ -254,7 +309,7 @@ class Demos:
         suggestion = self.suggestion(id)
         choice = body.get("edit")
         allowed = {"accept": set(), "keep": set(), "trim": {"keep"}, "delete": {"reason"}}
-        if choice not in allowed or not set(body) - {"item", "edit"} <= allowed[choice]:
+        if not isinstance(choice, str) or choice not in allowed or not set(body) - {"item", "edit"} <= allowed[choice]:
             raise Refused('A demo takes {"edit": "accept"}, {"edit": "keep"}, {"edit": "trim", "keep": [START, END]} '
                           'or {"edit": "delete", "reason": ...}.')
         if choice == "accept":
@@ -265,7 +320,7 @@ class Demos:
             reason = body.get("reason", "")
             if not isinstance(reason, str):
                 raise Refused("A reason is text.")
-            edit = review.delete(suggestion, reason.strip())
+            edit = review.delete(suggestion, reason)
         else:
             keep = body.get("keep")
             if not (isinstance(keep, list) and len(keep) == 2 and all(_number(v) for v in keep)):
@@ -291,9 +346,30 @@ class Runs:
     kind = "runs"
 
     def __init__(self, s: Settings, task: Task, only: str | None, everything: bool) -> None:
+        """Prints each run's notes, as `review_runs.collect` does, and each attempt left out."""
         self.s, self.task = s, task
         self.todo = review_runs.collect(s, task, only, everything)
-        self.attempts = {f"{run.name}/{number}": (run, number) for run, number in self.todo.attempts}
+        self.notes: list[str] = []  # the attempts left out, and why
+        self.attempts = {}
+        for run, number in self.todo.attempts:
+            if (why := self._unreadable(run, number)) is not None:
+                self.notes.append(why)
+                print(f"note: {why}")
+                continue
+            self.attempts[f"{run.name}/{number}"] = (run, number)
+
+    def _unreadable(self, run: data.Run, number: int) -> str | None:
+        """Why the attempt's frames can't be shown, or None. A kill after its data file and
+        attempt_end were written, before its episode reached the metadata, leaves an episode the
+        analysis finds and the episode index doesn't list, so no video can be found for it."""
+        _, attempt = review_runs.find(self.todo.records[run.name], analysis.load_labels(run), self.todo.blame_s,
+                                      number)
+        meta = run.meta
+        indexed = set() if meta is None else {int(e) for e in meta.episodes["episode_index"]}
+        if attempt.episode in indexed:
+            return None
+        return (f"run {run.name} attempt {number}: episode {attempt.episode} isn't in the dataset's episode index, as "
+                "after a kill during its save, so it's left out")
 
     def __bool__(self) -> bool:
         return bool(self.attempts)
@@ -329,8 +405,8 @@ class Runs:
         events = self.todo.records[run.name].events
         return {
             **self.entry(id), "kind": self.kind, "fps": a.fps, "frames": attempt.frames, "cameras": _cameras(meta),
-            "joints": _joints(meta, table), "bands": _bands(table),
-            "notes": [note for note in a.notes if f"attempt {attempt.number}" in note],
+            "joints": _joints(meta, table), "bands": _bands(table, _skill_names(run)),
+            "notes": notes_for(a.notes, attempt.number),
             "ended_by": attempt.ended_by,
             "phases": [{"phase": Phase(s.phase).name.lower(), "start": s.start, "stop": s.stop}
                        for s in attempt.segments],
@@ -393,16 +469,23 @@ class ReviewServer(web.PageServer):
         super().__init__(bind, port, Handler, site=SITE, routes=routes)
         self.source = source
         self.task = task
-        self.shown: str | None = None  # the item the page opened last: the only one a decision may name
-        self.frames = FrameCache(KEEP_EPISODES * 2)
+        self.frames = FrameCache(KEEP_BYTES)
         self.deciding = threading.Lock()  # one decision at a time, as each rewrites a whole file
 
-    def decoded(self, id: str, camera: str) -> list[bytes]:
-        def decode() -> list[bytes]:
+    def decoded(self, id: str, camera: str, start: int, stop: int) -> Decoded:
+        """Frames `start` up to `stop` of the item's camera, as JPEGs: those that decode, and why the
+        rest didn't (a video cut short or missing a frame), or None."""
+        def decode() -> Decoded:
             meta, episode = self.source.video(id)
-            return [jpeg(frame) for _, frame in episode_frames(meta, episode, f"observation.images.{camera}")]
+            jpegs = []
+            try:
+                for _, frame in episode_frames(meta, episode, f"observation.images.{camera}", start, stop):
+                    jpegs.append(jpeg(frame))
+            except (OSError, ValueError) as error:  # a video file missing, cut short or unreadable
+                return jpegs, str(error)
+            return jpegs, None
 
-        return self.frames.get((id, camera), decode)
+        return self.frames.get((id, camera, start, stop), decode)
 
 
 class Handler(web.Handler):
@@ -410,39 +493,68 @@ class Handler(web.Handler):
     POSTS = ("/decision",)
 
     def get(self, url: SplitResult) -> None:
-        source = self.server.source
         path = unquote(url.path)
         if path == "/":
             self._send(HTTPStatus.OK, page(), "text/html; charset=utf-8")
         elif path == "/items":
-            self._json(HTTPStatus.OK, {"kind": source.kind, "task": self.server.task, "warning": self.server.warning,
-                                       "items": source.entries()})
+            self._answer(lambda: (HTTPStatus.OK, self._items()))
         elif path.startswith("/item/"):
             id = path.removeprefix("/item/")
-            if id not in self._ids():
-                self._json(HTTPStatus.NOT_FOUND, {"error": f"No item {id!r} in this review."})
-                return
-            detail = source.detail(id)
-            self.server.shown = id
-            self._json(HTTPStatus.OK, detail)
+            self._answer(lambda: (HTTPStatus.OK, self.server.source.detail(id)) if id in self._ids() else self._no(id))
         elif path.startswith("/frames/"):
             self._frames(path.removeprefix("/frames/"), parse_qs(url.query))
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": f"No {url.path} here."})
 
+    def _items(self) -> dict:
+        source = self.server.source
+        return {"kind": source.kind, "task": self.server.task, "warning": self.server.warning,
+                "notes": list(source.notes), "items": source.entries()}
+
     def _ids(self):
         source = self.server.source
         return source.demos if isinstance(source, Demos) else source.attempts
 
+    @staticmethod
+    def _no(id) -> tuple[HTTPStatus, dict]:
+        return HTTPStatus.NOT_FOUND, {"error": f"No item {id!r} in this review."}
+
+    @staticmethod
+    def _failure(error: Exception) -> tuple[HTTPStatus, dict]:
+        """The reply for an error a request met: 409 for an edits.toml or labels.toml that can't be
+        read, which a person fixes, and 500 for a recording that can't."""
+        if isinstance(error, ConfigError):
+            return HTTPStatus.CONFLICT, {"error": str(error)}
+        why = repr(error) if isinstance(error, LookupError) else str(error)  # a KeyError's str is only its key
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Can't read the recording: {why}"}
+
+    def _answer(self, make: Callable[[], tuple[HTTPStatus, dict]]) -> None:
+        """Reply with what `make` returns, or with the error that stopped it (`_failure`)."""
+        try:
+            status, body = make()
+        except (ConfigError, OSError, LookupError) as error:
+            status, body = self._failure(error)
+        self._json(status, body)
+
     def _frames(self, rest: str, query: dict) -> None:
         id, _, camera = rest.rpartition("/")
         if id not in self._ids():
-            self._json(HTTPStatus.NOT_FOUND, {"error": f"No item {id!r} in this review."})
+            self._json(*self._no(id))
             return
+        try:
+            result = self._chunk(id, camera, query)
+        except (ConfigError, OSError, LookupError) as error:
+            result = self._failure(error)
+        if isinstance(result, bytes):
+            self._send(HTTPStatus.OK, result, "application/octet-stream", send_s=send_timeout(len(result)))
+        else:
+            self._json(*result)
+
+    def _chunk(self, id: str, camera: str, query: dict) -> bytes | tuple[HTTPStatus, dict]:
+        """The packed JPEGs a /frames request asks for, or the error reply."""
         meta, episode = self.server.source.video(id)
         if camera not in _cameras(meta):
-            self._json(HTTPStatus.NOT_FOUND, {"error": f"No camera {camera!r}: only {', '.join(_cameras(meta))}."})
-            return
+            return HTTPStatus.NOT_FOUND, {"error": f"No camera {camera!r}: only {', '.join(_cameras(meta))}."}
         length = int(meta.episodes[episode]["length"])
         try:
             start = int(query.get("from", ["0"])[0])
@@ -450,14 +562,12 @@ class Handler(web.Handler):
             if not 0 <= start < stop:
                 raise ValueError("empty")
         except ValueError:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": f"from and to are frames, 0 <= from < to, of {length}."})
-            return
-        try:
-            jpegs = self.server.decoded(id, camera)
-        except (OSError, ValueError) as error:  # a video file missing, cut short or unreadable
-            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Can't read {camera}'s video: {error}"})
-            return
-        self._send(HTTPStatus.OK, pack(jpegs[start:stop]), "application/octet-stream")
+            return HTTPStatus.BAD_REQUEST, {"error": f"from and to are frames, 0 <= from < to, of {length}."}
+        jpegs, error = self.server.decoded(id, camera, start, stop)
+        if not jpegs:
+            return HTTPStatus.INTERNAL_SERVER_ERROR, {
+                "error": f"Can't read {camera}'s video from frame {start}: {error or 'no frames decoded'}"}
+        return pack(jpegs)
 
     def post(self, url: SplitResult) -> None:
         try:
@@ -466,24 +576,22 @@ class Handler(web.Handler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": 'Send a JSON object, like {"item": "...", "edit": "accept"}.'})
             return
         id = body.get("item")
-        if not isinstance(id, str) or id != self.server.shown:
-            self._json(HTTPStatus.CONFLICT, {
-                "error": f"This decision names {id!r}, but the item open is {self.server.shown!r}, as another tab or "
-                         "device may have opened it since. Reload the page to see which."})
+        if not isinstance(id, str) or id not in self._ids():
+            self._json(*self._no(id))
             return
         source = self.server.source
-        try:
-            with self.server.deciding:
-                saved = source.decide(id, body)
-        except Refused as refused:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": str(refused)})
-            return
-        except ConfigError as error:  # a labels.toml or edits.toml that changed under the review
-            self._json(HTTPStatus.CONFLICT, {"error": str(error)})
-            return
-        with contextlib.suppress(OSError, ValueError):
-            print(f"  {id}: saved {saved}", flush=True)
-        self._json(HTTPStatus.OK, {"saved": saved, "item": source.detail(id), "entry": source.entry(id)})
+
+        def decide() -> tuple[HTTPStatus, dict]:
+            try:
+                with self.server.deciding:
+                    saved = source.decide(id, body)
+            except Refused as refused:
+                return HTTPStatus.BAD_REQUEST, {"error": str(refused)}
+            with contextlib.suppress(OSError, ValueError):
+                print(f"  {id}: saved {saved}", flush=True)
+            return HTTPStatus.OK, {"saved": saved, "item": source.detail(id), "entry": source.entry(id)}
+
+        self._answer(decide)
 
 
 def _port_problem(s: Settings) -> str | None:

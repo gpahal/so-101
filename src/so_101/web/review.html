@@ -110,6 +110,7 @@ const PHASE_NAMES = { starting: "moving to start", autonomous: "policy", paused:
 const PALETTE = ["#38bdf8", "#f472b6", "#facc15", "#34d399", "#fb923c", "#c084fc", "#2dd4bf", "#f87171", "#a3e635", "#60a5fa"];
 const JOINT_COLORS = ["#38bdf8", "#f472b6", "#facc15", "#34d399", "#fb923c", "#c084fc"];
 const CHUNK = 150;  // frames per /frames request, as the server's FRAMES_PER_REQUEST
+const RETRIES = [1000, 3000];  // ms to wait before each retry of a chunk that failed, then it's given up
 
 let kind = null, items = [], item = null, frame = 0, playing = false, token = 0;
 let urls = {};  // camera -> object URL per frame, or undefined until loaded
@@ -117,6 +118,9 @@ let failed = {};  // camera -> why its frames couldn't be loaded
 let keep = null, touched = false;  // a demo's kept range in seconds [start, end], and whether it was changed
 let step = 0, pending = null;  // an attempt's step (an interruption, or its outcome at the end) and its changed suspect range
 let drag = null, deleting = false;
+// From a decision's POST until the next item's first frames show (or the decision's reply, when it
+// stays on this item): a second key press in that time would decide on an item nobody has seen.
+let busy = false;
 
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function color(type) { let h = 0; for (const c of type) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; }
@@ -137,18 +141,25 @@ async function getJSON(path) {
 }
 
 async function decide(body) {
+  // Returns the reply when the decision was saved and its item is still the one shown, else null. It
+  // leaves `busy` set on success: suspect() clears it at once, as it stays on this item, and next()
+  // once the next item's first frames show.
+  if (busy || !item) return null;
+  busy = true;
+  const id = item.id, mine = token;
   try {
     const r = await fetch("/decision", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item: item.id, ...body }) });
     const reply = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-    if (!r.ok) { toast(reply.error || `HTTP ${r.status}`, false); return null; }
+    if (!r.ok) { toast(reply.error || `HTTP ${r.status}`, false); busy = false; return null; }
     toast("Saved: " + reply.saved, true);
     const n = items.findIndex((x) => x.id === reply.entry.id);
     if (n >= 0) items[n] = reply.entry;
+    if (!item || item.id !== id || mine !== token) { busy = false; renderList(); return null; }  // another item opened since
     item = reply.item;
     renderList();
     return reply;
-  } catch (e) { toast("The reviewer didn't answer: " + e.message, false); return null; }
+  } catch (e) { toast("The reviewer didn't answer: " + e.message, false); busy = false; return null; }
 }
 
 // --- The list ----------------------------------------------------------------------------------------
@@ -170,8 +181,20 @@ function next() {
   // The next item without a decision after this one, else any other without one.
   const at = items.findIndex((x) => x.id === item.id);
   const after = items.slice(at + 1).find((x) => !x.reviewed) || items.find((x, n) => n !== at && !x.reviewed);
-  if (after) open(after.id);
-  else { $("main").hidden = true; $("done").hidden = false; stop(); item = null; renderList(); }
+  if (after) { open(after.id); return; }
+  busy = false;
+  if (!items[at].reviewed) {  // skipped the last one without a decision: stay on it
+    toast("This is the last item without a decision: decide on it, or pick another in the list.", false);
+    return;
+  }
+  $("main").hidden = true; $("done").hidden = false; stop(); dropFrames(); item = null; renderList();
+}
+
+function dropFrames() {
+  // Stop every load in flight (each checks its token) and free the frames' object URLs.
+  token += 1;
+  for (const list of Object.values(urls)) for (const u of list) if (u) URL.revokeObjectURL(u);
+  urls = {}; failed = {};
 }
 
 // --- Opening an item and loading its frames -----------------------------------------------------------
@@ -179,9 +202,10 @@ function next() {
 async function open(id) {
   stop();
   let detail;
-  try { detail = await getJSON("/item/" + id); } catch (e) { toast(e.message, false); return; }
-  for (const list of Object.values(urls)) for (const u of list) if (u) URL.revokeObjectURL(u);
-  token += 1; urls = {}; failed = {}; item = detail; frame = 0; deleting = false; pending = null; step = 0;
+  try { detail = await getJSON("/item/" + id); } catch (e) { toast(e.message, false); busy = false; return; }
+  dropFrames();
+  item = detail; frame = 0; deleting = false; pending = null; step = 0;
+  if (!item.cameras.length) busy = false;
   $("done").hidden = true; $("main").hidden = false;
   if (kind === "demos") resetKeep();
   $("item-title").textContent = item.title + ` (${item.seconds.toFixed(1)} s)`;
@@ -199,23 +223,45 @@ async function open(id) {
   renderList(); renderEvents(); renderPanel(); draw();
 }
 
+async function chunk(id, camera, from, to) {
+  // One /frames request: its body, or an Error saying why not.
+  const r = await fetch(`/frames/${id}/${encodeURIComponent(camera)}?from=${from}&to=${to}`);
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `HTTP ${r.status}`); }
+  const body = await r.arrayBuffer();
+  if (body.byteLength < 4) throw new Error("the reviewer sent no frames");
+  return body;
+}
+
 async function load(camera, mine) {
-  for (let from = 0; from < item.frames; from += CHUNK) {
+  // Each chunk in turn, from the frame after the last one received: the server sends fewer than
+  // asked when the video stops decoding partway, and the next request then says why.
+  const id = item.id, total = item.frames;
+  let from = 0;
+  while (from < total) {
+    let body = null, why = null;
+    for (let tries = 0; body === null; tries += 1) {
+      if (mine !== token) return;
+      try { body = await chunk(id, camera, from, Math.min(from + CHUNK, total)); }
+      catch (e) {
+        why = e.message;
+        if (tries >= RETRIES.length) break;
+        await new Promise((done) => setTimeout(done, RETRIES[tries]));
+      }
+    }
     if (mine !== token) return;
-    let body;
-    try {
-      const r = await fetch(`/frames/${item.id}/${encodeURIComponent(camera)}?from=${from}&to=${Math.min(from + CHUNK, item.frames)}`);
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `HTTP ${r.status}`); }
-      body = await r.arrayBuffer();
-    } catch (e) { if (mine === token) { failed[camera] = e.message; show(); } return; }
-    if (mine !== token) return;
+    if (body === null) {
+      failed[camera] = `No picture from frame ${from} on: ${why}`;
+      busy = false; show(); draw(); return;
+    }
     const view = new DataView(body);
     let at = 0, n = from;
-    while (at + 4 <= body.byteLength) {
+    while (at + 4 <= body.byteLength && n < total) {
       const length = view.getUint32(at);
       urls[camera][n] = URL.createObjectURL(new Blob([body.slice(at + 4, at + 4 + length)], { type: "image/jpeg" }));
       at += 4 + length; n += 1;
     }
+    from = n;
+    if (urls[camera][0]) busy = false;  // the first frame shows: the next decision may come
     show(); draw();
   }
 }
@@ -326,12 +372,15 @@ function drawTimeline() {
     y += 26;
   }
   for (const band of bands) {
+    const labels = new Map();
     for (const s of band.spans) {
-      lane(g, w, y, 14, s.start, s.stop, color(band.name + ":" + s.value), .7);
+      const c = color(band.name + ":" + s.value);
+      labels.set(s.label, c);
+      lane(g, w, y, 14, s.start, s.stop, c, .7);
       g.fillStyle = css("--fg");
-      if (xOf(s.stop, w) - xOf(s.start, w) > 40) g.fillText(String(s.value), xOf(s.start, w) + 3, y + 10);
+      if (xOf(s.stop, w) - xOf(s.start, w) > 40) g.fillText(s.label, xOf(s.start, w) + 3, y + 10);
     }
-    legend.push([css("--mut"), band.name + " (bands)"]);
+    for (const [label, c] of labels) legend.push([c, `${band.name}: ${label}`]);
     y += 18;
   }
   const hs = handles();
@@ -503,9 +552,10 @@ function runPanel() {
 
 async function suspect(body) {
   const i = item.interruptions[step];
-  if (await decide({ interruption: i.frame, ...body })) select(step + 1);
+  if (await decide({ interruption: i.frame, ...body })) { busy = false; select(step + 1); }
 }
 function keepSuspect() {
+  if (busy) return;
   if (pending) suspect({ suspect: pending });
   else select(step + 1);
 }
@@ -554,10 +604,13 @@ document.addEventListener("keydown", (e) => {
   }
   const k = e.key;
   const handled = () => e.preventDefault();
-  if (k === " ") { handled(); playing ? stop() : play(); return; }
-  if (k === "ArrowLeft" || k === "ArrowRight") {
+  if (k === "ArrowLeft" || k === "ArrowRight") {  // held down, these scrub
     handled(); stop(); seek(frame + (k === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? item.fps : 1)); return;
   }
+  // A held key repeats: only the first press counts, so holding Enter can't decide on the next items too.
+  if (e.repeat) { if (k === " " || k === "Enter") handled(); return; }
+  if (k === " ") { handled(); playing ? stop() : play(); return; }
+  if (busy) { if (k === "Enter") handled(); return; }  // a decision is on its way: wait for its item to show
   if (k === "[" || k === "]") { handled(); setEdge(k === "[" ? 0 : 1, k === "[" ? frame : frame + 1); return; }
   if (kind === "demos") {
     if (k === "Enter") { handled(); accept(); }
@@ -580,6 +633,13 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// A button clicked with the pointer keeps the focus, and Space or Enter would then press it again as
+// well as doing what the key does here. A click from the keyboard has detail 0 and keeps its focus.
+document.addEventListener("click", (e) => {
+  const b = e.target instanceof Element ? e.target.closest("button") : null;
+  if (b && e.detail > 0) b.blur();
+}, true);
+
 $("play").onclick = () => (playing ? stop() : play());
 $("back").onclick = () => { stop(); seek(frame - 1); };
 $("fwd").onclick = () => { stop(); seek(frame + 1); };
@@ -592,7 +652,8 @@ if (window.matchMedia) window.matchMedia("(prefers-color-scheme: light)").addEve
   kind = listing.kind; items = listing.items;
   $("heading").textContent = `${listing.task}: ${kind === "demos" ? "demos" : "run attempts"}`;
   document.title = `SO-101 review: ${listing.task}`;
-  if (listing.warning) { $("warning").textContent = listing.warning; $("warning").hidden = false; }
+  const banner = [listing.warning, ...(listing.notes || [])].filter(Boolean).join(" ");
+  if (banner) { $("warning").textContent = banner; $("warning").hidden = false; }
   renderList();
   const first = items.find((x) => !x.reviewed) || items[0];
   if (first) open(first.id); else $("done").hidden = false;

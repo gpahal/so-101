@@ -399,13 +399,6 @@ class PageServer(ThreadingHTTPServer):
             self.shutdown()
         self.server_close()
 
-    # The two module values the route checks read, as methods so a subclass's module can own them.
-    def tailscale_installed(self) -> bool:
-        return _tailscale_cli() is not None
-
-    def routes_every_s(self) -> float:
-        return ROUTES_EVERY_S
-
     def _first_route_check(self) -> None:
         """Check the routes once before the first request is served. `resolve_bind` read an unreadable
         status as no routes, so with a CLI installed the page refuses every request until a check
@@ -413,11 +406,11 @@ class PageServer(ThreadingHTTPServer):
         try:
             warning = self.routes()
         except Exception:
-            warning = self.site.say(ROUTES_UNREAD) if self.tailscale_installed() else None
+            warning = self.site.say(ROUTES_UNREAD) if _tailscale_cli() is not None else None
         self.routes_checked(warning)
 
     def _watch_routes(self) -> None:
-        while not self._stopping.wait(self.routes_every_s()):
+        while not self._stopping.wait(ROUTES_EVERY_S):
             try:
                 warning = self.routes()
             except Exception:  # a check that fails, or can't read the status, keeps the last answer
@@ -567,10 +560,11 @@ class Handler(BaseHTTPRequestHandler):
         # page would show a dead link rather than a value it can't parse. Raises on one instead.
         self._send(status, json.dumps(body, allow_nan=False).encode(), "application/json")
 
-    def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
+    def _send(self, status: HTTPStatus, body: bytes, content_type: str, send_s: float | None = None) -> None:
         """Send one response. One with an error status closes the connection, whatever refused the
         request: its body may not have been read, and must never be parsed as further requests, which
-        would skip every check above."""
+        would skip every check above. `send_s` is how long the whole body may take to send, for one
+        too big to send within `timeout`: a socket's timeout bounds a whole send, not each part of it."""
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -580,4 +574,11 @@ class Handler(BaseHTTPRequestHandler):
         if status >= 400:
             self.send_header("Connection", "close")  # sets close_connection, so nothing more is read
         self.end_headers()
-        self.wfile.write(body)
+        if send_s is None:
+            self.wfile.write(body)
+            return
+        self.connection.settimeout(max(send_s, self.timeout))
+        try:
+            self.wfile.write(body)
+        finally:
+            self.connection.settimeout(self.timeout)

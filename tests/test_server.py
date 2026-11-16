@@ -21,7 +21,9 @@ from fakes import DeadStream, control
 
 from so_101.control import server
 from so_101.control.commands import Result
-from so_101.control.server import Bind, ControlServer
+from so_101.control.server import ControlServer
+from so_101.web import server as web
+from so_101.web.server import Bind
 
 TS_NAME = "studio.tail1234.ts.net"
 LOGIN = "alice@example.com"
@@ -298,7 +300,7 @@ class UnsafeRouteTest(unittest.TestCase):
             checks.append(1)
             return answer[0]
 
-        for patch in (mock.patch.object(server, "ROUTES_EVERY_S", 0.01), mock.patch.object(server, "_tailscale", tailscale)):
+        for patch in (mock.patch.object(web, "ROUTES_EVERY_S", 0.01), mock.patch.object(web, "_tailscale", tailscale)):
             patch.start()
             self.addCleanup(patch.stop)
         bind = Bind("127.0.0.1", https=https)
@@ -313,14 +315,14 @@ class UnsafeRouteTest(unittest.TestCase):
             time.sleep(0.005)
 
     def test_the_route_watch_refuses_until_a_check_reads_clean_and_survives_a_closed_terminal(self) -> None:
-        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(server, "_tailscale_cli", return_value=None):
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(web, "_tailscale_cli", return_value=None):
             http = self.watch(reads=False)[0]
             self.assertEqual(http.request("GET", "/status")[0], 200, "no CLI, no route")
             http.server.stop()  # so only the next server's watch asks the faked CLI
 
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed), \
-                mock.patch.object(server, "_tailscale_cli", return_value="/usr/bin/tailscale"):
+                mock.patch.object(web, "_tailscale_cli", return_value="/usr/bin/tailscale"):
             http, answer, checks = self.watch(reads=False)
             code, body, _ = http.request("GET", "/status")
             self.assertEqual(code, 403, "a TCP forward may exist")
@@ -375,7 +377,7 @@ class ResolveBindTest(unittest.TestCase):
     TS_IP = "100.101.102.103"
     WEB = {f"{TS_NAME}:443": {"/": {"Proxy": "http://127.0.0.1:8101"}}}
 
-    def resolve(self, bind: str, *, ip: str = "", serve: str = "") -> server.Bind:
+    def resolve(self, bind: str, *, ip: str = "", serve: str = "") -> Bind:
         """resolve_bind for `bind`, with the Tailscale CLI printing `ip` for `ip -4` and `serve` for
         `serve status --json`."""
         outputs = {"ip": ip, "serve": serve, "status": json.dumps({"Self": {"DNSName": f"{TS_NAME}."}})}
@@ -383,8 +385,8 @@ class ResolveBindTest(unittest.TestCase):
         def tailscale(*args: str):
             return outputs[args[0]]
 
-        with mock.patch.object(server, "_tailscale", tailscale), \
-                mock.patch.object(server.subprocess, "run", side_effect=AssertionError("only the Tailscale CLI runs")):
+        with mock.patch.object(web, "_tailscale", tailscale), \
+                mock.patch.object(web.subprocess, "run", side_effect=AssertionError("only the Tailscale CLI runs")):
             return server.resolve_bind(control(bind=bind, port=self.PORT))
 
     def test_funnel_or_a_tcp_forward_on_any_route_to_the_port_is_reported(self) -> None:
@@ -438,33 +440,33 @@ class ResolveBindTest(unittest.TestCase):
         self.assertEqual((bind.address, bind.https), ("127.0.0.1", None))
         [warning] = bind.warnings
         self.assertIn(f"Funnel offers {TS_NAME}:443", warning)
-        self.assertEqual(self.resolve("127.0.0.1", ip=self.TS_IP), server.Bind("127.0.0.1"), "no route, no warning")
-        self.assertEqual(self.resolve("tailscale"), server.Bind("127.0.0.1", warnings=(server.NO_TAILSCALE,)),
+        self.assertEqual(self.resolve("127.0.0.1", ip=self.TS_IP), Bind("127.0.0.1"), "no route, no warning")
+        self.assertEqual(self.resolve("tailscale"), Bind("127.0.0.1", warnings=(server.SITE.say(web.NO_TAILSCALE),)),
                          "Tailscale stopped: the page stays on this computer, and it says so")
 
     def test_routes_checked_while_serve_runs(self) -> None:
-        def check(bind: server.Bind, serve: str) -> str | None:
-            with mock.patch.object(server, "_tailscale", lambda *args: serve):
+        def check(bind: Bind, serve: str) -> str | None:
+            with mock.patch.object(web, "_tailscale", lambda *args: serve):
                 return server.route_warning(bind, self.PORT)
 
         tcp = serve_status({}, tcp={"2222": {"TCPForward": "127.0.0.1:8101"}})
         funnel = serve_status(self.WEB, funnel={f"{TS_NAME}:443": True})
-        https = server.Bind("127.0.0.1", https=TS_NAME)
+        https = Bind("127.0.0.1", https=TS_NAME)
         self.assertIn("`tailscale serve --tcp=2222 off`", check(https, tcp))
         self.assertIsNone(check(https, serve_status(self.WEB)))
         self.assertIn("Funnel", check(https, funnel), "behind HTTPS, Funnel on the port is unsafe")
-        self.assertIsNone(check(server.Bind("127.0.0.1"), funnel),
+        self.assertIsNone(check(Bind("127.0.0.1"), funnel),
                           "off HTTPS, each request through Funnel is refused already")
-        self.assertIsNone(check(server.Bind(self.TS_IP), tcp),
+        self.assertIsNone(check(Bind(self.TS_IP), tcp),
                           "a route to localhost never reaches the Tailscale address")
 
         # A Funnel TCP forward to the Tailscale address reaches a page listening there, from the internet.
         to_ts = {"2222": {"TCPForward": f"{self.TS_IP}:8101"}}
         public = serve_status({}, funnel={f"{TS_NAME}:2222": True}, tcp=to_ts)
-        self.assertIn("`tailscale funnel --tcp=2222 off`", check(server.Bind(self.TS_IP), public))
-        self.assertIsNone(check(server.Bind(self.TS_IP), serve_status({}, tcp=to_ts)),
+        self.assertIn("`tailscale funnel --tcp=2222 off`", check(Bind(self.TS_IP), public))
+        self.assertIsNone(check(Bind(self.TS_IP), serve_status({}, tcp=to_ts)),
                           "within the tailnet, as the page on the Tailscale address already is")
-        self.assertIsNone(check(server.Bind("127.0.0.1"), public), "it never reaches a page on 127.0.0.1")
+        self.assertIsNone(check(Bind("127.0.0.1"), public), "it never reaches a page on 127.0.0.1")
         # 0.0.0.0 reaches this Mac's loopback, so a forward there counts as one to 127.0.0.1.
         anywhere = serve_status({}, tcp={"2222": {"TCPForward": "0.0.0.0:8101"}})
         self.assertIn("`tailscale serve --tcp=2222 off`", check(https, anywhere))
@@ -479,7 +481,7 @@ class ResolveBindTest(unittest.TestCase):
                 time.sleep(1.5)
 
         controller = StubController()
-        with mock.patch.object(server, "ROUTES_EVERY_S", 0.01):
+        with mock.patch.object(web, "ROUTES_EVERY_S", 0.01):
             http = Server(self, controller, routes=slow_routes)
             deadline = time.monotonic() + 5
             while len(checks) < 2 and time.monotonic() < deadline:

@@ -260,7 +260,7 @@ class ControlShutdown(unittest.TestCase):
 
         from so_101.control import main
         from so_101.policy.engine import EngineDriver
-        from so_101.control.server import Bind
+        from so_101.web.server import Bind
 
         order, robot, test = self.order, self.robot, self
         driver = EngineDriver(make_engine(POLICY_ACTIONS), list(robot.action_features))
