@@ -215,6 +215,22 @@ class PerceptionTest(unittest.TestCase):
         self.assertEqual([e["error"] for e in events if e.get("kind") == "error"], ["RuntimeError: detector bug"])
         self.assertTrue(all(o.action is not None for o in outs), "every tick still drove")
 
+    def test_a_moved_handback_isnt_lost_to_a_later_one_before_the_next_fed_tick(self) -> None:
+        layer = Perception(FakeLeaf(), context([]))
+        layer.begin_episode(1)
+        layer.run(Handback(START))
+        rows = trace()
+        for n, row in enumerate(rows[:5]):
+            layer.step(Robot(), tick(n, row))
+        heard = []
+        layer.detector.resumed = lambda moved, pose: heard.append(moved)
+        layer.pause()
+        layer.run(Handback(PERSON, moved=True))  # a Rewind, then Resume and Pause before any fed tick
+        layer.pause()
+        layer.run(Handback(PERSON, moved=False))  # the next Resume: nothing moved since the last one
+        layer.step(Robot(), tick(5, rows[5]))
+        self.assertEqual(heard, [True], "the detector hears the arm moved since it last saw it")
+
     def test_broken_in_a_skills_run_it_refuses_resume_and_says_so_once(self) -> None:
         for skills in ((), SKILLS):
             with self.subTest(skills=bool(skills)):

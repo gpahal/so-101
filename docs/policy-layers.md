@@ -114,7 +114,8 @@ Every `serve` and `run` recording gets two columns:
 `build --skills --with corrections,policy-successes,...` cuts runs as `build --with` does, then splits each
 cut where the skill changes, by what happened (`build.run_skills`, `skills.label_run`): the attempt's joint
 readings go through one detector as the perception's do, frames a script or a layer's playback moved aren't
-replayed, Teleop frames only while nothing is carried, the sequencer's handback rule applies after each,
+replayed, Teleop frames are (a re-grip in Teleop, the jaws back on the block when it ends, is rolled
+back to place), the sequencer's handback rule applies after each,
 each skill's `to` bound applies, and only the frames a skills model drove keep the skill it was told
 (`control.skill`). So a person's correction is cut by what the arm did, whatever the model was told, and a
 person's re-grip during the carry is never a release.

@@ -30,6 +30,7 @@ on the first skill and switches at each handover, conditioning the model on the 
 one-hot. The recording writes the skill on each frame as control.skill (`policy-layers.md`).
 """
 
+import copy
 import re
 from dataclasses import dataclass
 
@@ -39,7 +40,7 @@ EVENTS = ("start", "close", "lift", "carry", "release", "widest", "end")
 HANDOVERS = ("carry", "release")  # what the detector sees as the policy drives and can switch skills on
 # Raise with any change to LIFT_DEG, WIDEST_WITHIN_S, MIN_SPAN_S or how `events` and `spans` cut a demo, or
 # `label_run` a run: a skills build records it (`data.build_inputs`), so one made under other rules is stale.
-CUT_RULES_VERSION = 3
+CUT_RULES_VERSION = 4
 LIFT_DEG = 4.0  # shoulder_lift travel after the close that counts as the block leaving the mat
 WIDEST_WITHIN_S = 2.0  # the widest opening is looked for this long after the release
 MIN_SPAN_S = 0.5  # a skill's shortest span in any demo
@@ -229,13 +230,16 @@ def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fp
     The attempt's joint readings (`state`, frames x joints named `names`) go through one detector frame
     by frame, as the perception's does at runtime. Each attempt starts on the first skill and moves to the
     next at its handover event. A frame a script moved (`scripted`: the move to the start pose, a Rewind,
-    a layer's playback, the return to rest) isn't fed to the detector, and a frame a person drove in
-    Teleop (`teleop`) is fed only while nothing is carried: a person's close and carry count, so a
-    correction that starts in pick is place from its carry, but a person opening the jaws on a carried
-    block is never a release, because the perception never sees Teleop at runtime. After either, the next
-    frame fed tells the detector the arm moved (`Detector.resumed`), as the perception does after a
-    handback; if it then shows neither a carry nor a release, what was held or let go was undone, and the
-    replay starts again on the first skill, as the sequencer does.
+    a layer's playback, the return to rest) isn't fed to the detector. A frame a person drove in Teleop
+    (`teleop`) is fed: a person's close and carry count, so a correction that starts in pick is place from
+    its carry, and a person's release starts the return. But a person who opens the jaws on a carried
+    block and has them on it again when the Teleop stretch ends (the gripper back in the hold band, where a
+    held block keeps it, not shut further as at rest) re-gripped it: the replay is rolled back
+    to before that stretch's release, so the stretch stays place, as at runtime, where the perception
+    never sees Teleop. After a script or a person, the next frame fed tells the detector the arm moved
+    (`Detector.resumed`), as the perception does after a handback; if it then shows neither a carry nor a
+    release, what was held or let go was undone, and the replay starts again on the first skill, as the
+    sequencer does.
 
     `told` is, per frame, the skill a skills model was told to do (control.skill, mapped onto `skills`),
     -1 where it wasn't driving: it labels those frames, and the replay labels the rest. Last, each skill's
@@ -249,12 +253,21 @@ def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fp
     current, start, closes, found = 0, 0, [], {}
     detector = Detector(thresholds)
     gap = handback = False  # frames since the last one fed weren't fed; a script or a person had the arm
+    # While a person in Teleop has a carried block: the replay as it was before their first frame with it,
+    # and that stretch's first frame, to roll back to if they re-grip it (`_regripped`).
+    saved: tuple | None = None
     for i, row in enumerate(state):
         person = teleop is not None and bool(teleop[i])
-        if scripted[i] or (person and detector.carried):
+        if saved is not None and not person:
+            detector, current, closes, found = _regripped(saved, detector, current, closes, found, state[i - 1],
+                                                          names, thresholds, labels, i)
+            saved = None
+        if scripted[i]:
             gap = handback = True
             labels[i] = current
             continue
+        if person and saved is None and detector.carried and not detector.released:
+            saved = (copy.deepcopy(detector), current, list(closes), dict(found), i)
         pose = dict(zip(names, map(float, row), strict=True))
         if gap or (handback and not person):
             detector.resumed(True, pose)
@@ -271,6 +284,9 @@ def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fp
                 current += 1
         handback |= person
         labels[i] = current
+    if saved is not None:
+        detector, current, closes, found = _regripped(saved, detector, current, closes, found, state[-1],
+                                                      names, thresholds, labels, len(state))
     replays.append((start, len(state), closes, found))
     if told is not None:
         labels = np.where((told >= 0) & ~scripted, told, labels).astype(np.int8)
@@ -283,6 +299,22 @@ def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fp
             piece = labels[a:b]
             piece[(piece == n) & (np.arange(a, b) > bound)] = -1
     return labels
+
+
+def _regripped(saved: tuple, detector, current: int, closes: list, found: dict, last: np.ndarray, names: list[str],
+               thresholds, labels: np.ndarray, end: int):
+    """At the end of a person's Teleop stretch that began with a carried block: if a release happened in it
+    and the gripper is back in the hold band by its last frame (`last`), on a block, not shut as at rest,
+    the person re-gripped the block. The replay
+    goes back to `saved`, and the stretch's frames take the skill it was on then. Returns the replay's
+    detector, skill, closes and events, rolled back or not."""
+    before, skill, kept_closes, kept_found, first = saved
+    low, high = thresholds.gripper.hold_band
+    holding = low <= float(last[names.index("gripper.pos")]) <= high
+    if detector.released and holding:
+        labels[first:end] = skill
+        return before, skill, kept_closes, kept_found
+    return detector, current, closes, found
 
 
 @dataclass(frozen=True)

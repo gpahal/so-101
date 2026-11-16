@@ -106,9 +106,11 @@ uv run so101 serve --skills --policy pi05 --remote
      runtime. The attempt starts on the first skill and moves to the next at its handover event.
   2. Frames a script moved aren't replayed: the move to the start pose, a Rewind, the return to rest
      (`control.phase`) and a layer's playback (`control.driver`). Frames a person drove in Teleop are
-     replayed only while nothing is carried: a person's close and carry count, but a person opening the
-     jaws on a carried block is never a release, since the perception never sees Teleop at runtime. A
-     person who opens the jaws on the block during the carry and closes them again is still in place.
+     replayed: a person's close and carry count, and so does their release, so a person who finishes the
+     task in Teleop is in the return from their release. A person who opens the jaws on a carried block
+     and has the gripper back in the hold band (16.5 to 22, on a block, not shut as at rest) when the
+     Teleop stretch ends re-gripped it: the replay goes back to before that release, and the stretch stays
+     place, as at runtime, where the perception never sees Teleop.
   3. After either, the next frame replayed tells the detector the arm moved (`Detector.resumed`), as the
      perception does after a handback, so its timers start again. If it then shows neither a carry nor a
      release, the replay starts again on the first skill, as the sequencer does at runtime. The tests check

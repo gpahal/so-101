@@ -245,6 +245,21 @@ class RunLabelTest(unittest.TestCase):
         np.testing.assert_array_equal(labels[at["carry"]: at["release"]], 1, "a person's grasp counts")
         np.testing.assert_array_equal(labels[at["release"]:], 2)
 
+    def test_a_person_who_finishes_in_teleop_is_labelled_return_from_their_release(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        # The model reaches; a person takes Teleop before the close, grasps, carries, lets go over the
+        # jar and brings the arm back, and the attempt ends in Teleop.
+        teleop = np.zeros(len(state), dtype=bool)
+        teleop[at["close"] - 10:] = True
+        labels = self.label(state, THREE, teleop=teleop)
+        np.testing.assert_array_equal(labels[: at["carry"]], 0)
+        np.testing.assert_array_equal(labels[at["carry"]: at["release"]], 1)
+        np.testing.assert_array_equal(labels[at["release"]:], 2, "the person's release starts the return")
+        two = self.label(state, teleop=teleop)
+        bound = at["widest"] + round(0.2 * FPS)
+        np.testing.assert_array_equal(two[bound + 1:], -1, "without a return, past place's bound is in none")
+
     def test_a_person_alone_is_labelled_by_the_events_of_what_they_did(self) -> None:
         state = trace()
         at = skills.events(state, NAMES, FPS, GRASP)

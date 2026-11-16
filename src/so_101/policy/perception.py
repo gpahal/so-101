@@ -44,6 +44,8 @@ class Perception(Layer):
 
     def run(self, handback: Handback) -> None:
         self.inner.run(handback)
+        if (earlier := self._handback) is not None and earlier.moved and not handback.moved:
+            handback = replace(handback, moved=True)  # moved since the detector last saw the arm
         self._last, self._handback = None, handback
 
     def pause(self) -> None:
