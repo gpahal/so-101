@@ -44,16 +44,16 @@ class ExecutionTest(unittest.TestCase):
         self.assertEqual(execution.supported_modes, ["rtc_guided"])
         self.assertTrue(execution.rtc.enabled)
         self.assertEqual(execution.rtc.mode, "guided")
-        # Steered over the 1 s the arm can play while a request is out, not LeRobot's default 10 steps.
-        self.assertEqual(execution.rtc.execution_horizon, 30)
+        # Steered over 0.65 s, just past the turnaround, not the whole 1 s queue nor LeRobot's 10 steps.
+        self.assertEqual(execution.rtc.execution_horizon, 20)
         self.assertIsNone(execution.n_action_steps)  # LeRobot refuses a fixed slice with RTC
         client = parse_client("pi05")
         self.assertEqual((client.mode, client.chunk_merge), ("rtc_guided", "append"))
-        # Asks with 1 s left, all of it steered, and holds up to 2 s for a late chunk before failing.
+        # Asks with 1 s left, and holds up to 2 s for a late chunk before failing.
         self.assertEqual((client.refill_seconds, client.action_starvation_grace_s), (1.0, 2.0))
 
     def test_the_steered_horizon_never_exceeds_what_the_model_predicts(self) -> None:
-        self.assertEqual(parse_server("pi05", 20).execution.rtc.execution_horizon, 20)
+        self.assertEqual(parse_server("pi05", 10).execution.rtc.execution_horizon, 10)
 
     def test_act_keeps_plain_aligned_chunks_of_its_action_steps(self) -> None:
         execution = parse_server("act", 100).execution

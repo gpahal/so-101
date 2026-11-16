@@ -52,12 +52,16 @@ EXECUTION = {"act": "chunk", "pi05": "rtc_guided"}
 RTC_REFILL_S = 1.0
 # How long the arm holds its last target when the queue runs out before the run fails (LeRobot: 1 s).
 RTC_STARVATION_GRACE_S = 2.0
-# With RTC, how much of the queued motion the server steers the new chunk to match: all of it, since
-# the arm plays the queue while the request is out, and every step it plays before the new chunk takes
-# over must be steered. LeRobot's default of 10 steps (0.33 s) would leave the seam free. Past the
-# queue, the server pads with its last action, pulling the new chunk toward a hold, so this matches
-# the refill. Seams are steered while the turnaround stays under it.
-RTC_HORIZON_S = RTC_REFILL_S
+# With RTC, how much of the queued motion the server steers the new chunk to match. The seam where the
+# new chunk takes over is steered only while the turnaround (about 0.65 s from India at JPEG quality 50)
+# stays under this; past the seam, every steered step holds the new chunk to the old plan, made from
+# frames about 1 s older. Steering the whole 1 s queue made pi0.5 close its gripper short of the block:
+# at the first close the block sat 0.56 to 0.65 of the way down the wrist picture in the misses,
+# against 0.67 to 0.77 in the demos. 0.33 s (LeRobot's 10 steps) put every close in the demos' range
+# and went 4 of 5, but the seams came after it, unsteered, and the gripper jumped up to 17.7 in a
+# frame (5.0 with 1 s). 0.65 s (20 steps at 30 fps) steers the seam and frees the rest: 4 of 4
+# labelled, with closes at 0.62 to 0.73. A turnaround over it leaves that seam unsteered.
+RTC_HORIZON_S = 0.65
 
 # The script the pi0.5 job runs in place of `lerobot-policy-server`. `setup_script` writes it after a
 # line that sets PIN_UNUSED_ACTIONS. It changes four things in LeRobot before starting its server.
