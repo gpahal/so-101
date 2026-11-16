@@ -58,15 +58,23 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
 - **`LayerContext`**, the same for every layer: `event(type, **fields)` (the run's event log), `clock`,
   `grasp` (the gripper and rule thresholds, `grasp/grasp.toml`) and `program` (the supervisor's program,
   `supervisor/program.toml`, whose `watch.near` the perception reads).
-- A layer's own exceptions are its own: logged once, and the layer becomes a pass-through. An exception
-  from the arm or the model reaches the loop unchanged.
+- A layer's own exceptions are its own (`Layer.safely`): logged once as an `error` event, announced once
+  through `maintain`, and the layer becomes a pass-through. `safely` wraps only the layer's own logic:
+  every call down the stack runs outside it, so an exception from the arm or the model reaches the loop
+  unchanged. In a skills run the perception and the sequencer are `essential` (`stack.build` marks them):
+  either one broken reports itself in `health().failure`, so the loop faults and Resume is refused, rather
+  than the model staying on its first skill.
 
 ## The layers
 
 - **`EngineDriver`** (`policy/engine.py`, from `control/policy.py`): unchanged inside, plus `condition`.
 - **`Perception`** (`policy/perception.py`): one detector per attempt, fed on each tick the model drove,
   with the policy's own seconds. Logs a `grasp` event for each close, carry, regrasp and release, and a
-  `rule` event when a stuck rule fires. On a handback it restarts the detector's timers.
+  `rule` event when a stuck rule fires. After a handback, on the next tick it feeds, it calls
+  `Detector.resumed(moved, pose)`: the detector's timers start again, and after a move with the jaws open
+  it forgets the open close, the carry and the release, so a close a playback undid is no regrasp and a
+  second grasp is seen in full. The detector (`grasp/detector.py`) counts hover and frozen time only on
+  ticks the model's action reached the arm.
 - **`SkillSequencer`** (`policy/skills.py`): starts each attempt on the first skill; at the next skill's
   handover signal it conditions the model on that skill and logs a `skill` event. On a handback with
   `moved`, it checks the gripper on its next tick: reading open, it goes back to the first skill, since
@@ -109,5 +117,6 @@ Each piece is an episode with its skill's prompt and one-hot. A piece under 0.5 
 A contract suite runs against every policy (the leaf over a scripted engine, each layer over a fake leaf,
 and the full stack): nothing reaches the arm after `pause`; `begin_episode`, `end_episode`, `condition`,
 `health` and `record_failure` reach the leaf; a handback reaches the leaf; `maintain` returns a list; a
-layer's own error never escapes. Each layer has its own tests on top, including the playback that undoes a
+layer's own error never escapes, checked by making each of every layer's own methods raise in turn while a
+demo's trace is stepped through, with its pauses and resumes; `stop` reaches the leaf. Each layer has its own tests on top, including the playback that undoes a
 grasp sending the skill back to the first.

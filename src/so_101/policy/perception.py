@@ -7,8 +7,10 @@ up the stack in the Output (`signals`, `readings`), so the layers above read one
 disagree about whether a carry happened.
 
 It logs a `grasp` event for each close, carry, regrasp and release, and a `rule` event when a stuck rule
-fires, each with the model's seconds, so every run's events mark its grasps whatever model ran. On a
-handback it restarts the detector's timers, since something else held or moved the arm meanwhile.
+fires, each with the model's seconds, so every run's events mark its grasps whatever model ran. After a
+handback, on the next tick it feeds, it tells the detector whether the arm moved and where it is
+(`Detector.resumed`): the detector's timers start again, and after a move with the jaws open its grasp
+does too, so a close a playback undid is never counted as a regrasp.
 """
 
 from dataclasses import replace
@@ -24,12 +26,17 @@ class Perception(Layer):
         self.detector = None
         self.t = 0.0
         self._last: float | None = None
+        self._handback: Handback | None = None  # told to the detector with the next tick's pose
 
     def begin_episode(self, number: int) -> None:
+        self.inner.begin_episode(number)
+        self.detector = None
+        self.safely(self._begin)
+
+    def _begin(self) -> None:
         from so_101.grasp.detector import Detector
 
-        self.detector, self.t, self._last = Detector(self.ctx.grasp), 0.0, None
-        self.inner.begin_episode(number)
+        self.detector, self.t, self._last, self._handback = Detector(self.ctx.grasp), 0.0, None, None
 
     def end_episode(self) -> None:
         self.inner.end_episode()
@@ -37,9 +44,7 @@ class Perception(Layer):
 
     def run(self, handback: Handback) -> None:
         self.inner.run(handback)
-        self._last = None
-        if self.detector is not None:
-            self.detector.resumed()
+        self._last, self._handback = None, handback
 
     def pause(self) -> None:
         self.inner.pause()
@@ -49,22 +54,29 @@ class Perception(Layer):
         out = self.inner.step(robot, tick)
         if self.detector is None or out.driver not in (POLICY, WAITING) or self.broken is not None:
             return out
-        found = []
-        self.safely(self._watch, tick, out.driver == POLICY, found)
-        return out if self.broken is not None else replace(out, signals=tuple(found), readings=self.readings())
+        seen: list = []
+        if not self.safely(self._watch, tick, out.driver == POLICY, seen):
+            return out
+        signals, readings = seen
+        return replace(out, signals=signals, readings=readings)
 
-    def _watch(self, tick: Tick, drove: bool, found: list) -> None:
+    def _watch(self, tick: Tick, drove: bool, seen: list) -> None:
+        if (handback := self._handback) is not None:
+            self._handback = None
+            self.detector.resumed(handback.moved, tick.pose)
         dt = 0.0 if self._last is None else min(max(tick.now - self._last, 0.0), MAX_STEP_S)
         self._last = tick.now
         self.t += dt
+        found = []
         for signal in self.detector.step(self.t, tick.pose, drove):
             found.append(signal)
             kind = "rule" if signal.kind == "rule" else "grasp"
             self.ctx.event(kind, **({"name": signal.name} if signal.name else {}),
                            **({} if kind == "rule" else {"grasp": signal.kind}), policy_t=round(signal.t, 2),
                            **signal.detail)
+        seen += [tuple(found), self.readings()]
 
     def readings(self) -> Readings:
         d = self.detector
-        return Readings(round(self.t, 3), tuple(d.near(self.ctx.program.watch.near)), d.closes, d.regrasps, d.carried, d.released,
-                        tuple(sorted(d.fired)))
+        return Readings(round(self.t, 3), tuple(d.near(self.ctx.program.watch.near)), d.closes, d.regrasps, d.carried,
+                        d.released, tuple(sorted(d.fired)))

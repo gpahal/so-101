@@ -4,9 +4,12 @@ stuck rules. Pure: it keeps its own counters and touches nothing, so tests, `so1
 
 Feed it only the ticks the policy drives (`step`), with each tick's time, pose and whether the policy's
 action reached the arm. A tick where the policy sent nothing (a cloud GPU's late chunk) still moves the
-clock, but counts toward neither the frozen rule nor the policy's driving time. Call `resumed` when the
-policy drives again after anything else (a pause, a rewind, Teleop): the speed window and the rules'
-running timers start again, because the pose jumped.
+clock, but counts toward neither the hover and frozen rules nor the policy's driving time. Call
+`resumed(moved, pose)` when the policy drives again after anything else (a pause, a playback, Teleop),
+with whether the arm may have moved meanwhile and where it is now: the speed window and the rules'
+running timers start again, because the pose jumped. After a move with the jaws open, whatever was
+closed, carried or released is undone (a playback opened the jaws, or a person put the block back), so
+the next close starts a new grasp and nothing is inferred across the gap.
 
 The signals, in the order they can happen in one attempt:
 - `close`: the gripper fell below `closed_below`.
@@ -57,13 +60,21 @@ class Detector:
 
     # --- Feeding it ------------------------------------------------------------------------------
 
-    def resumed(self) -> None:
-        """The policy drives again after something else moved or held the arm."""
+    def resumed(self, moved: bool, pose: dict[str, float]) -> None:
+        """The policy drives again after something else held the arm, or moved it (`moved`), leaving
+        it at `pose`. With the jaws open after a move, the open close, the carry and the release are
+        forgotten, and the gripper's last reading is this one, so reopened jaws aren't a regrasp. With
+        them closed, the last reading stays the policy's: jaws a person closed count as a close."""
         self._last_t = None
         self._window.clear()
         self._crossings.clear()
         self._hold_value = self._hold_since = None
         self._hover_s = self._frozen_s = 0.0
+        g = pose[GRIPPER]
+        if moved and g >= self.p.gripper.closed_below:
+            self.carried = self.released = False
+            self._close = self._carry_hold = None
+            self._last_g = g
 
     def step(self, t: float, pose: dict[str, float], drove: bool = True) -> list[Signal]:
         """One policy tick at `t` seconds with the arm at `pose`. Returns what happened on it."""
@@ -142,8 +153,8 @@ class Detector:
         if not self.carried:
             far = max(abs(pose[j] - self._start[j]) for j in ARM)
             hovering = g > r.hover_open_above and slow and self.speed < r.hover_speed_below and far > r.hover_from_start_deg
-            self._hover_s = self._hover_s + dt if hovering else 0.0
-            if drove:  # a tick the policy sent nothing neither counts nor resets
+            if drove:  # a tick the policy sent nothing neither counts nor resets: the arm stands still waiting
+                self._hover_s = self._hover_s + dt if hovering else 0.0
                 self._frozen_s = self._frozen_s + dt if slow and self.speed < r.frozen_speed_below else 0.0
         progress = self.progress()
         for name, value in progress.items():

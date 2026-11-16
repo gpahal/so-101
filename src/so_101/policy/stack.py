@@ -4,6 +4,9 @@
 
 Perception is always there, so every run logs its grasps; it reads the gripper and rule thresholds
 (`grasp.thresholds`) and the supervisor program's `watch.near`, which therefore load for every run.
+In a skills run the perception and the sequencer are essential (`Layer.essential`): the skill changes
+only on what the perception sees, so either one broken refuses Resume rather than leave the model on its
+first skill.
 """
 
 from so_101.policy.base import LayerContext, Policy
@@ -17,7 +20,9 @@ def build(driver, ctx: LayerContext, *, skills: tuple = (), judges=None, mode: s
     if skills:
         from so_101.policy.skills import SkillSequencer
 
+        policy.essential = True
         policy = SkillSequencer(policy, ctx, skills)
+        policy.essential = True
     if mode in ("shadow", "act"):
         from so_101.supervisor.layer import Supervisor
 

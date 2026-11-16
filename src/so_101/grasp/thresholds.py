@@ -6,15 +6,18 @@ arm moves or a demo is cut, rather than changing what the perception sees. The f
 each number means and where it came from. `[gripper]` and `[rules]` each carry a `version`.
 """
 
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+from so_101.settings import ConfigError
 
 DEFAULT = Path(__file__).with_name("grasp.toml")
 RULES = ("regrasp_loop", "hover", "chatter", "frozen", "no_carry", "not_released")
 
 
-class ThresholdsError(ValueError):
+class ThresholdsError(ConfigError):
     pass
 
 
@@ -59,6 +62,8 @@ def number(table: dict, key: str, where: str, *, minimum: float = 0.0, strict: b
     value = table.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise error(f"{where}.{key} is {value!r}: it must be a number.")
+    if not math.isfinite(value):
+        raise error(f"{where}.{key} is {value!r}: it must be a finite number.")
     if value < minimum or (strict and value == minimum):
         raise error(f"{where}.{key} is {value!r}: it must be {'over' if strict else 'at least'} {minimum:g}.")
     return float(value)
@@ -103,7 +108,8 @@ def load(path: Path | None = None) -> Thresholds:
 def _parse(data: dict, path: Path) -> Thresholds:
     g = section(data, "gripper")
     band = g.get("hold_band")
-    if not (isinstance(band, list) and len(band) == 2 and all(isinstance(v, (int, float)) for v in band)
+    if not (isinstance(band, list) and len(band) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in band)
             and 0 < band[0] < band[1]):
         raise ThresholdsError(f"gripper.hold_band is {band!r}: it must be [low, high] with 0 < low < high.")
     gripper = Gripper(

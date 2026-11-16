@@ -25,6 +25,7 @@ class SkillSequencer(Layer):
         self.skills = skills
         self.current = 0
         self._recheck = False
+        self._tell: Conditioning | None = None  # for the model: told outside `safely`, so its errors are its own
 
     @property
     def skill(self):
@@ -32,14 +33,17 @@ class SkillSequencer(Layer):
 
     def _switch(self, index: int, cause: str, frame: int | None = None) -> None:
         previous, self.current = self.skill.name, index
-        self.inner.condition(Conditioning(self.skill.prompt, tuple(s.name for s in self.skills), index))
+        self._tell = Conditioning(self.skill.prompt, tuple(s.name for s in self.skills), index)
         self.ctx.event("skill", skill=self.skill.name, index=index, cause=cause,
                        **({"previous": previous} if cause != "start" else {}))
 
     def begin_episode(self, number: int) -> None:
         self.inner.begin_episode(number)
-        self._recheck = False
-        self._switch(0, "start")
+        self._recheck, self._tell = False, None
+        self.safely(self._switch, 0, "start")
+        if (told := self._tell) is not None:
+            self._tell = None
+            self.inner.condition(told)
 
     def run(self, handback: Handback) -> None:
         self.inner.run(handback)
@@ -49,8 +53,14 @@ class SkillSequencer(Layer):
         if self._recheck:
             self._recheck = False
             self.safely(self._after_handback, tick)
+            if (told := self._tell) is not None:
+                self._tell = None
+                self.inner.condition(told)
         out = self.inner.step(robot, tick)
         self.safely(self._handover, out)
+        if (told := self._tell) is not None:
+            self._tell = None
+            self.inner.condition(told)
         return replace(out, skill=self.current)
 
     def _after_handback(self, tick: Tick) -> None:

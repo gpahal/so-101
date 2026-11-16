@@ -10,13 +10,17 @@ Outputs flow up the stack: a layer reads the signals and readings of the one bel
 gets back, and returns it, or its own. Only the leaf (`engine.EngineDriver`) acts on a `Conditioning`;
 layers pass it down, so where a layer sits never changes what the model is told.
 
-A layer's own exceptions are its own (`Layer.safely`): logged once, after which the layer passes every
-call through. An exception from the arm or the model reaches the loop unchanged.
+A layer's own exceptions are its own (`Layer.safely`): logged once and announced once through
+`maintain`, after which the layer passes every call through. `safely` wraps only the layer's own logic:
+every call down the stack runs outside it, so an exception from the arm or the model reaches the loop
+unchanged. A layer the run can't do without (`essential`: the perception and the skill sequencer of a
+skills run, whose skill would otherwise never change) reports itself broken in `health`, which refuses
+Resume.
 """
 
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 # Who drove the arm on a tick, as `Output.driver` and the recording's control.driver column say.
@@ -135,6 +139,8 @@ class Layer:
     ctx: LayerContext
     name: str = "layer"
     broken: str | None = field(default=None, init=False)  # why the layer stopped, after an error of its own
+    essential: bool = field(default=False, init=False)  # broken, it refuses Resume (`health`): set by stack.build
+    _said: list[str] = field(default_factory=list, init=False)  # for the operator, through `maintain`
 
     def start(self) -> None:
         self.inner.start()
@@ -167,17 +173,31 @@ class Layer:
         self.inner.condition(conditioning)
 
     def maintain(self) -> list[str]:
-        return self.inner.maintain()
+        messages = self.inner.maintain()
+        return [*messages, *self.said()]
 
     def health(self) -> Health:
-        return self.inner.health()
+        health = self.inner.health()
+        if self.essential and self.broken is not None and health.failure is None:
+            return replace(health, failure=f"the {self.name} layer stopped after an error: {self.broken}")
+        return health
 
     def record_failure(self, detail: str) -> None:
         self.inner.record_failure(detail)
 
+    def say(self, text: str) -> None:
+        """Tell the operator `text`, through the next `maintain`."""
+        self._said.append(text)
+
+    def said(self) -> list[str]:
+        """What the layer has to tell the operator since the last call."""
+        said, self._said = self._said, []
+        return said
+
     def safely(self, fn, *args) -> bool:
-        """Run the layer's own logic. An exception is logged once as an `error` event, and from then on
-        `safely` runs nothing: the layer passes through. Returns whether `fn` ran without raising."""
+        """Run the layer's own logic, never a call down the stack. An exception is logged once as an
+        `error` event and announced once through `maintain`, and from then on `safely` runs nothing: the
+        layer passes through. Returns whether `fn` ran without raising."""
         if self.broken is not None:
             return False
         try:
@@ -186,6 +206,9 @@ class Layer:
         except Exception as error:
             self.broken = f"{type(error).__name__}: {error}"
             self.ctx.event(self.name, kind="error", error=self.broken, traceback=traceback.format_exc()[-2000:])
+            then = ("Resume is refused until so101 restarts: the run can't go on without it." if self.essential
+                    else "The policy runs without it.")
+            self.say(f"{self.name.capitalize()} layer: stopped after an error ({self.broken}). {then}")
             self.failed()
             return False
 

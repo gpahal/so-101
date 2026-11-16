@@ -21,8 +21,8 @@ from so_101.supervisor import judges as J
 FRAME = np.zeros((48, 64, 3), np.uint8)
 
 
-def judges():
-    return J.Judges(PROGRAM, adapters={"jev": FakeModel({}), "gemini-3.8-flash": FakeModel({}),
+def judges(answers: dict | None = None):
+    return J.Judges(PROGRAM, adapters={"jev": FakeModel(answers or {}), "gemini-3.8-flash": FakeModel(answers or {}),
                                        "claude-opus-5.5": FakeEscalation()}, pool=Pool())
 
 
@@ -30,14 +30,35 @@ def context(events: list) -> LayerContext:
     return LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: 0.0, GRASP, PROGRAM)
 
 
-def stacks():
-    """(name, the policy, the leaf it ends in) for each policy under contract."""
-    for name, kwargs in (("perception", {}), ("skills", {"skills": SKILLS}),
-                         ("supervisor shadow", {"judges": judges(), "mode": "shadow"}),
-                         ("supervisor act", {"judges": judges(), "mode": "act"}),
-                         ("full stack", {"skills": SKILLS, "judges": judges(), "mode": "act"})):
-        leaf = FakeLeaf()
-        yield name, stack.build(leaf, context([]), cameras=("top", "wrist"), **kwargs), leaf
+KINDS = (("perception", {}), ("skills", {"skills": SKILLS}),
+         ("supervisor shadow", {"mode": "shadow"}),
+         ("supervisor act", {"mode": "act"}),
+         ("full stack", {"skills": SKILLS, "mode": "act"}))
+
+
+def stacks(events: list | None = None, answers: dict | None = None):
+    """(name, the policy, the leaf it ends in) for each policy under contract. Its events go to `events`;
+    both judges answer `answers` (moment: p_wrong)."""
+    for name, kwargs in KINDS:
+        leaf = Leaf()
+        if "mode" in kwargs:
+            kwargs = {**kwargs, "judges": judges(answers)}
+        yield name, stack.build(leaf, context(events if events is not None else []), cameras=("top", "wrist"),
+                                **kwargs), leaf
+
+
+def layers(policy) -> list:
+    """The layers of a stack, top first."""
+    found = []
+    while hasattr(policy, "inner"):
+        found.append(policy)
+        policy = policy.inner
+    return found
+
+
+class Leaf(FakeLeaf):
+    def stop(self) -> None:
+        self.calls.append("stop")
 
 
 class Robot:
@@ -98,6 +119,38 @@ class ContractTest(unittest.TestCase):
                 self.assertEqual(len(robot.goals), before, "a hold sends no goal of a layer's own")
                 self.assertEqual(leaf.calls[-1], "pause")
 
+    def test_stop_reaches_the_model(self) -> None:
+        for name, policy, leaf in stacks():
+            with self.subTest(name):
+                policy.stop()
+                self.assertEqual(leaf.calls[-1], "stop")
+
+    def test_a_layer_s_own_error_never_escapes(self) -> None:
+        """Each layer's own methods, one at a time, raise: no call the loop makes raises, the error is logged
+        and announced once, and the model is still stepped. The judges call every close a miss, so the
+        supervisor's playbacks, holds and asks run too."""
+        for name, _, _ in stacks():
+            cases = [(n, type(layer), method) for n, layer in enumerate(layers(dict(
+                (k, p) for k, p, _ in stacks())[name])) for method in own_methods(type(layer))]
+            for depth, kind, method in cases:
+                with self.subTest(name, layer=kind.__name__, method=method):
+                    events: list = []
+                    policy, leaf = next((p, leaf) for k, p, leaf in stacks(events, {"after_close": 0.95,
+                                                                                    "stuck": 0.95}) if k == name)
+                    broken = layers(policy)[depth]
+
+                    def raises(*args, **kwargs):
+                        raise RuntimeError(f"{method} bug")
+
+                    setattr(broken, method, raises)
+                    said = drive(policy)
+                    errors = [e for e in events if e.get("kind") == "error"]
+                    self.assertLessEqual(len(errors), 1)
+                    if errors:
+                        self.assertEqual(errors[0]["type"], broken.name)
+                        self.assertEqual(len([line for line in said if "stopped after an error" in line]), 1)
+                    self.assertGreater(len(leaf.calls), 0)
+
     def test_the_layers_are_composed_in_one_order(self) -> None:
         _, top, leaf = list(stacks())[-1]
         order = []
@@ -106,6 +159,44 @@ class ContractTest(unittest.TestCase):
             top = top.inner
         self.assertEqual(order, ["supervisor", "skills", "perception"])
         self.assertIs(top, leaf)
+
+
+def own_methods(kind) -> list[str]:
+    """The private methods a layer class defines itself: its own logic."""
+    return sorted(name for name, value in vars(kind).items()
+                  if name.startswith("_") and not name.startswith("__") and callable(value))
+
+
+def drive(policy, ticks: int = 300) -> list[str]:
+    """Step `policy` through a demo's trace as the loop does, pausing it on an ask and resuming it a few ticks
+    later, then end the attempt. Returns what `maintain` said."""
+    said: list[str] = []
+    robot, rows = Robot(), trace()
+    policy.start()
+    policy.begin_episode(1)
+    policy.run(Handback(START))
+    policy.condition(Conditioning("do it"))
+    paused = 0
+    for n in range(ticks):
+        said += policy.maintain()
+        policy.health()
+        if paused:
+            policy.hold(robot)
+            paused -= 1
+            if not paused:
+                policy.run(Handback(PERSON, moved=True))
+            continue
+        out = policy.step(robot, tick(n, rows[min(n, len(rows) - 1)]))
+        if out.asks is not None:
+            policy.pause()
+            paused = 5
+    policy.pause()
+    said += policy.maintain()
+    policy.end_episode()
+    said += policy.maintain()
+    policy.stop()
+    policy.close()
+    return said
 
 
 class PerceptionTest(unittest.TestCase):
@@ -123,6 +214,41 @@ class PerceptionTest(unittest.TestCase):
         outs = [layer.step(Robot(), tick(n, row)) for n, row in enumerate(trace()[:10])]
         self.assertEqual([e["error"] for e in events if e.get("kind") == "error"], ["RuntimeError: detector bug"])
         self.assertTrue(all(o.action is not None for o in outs), "every tick still drove")
+
+    def test_broken_in_a_skills_run_it_refuses_resume_and_says_so_once(self) -> None:
+        for skills in ((), SKILLS):
+            with self.subTest(skills=bool(skills)):
+                events = []
+                policy = stack.build(FakeLeaf(), context(events), skills=skills)
+                perception = layers(policy)[-1]
+                policy.begin_episode(1)
+                policy.run(Handback(START))
+
+                def broken(*args):
+                    raise RuntimeError("detector bug")
+
+                perception.detector.step = broken
+                policy.step(Robot(), tick(0, trace()[0]))
+                said = policy.maintain() + policy.maintain()
+                self.assertEqual(len([line for line in said if line.startswith("Perception layer: stopped")]), 1)
+                failure = policy.health().failure
+                if skills:
+                    self.assertIn("perception layer stopped after an error: RuntimeError: detector bug", failure)
+                else:
+                    self.assertIsNone(failure, "without skills the model drives on without it")
+
+    def test_a_broken_skill_sequencer_refuses_resume(self) -> None:
+        policy = stack.build(FakeLeaf(), context([]), skills=SKILLS)
+        sequencer = layers(policy)[0]
+
+        def broken(*args):
+            raise RuntimeError("handover bug")
+
+        sequencer._handover = broken
+        policy.begin_episode(1)
+        policy.run(Handback(START))
+        policy.step(Robot(), tick(0, trace()[0]))
+        self.assertIn("skills layer stopped", policy.health().failure)
 
     def test_a_layer_s_playback_or_hold_is_never_fed_to_the_detector(self) -> None:
         events = []

@@ -349,16 +349,20 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual(h.switches(), [("pick", "start"), ("place", "carry")])
 
     def test_a_playback_that_undoes_the_grasp_sends_the_skill_back_to_pick(self) -> None:
-        """The gap the uniform design closes: the carry switches to place, then the after-close check
-        says the grasp was wrong, and the supervisor plays back to before the close."""
+        """The gap the uniform design closes: the carry switches to place, then the after-close check, asked
+        after the carry, finds the jaws empty, and the supervisor plays back to before the close."""
         from test_supervisor import FakeModel, FakeEscalation, Pool
 
         events, now = [], [0.0]
         leaf = FakeLeaf()
-        pool = Pool(now=False)  # the after-close verdict arrives only after the carry has switched skills
-        made = J.Judges(PROGRAM, adapters={"jev": FakeModel({"after_close": 0.95}), "gemini-3.8-flash": FakeModel({}),
-                                           "claude-opus-5.5": FakeEscalation()}, pool=pool)
-        ctx = LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: now[0], GRASP, PROGRAM)
+        # The check looks only after the carry has switched skills (an empty carry), and both judges call
+        # it wrong; the first playback reaches back past the close.
+        program_ = dataclasses.replace(PROGRAM, after_close_s=2.5, miss_rewind_s=(3.0, 5.0))
+        pool = Pool()
+        made = J.Judges(program_, adapters={"jev": FakeModel({"after_close": 0.95}),
+                                            "gemini-3.8-flash": FakeModel({"after_close": 0.95}),
+                                            "claude-opus-5.5": FakeEscalation()}, pool=pool)
+        ctx = LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: now[0], GRASP, program_)
         top = stack.build(leaf, ctx, skills=SKILLS, judges=made, mode="act", cameras=("top", "wrist"))
         top.begin_episode(1)
         top.run(Handback(START))
@@ -372,7 +376,6 @@ class SequencerTest(unittest.TestCase):
             pose = dict(zip(NAMES, map(float, row), strict=True))
             top.step(robot, Tick(now[0], n, {**pose, "top": frame, "wrist": frame}, pose))
         self.assertEqual(top.inner.skill.name, "place", "the carry switched to place first")
-        pool.run()  # the after-close check comes back: wrong
         n = len(state)
         for _ in range(6 * FPS):  # the playback runs, then the stack has the arm again
             now[0] += 1 / FPS

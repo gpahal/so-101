@@ -6,30 +6,37 @@
 # The numbers were fitted offline on 150 recorded ACT and pi0.5 attempts from the first, 5-spot demos
 # (docs/supervisor.md), and scored on the same attempts. Those recordings are deleted, and the policies
 # trained on the new demos fail in their own ways: refit every number on new serve runs before trusting it.
-version = 3
+# The time limits below are unmeasured: no judge has answered from the arm yet.
+version = 4
 
 [timing]
 after_close_s = 1.0        # the event check looks this long after a close
 after_release_s = 1.5      # and this long after a release
+# An after_close check still unanswered this many seconds of the policy's time after it was asked is
+# dropped: by then the first playback (miss_rewind_s) would no longer reach back past the close, so
+# after_close_s + this must be at most the first miss_rewind_s.
+after_close_answer_s = 1.5
+hold_deadline_s = 5.0      # a hold whose watch check hasn't cleared it by then asks for a person
+home_within_s = 10.0       # a done ask waits for the arm at rest, or this many seconds of the policy's time after the release
 
 [watch]
-near = 0.7                 # a rule this close to firing (its progress, 0 to 1) starts the watch check
-period_s = 1.0
-lookback_s = 2.0           # its second frame is from this long before
-max_per_attempt = 12
+near = 0.7                 # a rule this close to firing (its progress, 0 to 1) is reported as near in each Output
+lookback_s = 2.0           # the watch check's second frame is from this long before; at most 4 s, the frames kept
 
 [judges]
 decision = "jev"                  # a failbench model key: fast, a probability per question
-chat = "gemini-3.8-flash"         # asked at the same time at events, and trusted when the decision model is unsure
+chat = "gemini-3.8-flash"         # asked at the same time at events; a playback needs it to say wrong too
 escalation = "claude-opus-5.5"    # reads the attempt's closes and log when the others can't settle it
 sure_ok_below = 0.2               # p_wrong under this is a sure ok
 sure_wrong_above = 0.8            # and over this a sure wrong
 success_p_wrong = 0.1             # after a release, the task counts as done only when both judges answer under this
+answer_within_s = 5.0             # a judge that hasn't answered a check by then counts as no answer
 max_cost_usd = 2.0                # per run; the checks stop once the run has spent this
 
 [responses]
-# For the nth miss an after_close check found, the supervisor plays back this many seconds of the policy's
-# own motion, newest first, then hands the arm back to the policy. 2.5 s is one of serve's Rewinds
-# ([control] rewind_s): it undoes a close and the lift after it. A miss past the list, or a stuck rule,
-# holds the arm, asks the watch check, and asks a person unless that check is sure nothing is wrong.
+# For the nth miss, which both judges must call wrong, the supervisor plays back this many seconds of the
+# policy's own motion, newest first, then hands the arm back to the policy. 2.5 s is one of serve's
+# Rewinds ([control] rewind_s): it undoes a close and the lift after it. A miss past the list, or a stuck
+# rule, holds the arm, asks the watch check, and asks a person unless that check is sure nothing is wrong.
+# While the list has rungs left and both judges answer, a regrasp loop is left to it.
 miss_rewind_s = [2.5, 5.0]

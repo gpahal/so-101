@@ -148,9 +148,8 @@ def policy_parts(s):
 
     load_env(s.path.parent / ".scratch" / "bench.env")
     made = judges.Judges(loaded)
-    missing = ", ".join(f"{key} ({why})" for key, why in made.missing.items())
-    print(f"Supervisor: {s.supervisor.mode} mode, program v{loaded.version}."
-          + (f" Left out: {missing}." if missing else ""), flush=True)
+    # The layer tells the operator once which judges are left out, and why, when it starts.
+    print(f"Supervisor: {s.supervisor.mode} mode, program v{loaded.version}.", flush=True)
     return grasp, loaded, made
 
 
@@ -385,7 +384,10 @@ def control(cfg) -> None:
 
         cleanup.callback(disconnect_follower)
         driver = EngineDriver.from_context(ctx, reconnect=reconnect)
-        cleanup.callback(driver.stop)
+        policy_layer = None
+        # Once the stack is built, stopping it stops every layer (the supervisor's judges) and then
+        # the model; before that, only the model is there to stop.
+        cleanup.callback(lambda: (policy_layer or driver).stop())
         # The robot's camera keys are the so101.toml camera names. The device watch finds those cameras
         # by usb_id, and the arms by serial number.
         arms = [s.follower, s.leader]

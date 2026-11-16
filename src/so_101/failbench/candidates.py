@@ -38,7 +38,7 @@ def pick(run: str, episode: int, phases: np.ndarray, waiting: np.ndarray, states
             previous = phase
             continue
         if previous is not None and previous != AUTONOMOUS:
-            detector.resumed()
+            detector.resumed(True, dict(zip(names, map(float, states[i]), strict=True)))
         t = len(frames) / fps  # the policy's clock: its frames so far
         frames.append((t, i))
         previous = phase

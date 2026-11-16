@@ -1,21 +1,27 @@
 """The vision checks: the shared judges' adapters (`so_101.vision`), asked from the supervisor's worker pool.
 
-- **Event check** (after a close, after a release, at the end): the decision model and the chat model
-  get the same two frames at the same time. The decision model's answer stands when it's sure; the chat
-  model's when only it is sure; otherwise the check is unsure (`combine`).
-- **Watch check** (while a stuck rule is near or has fired): the decision model, with each camera now
-  and `lookback_s` before.
+- **Event check** (after a close, after a release): the decision model and the chat model get the same
+  frames, as two calls the layer sends at the same time. After a close, a miss needs both sure it's
+  wrong (`both_wrong`); after a release, the decision model's answer stands when it's sure, the chat
+  model's when only it is (`combine`), and success needs both (`success`). `decided` says when the
+  answers in so far settle a check, so a sure answer doesn't wait for the other.
+- **Watch check** (when a stuck rule holds the arm): the decision model, with each camera now and
+  `lookback_s` before.
 - **Escalation**: a frontier chat model through OpenRouter reads a contact sheet of the attempt's closes
   and the detector's log, and picks one of `CHOICES`. It never picks another identical retry.
 
 A judge whose key or SDK is missing is left out at the start and named in the supervisor's start event.
 Every call is counted against the program's `max_cost_usd`; once a run has spent it, checks answer
 with an error instead of calling. Nothing here raises: a failed call is a verdict with `error` set.
+
+The calls run on `DaemonPool`'s threads, so a call that hangs never keeps the process from exiting, and
+closing the pool cancels the calls still queued.
 """
 
+import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from dataclasses import asdict, dataclass
 
 from so_101.supervisor.program import Program
@@ -66,12 +72,38 @@ class Verdict:
 
 
 def combine(program: Program, decision: Verdict | None, chat: Verdict | None) -> str:
-    """The event check's answer: the decision model when it's sure, else the chat model when it is."""
+    """The after_release check's answer: the decision model when it's sure, else the chat model when it is."""
     for verdict in (decision, chat):
         call = verdict.call(program) if verdict is not None else None
         if call in (OK, WRONG):
             return call
     return UNSURE
+
+
+def both_wrong(program: Program, decision: Verdict | None, chat: Verdict | None) -> bool:
+    """A miss: both judges answered, each sure the grasp is wrong. One sure wrong alone plays nothing back."""
+    return all(v is not None and v.call(program) == WRONG for v in (decision, chat))
+
+
+def agree(program: Program, decision: Verdict | None, chat: Verdict | None) -> str:
+    """The after_close check's answer as logged: wrong when both are sure it's wrong, ok when one is sure
+    it's ok and neither sure it's wrong, else unsure."""
+    calls = [v.call(program) if v is not None else None for v in (decision, chat)]
+    if calls == [WRONG, WRONG]:
+        return WRONG
+    return OK if OK in calls and WRONG not in calls else UNSURE
+
+
+def decided(outcome, program: Program, decision: Verdict | None, chat: Verdict | None) -> bool:
+    """Whether `outcome(program, decision, chat)` is settled by the answers in so far: the same whatever a
+    judge still out (None) answers, or fails to."""
+    j = program.judges
+    marks = sorted({0.0, 1.0, j.sure_ok_below, j.sure_wrong_above, j.success_p_wrong})
+    points = [*marks, *((a + b) / 2 for a, b in zip(marks, marks[1:], strict=False))]
+    fills = [None, *(Verdict("?", p_wrong=p) for p in points)]
+    seen = {outcome(program, d, c) for d in ([decision] if decision is not None else fills)
+            for c in ([chat] if chat is not None else fills)}
+    return len(seen) == 1
 
 
 def success(program: Program, decision: Verdict | None, chat: Verdict | None) -> bool:
@@ -108,18 +140,73 @@ def contact_sheet(columns: list[tuple[str, dict]]) -> bytes:
     return jpeg(np.hstack(tiles))
 
 
+class DaemonPool:
+    """A thread pool whose workers are daemon threads: a call that hangs never holds up the process's exit,
+    as ThreadPoolExecutor's workers, which Python joins at exit, would. `shutdown` cancels what's queued."""
+
+    def __init__(self, workers: int, name: str) -> None:
+        self._workers, self._name = workers, name
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._threads: list[threading.Thread] = []
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def submit(self, fn, *args) -> Future:
+        future = Future()
+        with self._lock:
+            if self._closed:
+                future.cancel()
+                return future
+            self._queue.put((future, fn, args))
+            if len(self._threads) < self._workers:
+                thread = threading.Thread(target=self._work, name=f"{self._name}-{len(self._threads)}", daemon=True)
+                self._threads.append(thread)
+                thread.start()
+        return future
+
+    def _work(self) -> None:
+        while (item := self._queue.get()) is not None:
+            future, fn, args = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args))
+            except BaseException as error:  # noqa: BLE001 - the future carries it to whoever reads it
+                future.set_exception(error)
+
+    def shutdown(self, wait: bool = False, cancel_futures: bool = True) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            threads = list(self._threads)
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None and cancel_futures:
+                item[0].cancel()
+        for _ in threads:
+            self._queue.put(None)
+        if wait:
+            for thread in threads:
+                thread.join()
+
+
 class Judges:
     def __init__(self, program: Program, *, adapters=None, pool=None) -> None:
         """`adapters` maps a model key to an object with failbench's `predict(images, moment)` (and, for the
         escalation model, `escalate(sheet, log)`), for tests; without it, failbench's own adapters are made
-        for the models whose key and SDK are there. `pool` runs the calls: a thread pool by default."""
+        for the models whose key and SDK are there. `pool` runs the calls: a `DaemonPool` by default, with
+        a worker for every call one attempt can have out at once and spares for calls that hang."""
         from so_101.vision.models import MODELS
 
         self.p = program
         self.models = {key: MODELS[key] for key in (program.judges.decision, program.judges.chat, program.judges.escalation)}
         self.spent = 0.0
         self._lock = threading.Lock()
-        self._pool = pool or ThreadPoolExecutor(max_workers=4, thread_name_prefix="supervisor-judge")
+        self._pool = pool or DaemonPool(8, "supervisor-judge")
         self.missing: dict[str, str] = {}  # model key -> why it can't be asked
         self._adapters = dict(adapters) if adapters is not None else self._make_adapters()
 
@@ -148,6 +235,7 @@ class Judges:
         return key in self._adapters
 
     def close(self) -> None:
+        """Cancel the calls still queued; a call already running is left to finish, or hang, on its own."""
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def submit(self, fn, *args):
@@ -159,6 +247,10 @@ class Judges:
             if self.spent >= self.p.judges.max_cost_usd:
                 return f"the run has spent its ${self.p.judges.max_cost_usd:g} on checks (max_cost_usd)"
         return None
+
+    def out_of_budget(self) -> str | None:
+        """Why checks no longer call their models: the run has spent `max_cost_usd`. None while it hasn't."""
+        return self._budget()
 
     def _charge(self, cost: float) -> None:
         with self._lock:
@@ -180,12 +272,6 @@ class Judges:
         return Verdict(key, p_wrong=answer.get("p_wrong"), category=answer.get("category"),
                        latency_s=answer.get("latency_s", time.monotonic() - started), cost_usd=cost,
                        error=answer.get("error"))
-
-    def event_check(self, images: list[tuple[str, bytes]], moment: str) -> tuple[Verdict, Verdict]:
-        """The decision and chat models on the same frames, asked at the same time."""
-        chat = self._pool.submit(self.ask, self.p.judges.chat, images, moment)
-        decision = self.ask(self.p.judges.decision, images, moment)
-        return decision, chat.result()
 
     def watch_check(self, now: list[tuple[str, bytes]], before: list[tuple[str, bytes]]) -> Verdict:
         """The decision model on each camera now and `lookback_s` before; the chat model if it's missing."""

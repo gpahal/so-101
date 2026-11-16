@@ -730,29 +730,49 @@ def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] =
 
 
 def check_supervisor(report: Report, s: Settings, problem) -> None:
-    """`[supervisor]`: its program must load (a FAIL in `serve`'s preflight, through `problem`), and a
-    judge without its API key is a warning: the supervisor runs without it. Reads files and the environment only."""
-    if s.supervisor.mode == "off":
-        return
-    from so_101.vision.env import load_env
+    """The grasp thresholds every run's perception reads and the supervisor's program, whatever
+    `[supervisor] mode` is, since both load for every run: each must load (a FAIL in `serve`'s preflight,
+    through `problem`). With the supervisor on, a judge without its API key or its provider's SDK is a
+    warning: the supervisor runs without it. Reads files, the environment and the SDKs' imports only."""
+    from so_101.grasp import thresholds
     from so_101.supervisor import program
 
     try:
+        grasp = thresholds.load(s.perception.thresholds)
+    except thresholds.ThresholdsError as error:
+        problem("perception", str(error), f"fix the file, or delete thresholds under [perception] in {s.path} for "
+                "the package's own")
+        return
+    try:
         loaded = program.load(s.supervisor.program)
     except program.ProgramError as error:
-        problem("supervisor", str(error), f"fix the program, or set mode = \"off\" under [supervisor] in {s.path}")
+        problem("supervisor", str(error), f"fix the program, or delete program under [supervisor] in {s.path} for "
+                "the package's own")
         return
-    load_env(s.path.parent / ".scratch" / "bench.env")
+    versions = (f"program v{loaded.version}, grasp thresholds [gripper] v{grasp.gripper.version} and [rules] "
+                f"v{grasp.rules.version}")
+    if s.supervisor.mode == "off":
+        report.ok("supervisor", f"off; {versions} load")
+        return
+    from so_101.vision.env import load_env
     from so_101.vision.models import MODELS
+    from so_101.vision.providers import sdk_missing
 
+    load_env(s.path.parent / ".scratch" / "bench.env")
     j = loaded.judges
-    missing = [f"{key} needs {MODELS[key].env}" for key in dict.fromkeys((j.decision, j.chat, j.escalation))
-               if not MODELS[key].has_key()]
+    missing = []
+    for key in dict.fromkeys((j.decision, j.chat, j.escalation)):
+        model = MODELS[key]
+        if not model.has_key():
+            missing.append(f"{key} needs {model.env}")
+        elif why := sdk_missing(model.provider):
+            missing.append(f"{key}: {why}")
     if missing:
         report.warn("supervisor", f"{s.supervisor.mode} mode runs without these vision checks: {'; '.join(missing)}",
-                    fix=f"put the keys in {s.path.parent / '.scratch' / 'bench.env'} or the environment")
+                    fix=f"put the keys in {s.path.parent / '.scratch' / 'bench.env'} or the environment, and the "
+                        "SDKs in with `uv sync --group failbench`")
     else:
-        report.ok("supervisor", f"{s.supervisor.mode} mode, program v{loaded.version}, every judge's key is set")
+        report.ok("supervisor", f"{s.supervisor.mode} mode, {versions}, every judge's key and SDK is there")
 
 
 # --- Putting it together --------------------------------------------------------------------------

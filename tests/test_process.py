@@ -352,6 +352,26 @@ class ControlShutdown(unittest.TestCase):
         self.assertFalse(self.motors.torqued(), "the motors turned off")
         self.assertFalse(self.motors.is_open)
 
+    def test_cleanup_stops_the_whole_policy_stack_not_only_the_model(self) -> None:
+        from so_101.policy import stack
+
+        build = stack.build
+
+        def recording_build(*args, **kwargs):
+            built = build(*args, **kwargs)
+            stop = built.stop
+
+            def stopped() -> None:
+                self.order.append("stack stopped")
+                stop()
+
+            built.stop = stopped
+            return built
+
+        with mock.patch.object(stack, "build", recording_build):
+            self.control()
+        self.assertIn("stack stopped", self.order)
+
     def run_json(self) -> dict:
         return json.loads((self.run_dir / "run.json").read_text())
 
