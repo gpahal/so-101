@@ -64,11 +64,13 @@ def cmd_build(a) -> None:
 
 def cmd_candidates(a) -> None:
     from so_101.failbench import candidates
+    from so_101.grasp import thresholds
     from so_101.supervisor import program
 
     if not Path(a.runs).is_dir():
         sys.exit(f"No serve runs at {a.runs}. Record some with `uv run so101 serve`.")
-    rows = candidates.from_runs(Path(a.runs), program.load(Path(a.program) if a.program else None))
+    rows = candidates.from_runs(Path(a.runs), program.load(Path(a.program) if a.program else None),
+                                thresholds.load(Path(a.thresholds) if a.thresholds else None))
     candidates.write(rows, Path(a.out))
     counts = {}
     for row in rows:
@@ -168,7 +170,8 @@ def main(argv=None) -> None:
 
     cd = sub.add_parser("candidates", help="pick frames to label from so101 serve runs, where the supervisor would check")
     cd.add_argument("--runs", default=str(SERVE_RUNS), help="so101 serve and run runs (default %(default)s)")
-    cd.add_argument("--program", help="the supervisor's program file (default: the one in the package)")
+    cd.add_argument("--program", help="the supervisor's program file, for its check delays (default: the one in the package)")
+    cd.add_argument("--thresholds", help="the grasp thresholds file (default: the one in the package)")
     cd.add_argument("--out", default=str(CANDIDATES), help="where to write the rows (default %(default)s)")
     cd.set_defaults(fn=cmd_candidates)
 

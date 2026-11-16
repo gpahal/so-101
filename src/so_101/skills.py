@@ -6,10 +6,10 @@ kept demo from one event to another, plus or minus seconds:
     pick  = { prompt = "...", from = "start", to = "carry + 0.5" }
     place = { prompt = "...", from = "lift", to = "widest + 0.2", handover = "carry" }
 
-The events (`events`) come from the supervisor's detector over the demo's joint readings, with the
-supervisor's program for its thresholds, plus two found here:
+The events (`events`) come from the grasp detector (`grasp.detector`) over the demo's joint readings,
+with the grasp thresholds (`grasp.thresholds`), plus two found here:
 - start, end: the kept demo's first and last frames;
-- close: the gripper drops below the program's closed_below, on the close that led to the carry;
+- close: the gripper drops below the thresholds' closed_below, on the close that led to the carry;
 - lift: shoulder_lift has moved LIFT_DEG since that close;
 - carry: the detector's carry, the gripper holding steady in its band or the elbow carrying;
 - release: the gripper opens past its hold;
@@ -125,12 +125,12 @@ def one_hot(skills: tuple[Skill, ...], index: int) -> np.ndarray:
 # --- Cutting demos ---------------------------------------------------------------------------------
 
 
-def events(state: np.ndarray, names: list[str], fps: float, program) -> dict[str, int]:
+def events(state: np.ndarray, names: list[str], fps: float, thresholds) -> dict[str, int]:
     """Each event's frame in one demo's joint readings (frames x joints, named `names`). Raises
     SkillError when the demo has no carry or release, or the block never leaves the mat."""
-    from so_101.supervisor.detector import Detector
+    from so_101.grasp.detector import Detector
 
-    detector = Detector(program)
+    detector = Detector(thresholds)
     closes, found = [], {}
     for i, row in enumerate(state):
         for signal in detector.step(i / fps, dict(zip(names, map(float, row), strict=True)), True):
@@ -195,7 +195,7 @@ class DemoCuts:
                 "spans": {k: [p.start + a, p.start + b] for k, (a, b) in self.spans.items()}}
 
 
-def cut_demos(s, task, program) -> tuple[list[DemoCuts], list[str]]:
+def cut_demos(s, task, thresholds) -> tuple[list[DemoCuts], list[str]]:
     """Every kept demo's events and spans, from the raw sessions as `so101 build` reads them, and the
     build plan's notes. A demo that can't be cut has its error instead."""
     from so_101 import build
@@ -207,7 +207,7 @@ def cut_demos(s, task, program) -> tuple[list[DemoCuts], list[str]]:
         names = list(p.meta.features["observation.state"]["names"])
         state = column(episode_table(p.meta, p.episode), "observation.state")[p.start:p.stop]
         try:
-            at = events(state, names, p.meta.fps, program)
+            at = events(state, names, p.meta.fps, thresholds)
             out.append(DemoCuts(p, at, spans(task.skills, at, p.meta.fps, len(state))))
         except SkillError as error:
             out.append(DemoCuts(p, None, None, str(error)))

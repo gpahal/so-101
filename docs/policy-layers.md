@@ -52,8 +52,9 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
   sets the engine's task (`set_task`, which pi0.5 reads), adds the one-hot `observation.environment_state`
   to the frame it builds (which ACT reads), and, while the model drives, clears the queued actions, so no
   action for the old skill reaches the arm.
-- **`LayerContext`**, the same for every layer: `event(type, **fields)` (the run's event log), `clock`, and
-  `program` (the gripper and rule thresholds, `supervisor/program.toml`).
+- **`LayerContext`**, the same for every layer: `event(type, **fields)` (the run's event log), `clock`,
+  `grasp` (the gripper and rule thresholds, `grasp/grasp.toml`) and `program` (the supervisor's program,
+  `supervisor/program.toml`, whose `watch.near` the perception reads).
 - A layer's own exceptions are its own: logged once, and the layer becomes a pass-through. An exception
   from the arm or the model reaches the loop unchanged.
 

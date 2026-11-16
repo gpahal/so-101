@@ -1,6 +1,6 @@
 """Perception: the gripper rules over each tick the model drove, for every layer above to read.
 
-One `supervisor.detector.Detector` per attempt, with the program's thresholds, fed the measured joints on
+One `grasp.detector.Detector` per attempt, with the grasp thresholds (`ctx.grasp`), fed the measured joints on
 each tick the model drove (its Output's driver is POLICY or WAITING), at the model's own clock: seconds
 it drove, so a pause or a layer's playback never counts. Each tick's signals and the detector's state go
 up the stack in the Output (`signals`, `readings`), so the layers above read one detector and can't
@@ -26,9 +26,9 @@ class Perception(Layer):
         self._last: float | None = None
 
     def begin_episode(self, number: int) -> None:
-        from so_101.supervisor.detector import Detector
+        from so_101.grasp.detector import Detector
 
-        self.detector, self.t, self._last = Detector(self.ctx.program), 0.0, None
+        self.detector, self.t, self._last = Detector(self.ctx.grasp), 0.0, None
         self.inner.begin_episode(number)
 
     def end_episode(self) -> None:
@@ -66,5 +66,5 @@ class Perception(Layer):
 
     def readings(self) -> Readings:
         d = self.detector
-        return Readings(round(self.t, 3), tuple(d.near()), d.closes, d.regrasps, d.carried, d.released,
+        return Readings(round(self.t, 3), tuple(d.near(self.ctx.program.watch.near)), d.closes, d.regrasps, d.carried, d.released,
                         tuple(sorted(d.fired)))

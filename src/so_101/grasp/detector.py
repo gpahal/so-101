@@ -1,6 +1,6 @@
 """The stuck and event detector: the arm's own readings, one policy tick at a time, into gripper events and
-stuck rules. Pure: it keeps its own counters and touches nothing, so tests and `so101-failbench
-candidates` replay recorded attempts through the same code the supervisor runs.
+stuck rules. Pure: it keeps its own counters and touches nothing, so tests, `so101 skills` and
+`so101-failbench candidates` replay recorded readings through the same code every run's perception runs.
 
 Feed it only the ticks the policy drives (`step`), with each tick's time, pose and whether the policy's
 action reached the arm. A tick where the policy sent nothing (a cloud GPU's late chunk) still moves the
@@ -21,7 +21,7 @@ The signals, in the order they can happen in one attempt:
 from collections import deque
 from dataclasses import dataclass, field
 
-from so_101.supervisor.program import Program
+from so_101.grasp.thresholds import Thresholds
 
 GRIPPER = "gripper.pos"
 ELBOW = "elbow_flex.pos"
@@ -37,8 +37,8 @@ class Signal:
 
 
 class Detector:
-    def __init__(self, program: Program) -> None:
-        self.p = program
+    def __init__(self, thresholds: Thresholds) -> None:
+        self.p = thresholds
         self.fired: set[str] = set()
         self.closes = self.regrasps = 0
         self.carried = self.released = False
@@ -75,11 +75,11 @@ class Detector:
         if drove:
             self.policy_s += dt
         self._window.append((t, pose))
-        while len(self._window) > 2 and self._window[1][0] <= t - p.speed_window_s:
+        while len(self._window) > 2 and self._window[1][0] <= t - p.rules.speed_window_s:
             self._window.popleft()
         first_t, first = self._window[0]
         span = t - first_t
-        self.speed = (max(abs(pose[j] - first[j]) for j in ARM) / span) if span >= p.speed_window_s / 2 else None
+        self.speed = (max(abs(pose[j] - first[j]) for j in ARM) / span) if span >= p.rules.speed_window_s / 2 else None
         signals: list[Signal] = []
         closed_below = p.gripper.closed_below
         prev = self._last_g
@@ -172,6 +172,6 @@ class Detector:
             }
         return {name: value for name, value in values.items() if name not in self.fired}
 
-    def near(self) -> list[str]:
-        """The rules not yet fired that are within the watch's `near` of firing."""
-        return [name for name, value in self.progress().items() if value >= self.p.watch.near]
+    def near(self, within: float) -> list[str]:
+        """The rules not yet fired whose progress is at least `within` (the supervisor's `watch.near`)."""
+        return [name for name, value in self.progress().items() if value >= within]

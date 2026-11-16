@@ -29,11 +29,13 @@ from so_101.policy.base import (LAYER, PERSON, POLICY, START, Conditioning, Hand
                                  LayerContext, Output, Tick)
 from so_101.skills import Point, SkillError
 from so_101.supervisor import judges as J
+from so_101.grasp import thresholds
 from so_101.supervisor import program
 from so_101.tasks import Task
 
 FPS = 30
 PROGRAM = program.load()
+GRASP = thresholds.load()
 NAMES = ["shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos", "wrist_roll.pos", "gripper.pos"]
 TABLE = {
     "pick": {"prompt": "Pick up the red block", "from": "start", "to": "carry + 0.5"},
@@ -101,12 +103,12 @@ class DefinitionTest(unittest.TestCase):
 class CutTest(unittest.TestCase):
     def test_a_grasp_has_every_event_in_order_and_both_spans_hold_the_handover(self) -> None:
         state = trace()
-        at = skills.events(state, NAMES, FPS, PROGRAM)
+        at = skills.events(state, NAMES, FPS, GRASP)
         order = [at[e] for e in skills.EVENTS]
         self.assertEqual(order, sorted(order))
         self.assertEqual((at["start"], at["end"]), (0, len(state) - 1))
-        self.assertLess(state[at["close"], 5], PROGRAM.gripper.closed_below)
-        self.assertAlmostEqual((at["carry"] - at["close"]) / FPS, PROGRAM.gripper.hold_s, delta=0.15)
+        self.assertLess(state[at["close"], 5], GRASP.gripper.closed_below)
+        self.assertAlmostEqual((at["carry"] - at["close"]) / FPS, GRASP.gripper.hold_s, delta=0.15)
         self.assertEqual(state[at["widest"], 5], state[at["release"]:, 5].max())
         spans = skills.spans(SKILLS, at, FPS, len(state))
         self.assertEqual(spans["pick"], (0, at["carry"] + round(0.5 * FPS) + 1))
@@ -115,10 +117,10 @@ class CutTest(unittest.TestCase):
 
     def test_a_demo_that_never_holds_the_block_is_refused(self) -> None:
         with self.assertRaisesRegex(SkillError, "no carry"):
-            skills.events(trace(grasp=False), NAMES, FPS, PROGRAM)
+            skills.events(trace(grasp=False), NAMES, FPS, GRASP)
 
     def test_a_handover_outside_the_spans_it_joins_is_refused(self) -> None:
-        at = skills.events(trace(), NAMES, FPS, PROGRAM)
+        at = skills.events(trace(), NAMES, FPS, GRASP)
         late = skills.parse({**TABLE, "place": {**TABLE["place"], "from": "release"}}, "test")
         with self.assertRaisesRegex(SkillError, "isn't inside both"):
             skills.spans(late, at, FPS, len(trace()))
@@ -212,7 +214,7 @@ class BuildTest(unittest.TestCase):
         actions = [[a[k] for k in START_POSE] for a in opened + closed]
         run_dir = data.task_dir(self.s, TASK) / "runs" / name
         rig = Rig(run_dir, actions=actions, wrap=lambda driver, recorder, clock: stack.build(
-            driver, LayerContext(recorder.event, clock, PROGRAM), skills=SKILLS if with_skills else ()))
+            driver, LayerContext(recorder.event, clock, GRASP, PROGRAM), skills=SKILLS if with_skills else ()))
         rig.start_policy(ticks=5 * FPS)
         rig.reset("succeeded")
         rig.close()
@@ -286,7 +288,7 @@ class Stack:
         self.events: list[dict] = []
         self.now, self.frame = 0.0, -1
         self.leaf = FakeLeaf()
-        ctx = LayerContext(lambda type_, **fields: self.events.append({"type": type_, **fields}), lambda: self.now, PROGRAM)
+        ctx = LayerContext(lambda type_, **fields: self.events.append({"type": type_, **fields}), lambda: self.now, GRASP, PROGRAM)
         self.top = stack.build(self.leaf, ctx, skills=SKILLS)
         self.top.begin_episode(1)
         self.top.run(Handback(START))
@@ -307,7 +309,7 @@ class SequencerTest(unittest.TestCase):
     def test_it_starts_on_the_first_skill_and_switches_once_at_the_carry(self) -> None:
         h = Stack()
         state = trace()
-        at = skills.events(state, NAMES, FPS, PROGRAM)
+        at = skills.events(state, NAMES, FPS, GRASP)
         h.feed(state[: at["carry"]])
         self.assertEqual([c.prompt for c in h.leaf.conditions], [SKILLS[0].prompt])
         self.assertEqual(h.leaf.conditions[0].values(), {"skill.pick": 1.0, "skill.place": 0.0})
@@ -328,7 +330,7 @@ class SequencerTest(unittest.TestCase):
     def test_a_handback_after_the_arm_moved_with_the_jaws_open_goes_back_to_the_first_skill(self) -> None:
         h = Stack()
         state = trace()
-        at = skills.events(state, NAMES, FPS, PROGRAM)
+        at = skills.events(state, NAMES, FPS, GRASP)
         h.feed(state[: at["carry"] + 10])  # on place now
         h.top.pause()
         h.top.run(Handback(LAYER, moved=True))  # a playback undid the grasp: the jaws are open again
@@ -339,7 +341,7 @@ class SequencerTest(unittest.TestCase):
     def test_a_handback_with_the_block_still_held_keeps_the_skill(self) -> None:
         h = Stack()
         state = trace()
-        at = skills.events(state, NAMES, FPS, PROGRAM)
+        at = skills.events(state, NAMES, FPS, GRASP)
         h.feed(state[: at["carry"] + 10])
         h.top.pause()
         h.top.run(Handback(PERSON, moved=True))
@@ -356,14 +358,14 @@ class SequencerTest(unittest.TestCase):
         pool = Pool(now=False)  # the after-close verdict arrives only after the carry has switched skills
         made = J.Judges(PROGRAM, adapters={"jev": FakeModel({"after_close": 0.95}), "gemini-3.8-flash": FakeModel({}),
                                            "claude-opus-5.5": FakeEscalation()}, pool=pool)
-        ctx = LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: now[0], PROGRAM)
+        ctx = LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: now[0], GRASP, PROGRAM)
         top = stack.build(leaf, ctx, skills=SKILLS, judges=made, mode="act", cameras=("top", "wrist"))
         top.begin_episode(1)
         top.run(Handback(START))
         frame = np.zeros((48, 64, 3), np.uint8)
         robot = types.SimpleNamespace(goals=[], send_action=lambda goal: robot.goals.append(dict(goal)))
         state = trace()
-        at = skills.events(state, NAMES, FPS, PROGRAM)
+        at = skills.events(state, NAMES, FPS, GRASP)
         pose = None
         for n, row in enumerate(state[: at["carry"] + 5]):
             now[0] += 1 / FPS
@@ -424,7 +426,7 @@ class InServeTest(unittest.TestCase):
         actions = [[a[k] for k in START_POSE] for a in opened + closed]
         with tempfile.TemporaryDirectory() as folder:
             rig = Rig(Path(folder) / "run", actions=actions,
-                      wrap=lambda driver, recorder, clock: stack.build(driver, LayerContext(recorder.event, clock, PROGRAM),
+                      wrap=lambda driver, recorder, clock: stack.build(driver, LayerContext(recorder.event, clock, GRASP, PROGRAM),
                                                                        skills=SKILLS))
             rig.start_policy(ticks=4 * FPS)
             rig.reset("failed")

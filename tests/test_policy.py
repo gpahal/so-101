@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 from fakes import make_engine
-from test_skills import FPS, NAMES, PROGRAM, SKILLS, FakeLeaf, trace
+from test_skills import FPS, GRASP, NAMES, PROGRAM, SKILLS, FakeLeaf, trace
 from test_supervisor import FakeEscalation, FakeModel, Pool
 
 from so_101.policy import stack
@@ -27,7 +27,7 @@ def judges():
 
 
 def context(events: list) -> LayerContext:
-    return LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: 0.0, PROGRAM)
+    return LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: 0.0, GRASP, PROGRAM)
 
 
 def stacks():

@@ -392,7 +392,7 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
 
     `sources` are the run sources besides the demos (`so101 build --with`). A demos-only build
     without labels depends on no run, so it records no runs and a new run doesn't make it stale. A
-    skills build also depends on the skill definitions and the program whose thresholds find the events.
+    skills build also depends on the skill definitions and the grasp thresholds that find the events.
     """
     inputs = {
         "prompt": task.prompt,
@@ -420,11 +420,11 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
 
         inputs["rules"] = RULES_VERSION  # how runs are cut and labelled: a build under other rules isn't current
     if kind == SKILLS:
-        from so_101.supervisor import program
+        from so_101.grasp import thresholds
 
-        found = program.load(s.supervisor.program)
+        found = thresholds.load(s.perception.thresholds)
         inputs |= {"dataset": SKILLS, "skills": [skill.record() for skill in task.skills],
-                   "program": {"path": str(found.path), "version": found.version}}
+                   "grasp": {"path": str(found.path), "gripper": found.gripper.version}}
     return inputs
 
 

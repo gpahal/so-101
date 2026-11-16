@@ -1410,7 +1410,7 @@ class Asking(Layer):
     and notes each episode and handback it hears of."""
 
     def __init__(self, inner, ask_at: int) -> None:
-        super().__init__(inner, LayerContext(lambda *args, **fields: None, lambda: 0.0, None), "asking")
+        super().__init__(inner, LayerContext(lambda *args, **fields: None, lambda: 0.0, None, None), "asking")
         self.ask_at, self.steps, self.heard, self.handbacks = ask_at, 0, [], []
 
     def begin_episode(self, number: int) -> None:

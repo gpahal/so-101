@@ -32,7 +32,7 @@ from dataclasses import dataclass, field, replace
 from so_101.control import rewind as R
 from so_101.policy.base import HOLD, LAYER, PLAYBACK, Handback, Layer, LayerContext, Output, Readings, Tick
 from so_101.supervisor import judges as J
-from so_101.supervisor.program import RULES
+from so_101.grasp.thresholds import RULES
 
 MODES = ("off", "shadow", "act")
 CAMERAS = ("top", "wrist")

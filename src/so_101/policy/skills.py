@@ -54,7 +54,7 @@ class SkillSequencer(Layer):
         return replace(out, skill=self.current)
 
     def _after_handback(self, tick: Tick) -> None:
-        if self.current and tick.pose.get(GRIPPER, 0.0) >= self.ctx.program.gripper.closed_below:
+        if self.current and tick.pose.get(GRIPPER, 0.0) >= self.ctx.grasp.gripper.closed_below:
             self._switch(0, "reopened")
 
     def _handover(self, out: Output) -> None:

@@ -115,19 +115,24 @@ def check_settings(s) -> None:
 
 
 def policy_parts(s):
-    """The program (the gripper and rule thresholds every run's perception uses, and the supervisor's
-    settings) and, when `[supervisor] mode` isn't off, its judges, else None. Exits on a bad program,
-    before anything is connected. API keys come from the environment or .scratch/bench.env beside
+    """The grasp thresholds every run's perception uses, the supervisor's program (the perception reads
+    its `watch.near`), and, when `[supervisor] mode` isn't off, its judges, else None. Exits on a bad
+    thresholds file or program, before anything is connected. API keys come from the environment or .scratch/bench.env beside
     so101.toml, as `so101-failbench` reads them; a judge without its key or SDK is left out, and the
     start event names why."""
+    from so_101.grasp import thresholds
     from so_101.supervisor import program
 
+    try:
+        grasp = thresholds.load(s.perception.thresholds)
+    except thresholds.ThresholdsError as error:
+        sys.exit(f"so101-control can't load the grasp thresholds its perception reads: {error}")
     try:
         loaded = program.load(s.supervisor.program)
     except program.ProgramError as error:
         sys.exit(f"so101-control can't load the program its perception and supervisor read: {error}")
     if s.supervisor.mode == "off":
-        return loaded, None
+        return grasp, loaded, None
     from so_101.failbench.cli import load_env
     from so_101.supervisor import judges
 
@@ -136,7 +141,7 @@ def policy_parts(s):
     missing = ", ".join(f"{key} ({why})" for key, why in made.missing.items())
     print(f"Supervisor: {s.supervisor.mode} mode, program v{loaded.version}."
           + (f" Left out: {missing}." if missing else ""), flush=True)
-    return loaded, made
+    return grasp, loaded, made
 
 
 def leader_maker(arm):
@@ -268,7 +273,7 @@ def control(cfg) -> None:
     # so101.toml, read once for the whole run.
     s = settings.load()
     check_settings(s)  # before anything is connected or bound
-    program, judges = policy_parts(s)
+    grasp, program, judges = policy_parts(s)
     run = json.loads(os.environ[RUN_ENV])
     folder, manifest = data.Run.at(Path(run["dir"])), run["manifest"]
     # `so101 run`: an autopilot starts and ends the attempts (docs/run.md), each lasting its --duration
@@ -377,7 +382,7 @@ def control(cfg) -> None:
         from so_101.policy import stack
         from so_101.policy.base import LayerContext
 
-        policy_layer = stack.build(driver, LayerContext(recorder.event, time.monotonic, program),
+        policy_layer = stack.build(driver, LayerContext(recorder.event, time.monotonic, grasp, program),
                                    skills=task.skills if policy.get("skills") else (), judges=judges,
                                    mode=s.supervisor.mode, cameras=tuple(robot.inner.cameras))
         cleanup.callback(policy_layer.close)  # before the recorder closes: late verdicts are dropped

@@ -21,10 +21,12 @@ from so_101.supervisor import judges as J
 from so_101.supervisor import program as P
 from so_101.policy import stack
 from so_101.policy.base import PERSON, PLAYBACK, POLICY, START, WAITING, Handback, Health, LayerContext, Output, Tick
-from so_101.supervisor.detector import ARM, GRIPPER, Detector
+from so_101.grasp import thresholds as T
+from so_101.grasp.detector import ARM, GRIPPER, Detector
 
 FPS = 30
 PROGRAM = P.load()
+GRASP = T.load()
 NAMES = [*ARM, GRIPPER]
 
 
@@ -67,19 +69,35 @@ def grasp() -> Trace:
 
 
 class ProgramTest(unittest.TestCase):
-    def test_the_default_program_loads(self) -> None:
-        self.assertEqual(PROGRAM.rules.regrasps, 2)
+    def test_the_default_program_and_thresholds_load(self) -> None:
+        self.assertEqual(GRASP.rules.regrasps, 2)
+        self.assertEqual(GRASP.gripper.version, 1)
         self.assertEqual(PROGRAM.judges.decision, "jev")
 
-    def test_a_bad_value_names_itself(self) -> None:
-        text = P.DEFAULT.read_text()
+    def test_a_bad_threshold_names_itself(self) -> None:
+        text = T.DEFAULT.read_text()
         cases = {
             "hold band over the close threshold": (text.replace("hold_band = [16.5, 22.0]", "hold_band = [16.5, 26.0]"),
                                                    "hold_band high < closed_below"),
-            "an unknown judge": (text.replace('decision = "jev"', 'decision = "nope"'), "judges.decision"),
             "a negative threshold": (text.replace("seconds = 14.0", "seconds = -1"), "rules.no_carry.seconds"),
             "a missing section": (text.replace("[rules.chatter]", "[rules.chattering]"), r"\[rules.chatter\]"),
             "a fraction of a regrasp": (text.replace("regrasps = 2 ", "regrasps = 1.5 "), "regrasps"),
+            "no gripper version": (text.replace("[gripper]\nversion = 1", "[gripper]"), "gripper.version"),
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            for name, (changed, message) in cases.items():
+                with self.subTest(name):
+                    path = Path(folder) / "grasp.toml"
+                    path.write_text(changed)
+                    with self.assertRaisesRegex(T.ThresholdsError, message):
+                        T.load(path)
+
+    def test_a_bad_program_value_names_itself(self) -> None:
+        text = P.DEFAULT.read_text()
+        cases = {
+            "an unknown judge": (text.replace('decision = "jev"', 'decision = "nope"'), "judges.decision"),
+            "a missing section": (text.replace("[watch]", "[watching]"), r"\[watch\]"),
+            "a negative period": (text.replace("period_s = 1.0", "period_s = -1"), "watch.period_s"),
         }
         with tempfile.TemporaryDirectory() as folder:
             for name, (changed, message) in cases.items():
@@ -92,7 +110,7 @@ class ProgramTest(unittest.TestCase):
 
 class DetectorTest(unittest.TestCase):
     def test_a_clean_grasp_closes_carries_and_releases_with_no_rule(self) -> None:
-        detector = Detector(PROGRAM)
+        detector = Detector(GRASP)
         self.assertEqual(kinds(grasp().run(detector)), ["close", "carry", "release"])
         self.assertEqual(detector.fired, set())
 
@@ -100,16 +118,16 @@ class DetectorTest(unittest.TestCase):
         trace = Trace().to(2, pan=20)
         for _ in range(2):  # closes on nothing and opens again, the elbow still, slowly enough not to chatter
             trace.to(0.5, gripper=10, pan=25).to(0.7, pan=30).to(0.5, gripper=40, pan=25).to(0.5, pan=20)
-        self.assertEqual(kinds(trace.run(Detector(PROGRAM))),
+        self.assertEqual(kinds(trace.run(Detector(GRASP))),
                          ["close", "regrasp", "close", "regrasp", "rule:regrasp_loop"])
 
     def test_one_miss_is_not_stuck(self) -> None:
         trace = Trace().to(2, pan=20).to(0.5, gripper=10).to(0.5, gripper=40).to(1, gripper=18).to(2, elbow=40)
-        self.assertEqual(kinds(trace.run(Detector(PROGRAM))), ["close", "regrasp", "close", "carry"])
+        self.assertEqual(kinds(trace.run(Detector(GRASP))), ["close", "regrasp", "close", "carry"])
 
     def test_creeping_forward_open_away_from_the_start_is_a_hover(self) -> None:
         trace = Trace().to(2, pan=20).to(6, pan=50)  # 5 deg/s: slower than a reach, faster than frozen
-        signals = trace.run(Detector(PROGRAM))
+        signals = trace.run(Detector(GRASP))
         self.assertEqual(kinds(signals), ["rule:hover"])
         self.assertAlmostEqual(signals[0].t, 7.0, delta=0.2)
 
@@ -117,27 +135,27 @@ class DetectorTest(unittest.TestCase):
         trace = Trace().to(2, pan=20, gripper=30)
         for _ in range(3):
             trace.to(0.3, gripper=20).to(0.3, gripper=30)
-        self.assertIn("rule:chatter", kinds(trace.run(Detector(PROGRAM))))
+        self.assertIn("rule:chatter", kinds(trace.run(Detector(GRASP))))
 
     def test_standing_still_is_frozen_but_waiting_for_the_policy_is_not(self) -> None:
-        self.assertEqual(kinds(Trace().to(2, pan=20).to(4.5).run(Detector(PROGRAM))), ["rule:frozen"])
-        self.assertEqual(kinds(Trace().to(2, pan=20).to(4.5, drove=False).run(Detector(PROGRAM))), [])
+        self.assertEqual(kinds(Trace().to(2, pan=20).to(4.5).run(Detector(GRASP))), ["rule:frozen"])
+        self.assertEqual(kinds(Trace().to(2, pan=20).to(4.5, drove=False).run(Detector(GRASP))), [])
 
     def test_nothing_carried_in_14_s_of_driving(self) -> None:
-        signals = Trace().to(14.5, pan=200).run(Detector(PROGRAM))  # 14 deg/s: never slow enough to hover
+        signals = Trace().to(14.5, pan=200).run(Detector(GRASP))  # 14 deg/s: never slow enough to hover
         self.assertEqual(kinds(signals), ["rule:no_carry"])
         self.assertAlmostEqual(signals[0].t, 14.0, delta=0.1)
 
     def test_holding_a_carried_block_for_10_s_is_not_released(self) -> None:
         trace = Trace().to(2, pan=20).to(1, gripper=18).to(2, elbow=40).to(11, pan=60)
-        self.assertEqual(kinds(trace.run(Detector(PROGRAM))), ["close", "carry", "rule:not_released"])
+        self.assertEqual(kinds(trace.run(Detector(GRASP))), ["close", "carry", "rule:not_released"])
 
     def test_after_a_release_nothing_is_a_grasp_or_stuck(self) -> None:
         trace = grasp().to(1, gripper=10).to(20)  # closes on the way back to rest, then sits
-        self.assertEqual(kinds(trace.run(Detector(PROGRAM))), ["close", "carry", "release"])
+        self.assertEqual(kinds(trace.run(Detector(GRASP))), ["close", "carry", "release"])
 
     def test_a_resume_restarts_the_running_timers(self) -> None:
-        detector = Detector(PROGRAM)
+        detector = Detector(GRASP)
         trace = Trace().to(2, pan=20).to(3)
         out = trace.run(detector)
         detector.resumed()
@@ -147,9 +165,9 @@ class DetectorTest(unittest.TestCase):
         self.assertEqual(kinds(out), [], "3 s still, a rewind, then 3 s still: never 4 s in a row")
 
     def test_progress_tells_the_watch_when_a_rule_is_near(self) -> None:
-        detector = Detector(PROGRAM)
+        detector = Detector(GRASP)
         Trace().to(2, pan=20).to(3).run(detector)
-        self.assertEqual(detector.near(), ["frozen"])
+        self.assertEqual(detector.near(PROGRAM.watch.near), ["frozen"])
 
 
 class FakeModel:
@@ -309,7 +327,7 @@ class Harness:
         self.driver, self.robot = FakeDriver(), FakeRobot()
         self.now, self.frame, self.pose = 0.0, -1, pose()
         ctx = LayerContext(lambda type_, **fields: self.logged.append({"type": type_, **fields}), lambda: self.now,
-                           PROGRAM)
+                           GRASP, PROGRAM)
         self.layer = stack.build(self.driver, ctx, judges=self.judges, mode=mode, cameras=("top", "wrist"))
         self.layer.begin_episode(1)
         self.layer.run(Handback(START))
@@ -532,9 +550,9 @@ class CandidatesTest(unittest.TestCase):
         n = len(trace.poses)
         phases = np.array([0] * 10 + [1] * n + [6] * 10)  # starting, the policy, returning
         states = np.array([[p[k] for k in NAMES] for p in [trace.poses[0]] * 10 + trace.poses + [trace.poses[-1]] * 10])
-        rows = candidates.pick("run1", 0, phases, np.zeros(len(phases), bool), states, NAMES, FPS, PROGRAM)
+        rows = candidates.pick("run1", 0, phases, np.zeros(len(phases), bool), states, NAMES, FPS, PROGRAM, GRASP)
         self.assertEqual([r["moment"] for r in rows], ["after_close", "after_release", "approach", "end"])
-        closed = 10 + next(i for i, p in enumerate(trace.poses) if p[GRIPPER] < PROGRAM.gripper.closed_below)
+        closed = 10 + next(i for i, p in enumerate(trace.poses) if p[GRIPPER] < GRASP.gripper.closed_below)
         close = next(r for r in rows if r["moment"] == "after_close")
         self.assertEqual(close["t"], closed + round(PROGRAM.after_close_s * FPS))
         self.assertEqual(rows[-1]["t"], len(phases) - 1)
@@ -549,6 +567,15 @@ class SettingsTest(ConfigTest):
         loaded = settings.load().supervisor
         self.assertEqual(loaded.mode, "shadow")
         self.assertEqual(loaded.program, settings.load().path.parent / "mine.toml")
+
+    def test_the_perception_reads_the_package_thresholds_unless_the_file_names_others(self) -> None:
+        self.config.write_text(ARMS)
+        self.assertIsNone(settings.load().perception.thresholds)
+        self.config.write_text(ARMS + '\n[perception]\nthresholds = "mine.toml"\n')
+        self.assertEqual(settings.load().perception.thresholds, settings.load().path.parent / "mine.toml")
+        self.config.write_text(ARMS + '\n[perception]\nthresholds = 3\n')
+        with self.assertRaisesRegex(settings.ConfigError, r"\[perception\] thresholds"):
+            settings.load()
 
     def test_an_unknown_mode_is_refused(self) -> None:
         self.config.write_text(ARMS + '\n[supervisor]\nmode = "on"\n')
@@ -572,7 +599,7 @@ class InServeTest(unittest.TestCase):
         made = []
 
         def wrap(driver, recorder, clock):
-            made.append(stack.build(driver, LayerContext(recorder.event, clock, PROGRAM),
+            made.append(stack.build(driver, LayerContext(recorder.event, clock, GRASP, PROGRAM),
                                     judges=judges({"after_close": 0.95, "stuck": 0.95}), mode="act",
                                     cameras=("top", "wrist")))
             return made[0]

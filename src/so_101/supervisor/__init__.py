@@ -6,10 +6,8 @@ person when the cameras don't clear it or the task looks done). `policy.stack.bu
 of the stack `serve` and `run` step (docs/policy-layers.md); it sends them no commands.
 
 Modules:
-- `program`   the thresholds, judges and responses, from `program.toml` or the file `[supervisor] program` names;
-              the perception reads its gripper and rule thresholds in every run
-- `detector`  the arm's readings into gripper events and stuck rules; pure, so the perception steps it live
-              and recorded runs replay through it
+- `program`   its timing, judges, responses and budget, from `program.toml` or the file `[supervisor] program`
+              names. The gripper and rule thresholds, and the detector the perception steps, are in `grasp/`.
 - `judges`    the vision checks through failbench's adapters (event, watch, escalation), within a cost cap
 - `layer`     `Supervisor`: reads the perception's signals, schedules checks, decides, plays back, logs
 """

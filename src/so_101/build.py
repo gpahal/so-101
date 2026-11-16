@@ -288,9 +288,9 @@ def skill_plans(s: Settings, task: Task) -> tuple[list[Plan], list[str], list[di
     """Each kept demo's skills as plans, in order; the notes, with a note per demo that couldn't be
     cut; and every demo's cuts for build.json."""
     from so_101 import skills
-    from so_101.supervisor import program
+    from so_101.grasp import thresholds
 
-    cuts, notes = skills.cut_demos(s, task, program.load(s.supervisor.program))
+    cuts, notes = skills.cut_demos(s, task, thresholds.load(s.perception.thresholds))
     plans = []
     for c in cuts:
         p = c.plan

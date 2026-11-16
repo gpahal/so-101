@@ -45,7 +45,7 @@ All rules together catch 41 of 56 stuck attempts, at a median of 14 s into the a
 
 Successful attempts sometimes miss once or twice and recover: 76 of 83 had no regrasp, 4 had one, 2 had two and 1 had three. One regrasp alone is not stuck.
 
-The offline replay scripts are in `.scratch/stuck/` (git-ignored); the recordings they read are gone. The rules now live in `supervisor/detector.py`, and `so101-failbench candidates` replays `serve` runs through them. Thresholds were chosen on the same attempts they're scored on, so expect somewhat worse on new runs.
+The offline replay scripts are in `.scratch/stuck/` (git-ignored); the recordings they read are gone. The rules now live in `grasp/detector.py`, their thresholds in `grasp/grasp.toml`, and `so101-failbench candidates` replays `serve` runs through them. Thresholds were chosen on the same attempts they're scored on, so expect somewhat worse on new runs.
 
 ## Who does what
 
@@ -89,7 +89,7 @@ A Teleop takeover from a stuck pause is recorded as a correction from the failur
 ## Building it
 
 1. **Offline, no arm.**
-   - Built: the stuck detector as a pure module (`supervisor/detector.py`), tested on made-up traces. The recorded attempts it should have matched are deleted, so it's checked against new `serve` runs instead.
+   - Built: the stuck detector as a pure module (`grasp/detector.py`), tested on made-up traces. The recorded attempts it should have matched are deleted, so it's checked against new `serve` runs instead.
    - Built: a `stuck` moment in failbench, and `so101-failbench candidates`, which picks frames from `serve` runs where each rule fires and at each check, for labelling.
    - Built: the program format, its loader and the rule engine (`supervisor/program.toml`, `program.py`).
    - Not built: the compile loop, in which a frontier model proposes questions and a change is kept only if held-out failbench accuracy rises. It needs a labelled benchmark from new runs first.

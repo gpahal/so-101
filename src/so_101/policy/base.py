@@ -39,7 +39,7 @@ class Readings:
     """What the perception has seen this attempt, as of its last tick."""
 
     t: float = 0.0  # seconds the model has driven
-    near: tuple[str, ...] = ()  # stuck rules within the program's `watch.near` of firing
+    near: tuple[str, ...] = ()  # stuck rules within the supervisor program's `watch.near` of firing
     closes: int = 0
     regrasps: int = 0
     carried: bool = False
@@ -51,7 +51,7 @@ class Readings:
 class Output:
     action: dict | None = None  # the model's action when it reached the arm, before the step cap
     driver: int = WAITING  # who drove: POLICY, WAITING (the model sent nothing), PLAYBACK or HOLD
-    signals: tuple = ()  # the perception's `detector.Signal`s this tick
+    signals: tuple = ()  # the perception's `grasp.detector.Signal`s this tick
     readings: Readings | None = None
     asks: str | None = None  # why a layer wants a person: the loop pauses
     # The index of the skill the model is conditioned on (run.json's policy.skills), or None for no
@@ -87,10 +87,12 @@ class Health:
 
 @dataclass(frozen=True)
 class LayerContext:
-    """What every layer gets: the run's event log, the loop's clock, and the gripper and rule thresholds."""
+    """What every layer gets: the run's event log, the loop's clock, the gripper and rule thresholds,
+    and the supervisor's program (its `watch.near` says which rules the perception reports as near)."""
 
     event: Callable[..., None]  # event(type, **fields): the recorder's
     clock: Callable[[], float]
+    grasp: object  # grasp.thresholds.Thresholds
     program: object  # supervisor.program.Program
 
 

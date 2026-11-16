@@ -2,8 +2,8 @@
 
     EngineDriver -> Perception -> SkillSequencer (a skills run) -> Supervisor ([supervisor] mode shadow or act)
 
-Perception is always there, so every run logs its grasps; it reads the program's gripper and rule
-thresholds, which therefore load for every run.
+Perception is always there, so every run logs its grasps; it reads the gripper and rule thresholds
+(`grasp.thresholds`) and the supervisor program's `watch.near`, which therefore load for every run.
 """
 
 from so_101.policy.base import LayerContext, Policy

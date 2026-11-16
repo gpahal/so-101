@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 from so_101 import skills as S
-from so_101.supervisor import program
+from so_101.grasp import thresholds
 
 TILE_W, TILE_H, PER_ROW = 160, 120, 12
 
@@ -23,8 +23,8 @@ def _quantiles(values) -> str:
 
 def inspect(s, task, sheets: bool = True) -> None:
     skills = task.require_skills()
-    found = program.load(s.supervisor.program)
-    print(f"{task.name}: {len(skills)} skills, events found with {found.path} (program v{found.version})")
+    found = thresholds.load(s.perception.thresholds)
+    print(f"{task.name}: {len(skills)} skills, events found with {found.path} (gripper v{found.gripper.version})")
     for skill in skills:
         handover = f", switched to at the {skill.handover}" if skill.handover else ", where every attempt starts"
         print(f"  {skill.name}: {skill.start} to {skill.stop}{handover}: \"{skill.prompt}\"")

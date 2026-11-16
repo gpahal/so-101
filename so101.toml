@@ -269,9 +269,16 @@ preview_fps = 5
 # escalation), up to max_cost_usd per run in the program, and need `uv sync --group failbench`.
 # Without them it runs the rules alone.
 mode = "off"
-# The program: every threshold, judge and response, with where each number came from. Leave it out to
-# use src/so_101/supervisor/program.toml. A path is relative to this file.
+# The program: when it checks, its judges, its responses and its budget, with where each number came
+# from. Leave it out to use src/so_101/supervisor/program.toml. A path is relative to this file.
 # program = "supervisor-program.toml"
+
+# The perception every run has, whatever [supervisor] mode says: it marks each close, carry and release
+# in the run's events, and `so101 skills` and `build --skills` cut demos at the same events.
+[perception]
+# The gripper and stuck-rule thresholds, with where each number came from. Leave it out to use
+# src/so_101/grasp/grasp.toml. A path is relative to this file.
+# thresholds = "grasp.toml"
 
 # `uv sync --extra sim`, then `uv run so101 sim build`: a simulated twin of the default task, worked out
 # from its demos. Rebuild after recording new demos, or after changing anything here. Every setting is

@@ -1,7 +1,7 @@
 """Candidate samples from `so101 serve` runs, for labelling into a new labels file.
 
-The supervisor's detector (`supervisor.detector`) replays each saved attempt's policy frames, as the
-supervisor saw them live, and each moment it would have checked becomes a candidate row: `after_close` and
+The grasp detector (`grasp.detector`) replays each saved attempt's policy frames, as the perception saw
+them live, and each moment it would have checked becomes a candidate row: `after_close` and
 `after_release` at the program's delays, `stuck` where a rule fired, `approach` halfway from the policy's
 first frame to its first close (3 s in without one), and `end` at the episode's last frame. Rows have the
 same columns as `labels.csv`, with `label` and `category` empty: fill them in, then build with
@@ -15,19 +15,20 @@ import numpy as np
 
 AUTONOMOUS = 1  # control.phase, as `control.recorder.Phase`
 COLUMNS = ("id", "src", "ep", "t", "moment", "label", "category", "gripper", "note")
-HEADER = """# Candidate samples from so101 serve runs, picked by the supervisor's detector (so101-failbench candidates).
+HEADER = """# Candidate samples from so101 serve runs, picked by the grasp detector (so101-failbench candidates).
 # Fill in label (ok or wrong) and category (a key of failbench/prompt.py's CATEGORIES, none for ok) from the
 # frames, delete the rows you can't decide, and say in note how each label was reached.
 """
 
 
 def pick(run: str, episode: int, phases: np.ndarray, waiting: np.ndarray, states: np.ndarray, names: list[str],
-         fps: float, program) -> list[dict]:
+         fps: float, program, thresholds) -> list[dict]:
     """The candidate rows of one attempt. `phases`, `waiting` (no policy action) and `states` (frames x joints,
-    named `names`) are the episode's columns in frame order."""
-    from so_101.supervisor.detector import Detector
+    named `names`) are the episode's columns in frame order. `program` gives the supervisor's check
+    delays, `thresholds` the detector's."""
+    from so_101.grasp.detector import Detector
 
-    detector = Detector(program)
+    detector = Detector(thresholds)
     gripper = names.index("gripper.pos")
     previous, frames, rows = None, [], []
     found: list[tuple[int, str, str]] = []  # (frame, moment, note)
@@ -74,7 +75,7 @@ def pick(run: str, episode: int, phases: np.ndarray, waiting: np.ndarray, states
     return rows
 
 
-def from_runs(runs: Path, program) -> list[dict]:
+def from_runs(runs: Path, program, thresholds) -> list[dict]:
     """Every saved attempt's candidates, from each run folder under `runs`."""
     import json
 
@@ -93,7 +94,8 @@ def from_runs(runs: Path, program) -> list[dict]:
             phases = np.array([int(np.ravel(p)[0]) for p in ep["control.phase"]])
             waiting = np.array([bool(np.isnan(np.asarray(v, dtype=float)).all()) for v in ep["control.policy_action"]])
             states = np.stack([np.asarray(v, dtype=float) for v in ep["observation.state"]])
-            rows += pick(folder.name, int(episode), phases, waiting, states, names, float(info["fps"]), program)
+            rows += pick(folder.name, int(episode), phases, waiting, states, names, float(info["fps"]), program,
+                         thresholds)
     return rows
 
 

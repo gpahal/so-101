@@ -255,7 +255,8 @@ class ControlShutdown(unittest.TestCase):
         driver.stop = stop
         s = SimpleNamespace(control=control(preview_fps=0, rest_pose=REST_STEPS), follower=None, leader=None,
                             camera=lambda name: name, path=Path("so101.toml"),
-                            supervisor=SimpleNamespace(mode="off", program=None))
+                            supervisor=SimpleNamespace(mode="off", program=None),
+                            perception=SimpleNamespace(thresholds=None))
         task = SimpleNamespace(name="test", cameras=tuple(robot.inner.cameras))
         cfg = SimpleNamespace(task="test", policy=SimpleNamespace(pretrained_path="policy"))
 
