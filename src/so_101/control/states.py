@@ -71,6 +71,7 @@ class Event(StrEnum):
     TIME_LIMIT = "time_limit"  # the attempt has used its policy or its Teleop seconds
     LEADER_LOST = "leader_lost"  # the leader was unplugged or stopped answering
     LINK_LOST = "link_lost"  # the controlling page stopped polling or was hidden, with on_link_loss = "pause"
+    POLICY_ASKED = "policy_asked"  # the policy asked for a person (the supervisor's layer: stuck, or done)
     LEADER_RESTED = "leader_rested"  # the leader's move to rest ended: it arrived, stopped short or was lost
     FAULT = "fault"  # a hardware, camera, motor-alarm or policy failure
 
@@ -385,6 +386,13 @@ def _link_lost(state: State, facts: Facts) -> Transition:
     return _refuse(state, f"The policy isn't driving in {state}.")
 
 
+def _policy_asked(state: State, facts: Facts) -> Transition:
+    if state is State.AUTONOMOUS:
+        # The policy stops itself, and the arm holds where it is, for a person to decide what's next.
+        return Transition(State.PAUSED, (Action.PAUSE_POLICY,))
+    return _refuse(state, f"The policy isn't driving in {state}.")
+
+
 def _leader_rested(state: State, facts: Facts) -> Transition:
     if state is State.RESTING and facts.quitting:
         # Moved off rest while it waited, the arm can't exit there unasked: y at the terminal decides.
@@ -417,6 +425,7 @@ _RULES = {
     Event.TIME_LIMIT: _time_limit,
     Event.LEADER_LOST: _leader_lost,
     Event.LINK_LOST: _link_lost,
+    Event.POLICY_ASKED: _policy_asked,
     Event.LEADER_RESTED: _leader_rested,
     Event.FAULT: _fault,
 }

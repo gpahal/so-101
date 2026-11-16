@@ -190,7 +190,7 @@ def cmd_pose(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None
     if start is None:
         for joint, position in pose.items():
             print(f"{joint:14s} now {position:7.1f}")
-        print(f"\n{task.name} has no build in {data.train_root(s, task)} to take the demos' start pose from, so a run "
+        print(f"\n{task.name} has no build in {data.dataset_root(s, task)} to take the demos' start pose from, so a run "
               "starts from wherever the arm is.")
         print(f"Make one with: uv run so101 build {task.name}")
         return
@@ -282,6 +282,15 @@ def cmd_tasks(s: settings.Settings, __: argparse.Namespace, ___: list[str]) -> N
         kept = data.kept_episodes(s, task)
         print(f"  demos:   {kept} of {task.episodes} kept, in {data.task_dir(s, task)}; trains into {policy}")
         print(f"  cameras: {', '.join(task.cameras)}")
+        for kind in data.DATASETS:
+            if kind == data.SKILLS and not task.skills:
+                continue
+            state = "built and current" if data.build_is_current(s, task, kind=kind) else (
+                "built, out of date" if data.build_manifest_path(s, task, kind).is_file() else "not built")
+            print(f"  {kind + ':':8s} {state}, in {data.dataset_root(s, task, kind)}")
+        for skill in task.skills:
+            handover = f", switched to at the {skill.handover}" if skill.handover else ""
+            print(f"    - {skill.name}: {skill.start} to {skill.stop}{handover}: \"{skill.prompt}\"")
         print("  props:")
         for prop in task.props:
             print(f"    - {prop}")
@@ -289,6 +298,8 @@ def cmd_tasks(s: settings.Settings, __: argparse.Namespace, ___: list[str]) -> N
         for step in task.setup:
             print(f"    - {step}")
         print(f"  steps:   uv run so101 record {task.name}, review, build, train, then run {task.name}")
+        if task.skills:
+            print(f"  skills:  uv run so101 skills {task.name}, then train --skills and serve --skills")
         print(f"  run:     uv run so101 run {task.name}\n")
 
 
@@ -365,7 +376,9 @@ def cmd_review(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
 
 # Never uploaded: the build is remade from the sessions and edits, Finder's .DS_Store is noise, and
 # the rest are half-written files from a save in progress. `*` also matches `/` in these patterns.
-BACKUP_IGNORE = ["train/**", "train.tmp/**", "build.json", "build.json.tmp", "**/.DS_Store", ".DS_Store",
+# The datasets `build` remakes from the recordings and edits are left out: datasets/ now, and train/ and
+# build.json where a task folder still has the layout from before datasets/.
+BACKUP_IGNORE = ["datasets/**", "train/**", "train.tmp/**", "build.json", "build.json.tmp", "**/.DS_Store", ".DS_Store",
                  "*.toml.tmp", "**/meta-copy/.building-*"]
 
 
@@ -563,15 +576,27 @@ def check_pi05_access() -> None:
                  "and train again once it's approved.")
 
 
-def run_build(s: settings.Settings, task: tasks.Task, sources: tuple[str, ...] = (), keep_labels: bool = False) -> None:
+def run_build(s: settings.Settings, task: tasks.Task, sources: tuple[str, ...] = (), keep_labels: bool = False,
+              kind: str = data.WHOLE) -> None:
     from so_101.build import build
 
     svtshim.require()  # `build` encodes with SVT-AV1 in this process
     also = f", with {', '.join(sources)} from the runs" if sources else ""
-    print(f"Building the training dataset for {task.name} into {data.train_root(s, task)}{also}...")
-    report = build(s, task, sources, keep_labels)
-    report.print("Training dataset")
+    what = "skills dataset" if kind == data.SKILLS else "training dataset"
+    print(f"Building the {what} for {task.name} into {data.dataset_root(s, task, kind)}{also}...")
+    report = build(s, task, sources, keep_labels, kind)
+    report.print(what.capitalize())
     print(f"{report.summary()}\n")
+
+
+def dataset_kind(ns: argparse.Namespace, task: tasks.Task) -> str:
+    """SKILLS with --skills, which needs the task's skills and no --with; WHOLE otherwise."""
+    if not getattr(ns, "skills", False):
+        return data.WHOLE
+    task.require_skills()
+    if getattr(ns, "with_", None) or getattr(ns, "keep_labels", False):
+        sys.exit("--skills builds from the demos only for now: drop --with and --keep-labels.")
+    return data.SKILLS
 
 
 def build_sources(ns: argparse.Namespace) -> tuple[str, ...]:
@@ -582,12 +607,15 @@ def build_sources(ns: argparse.Namespace) -> tuple[str, ...]:
 
 def cmd_build(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
     task = get_task(ns.task)
+    kind = dataset_kind(ns, task)
     sources = build_sources(ns)
-    if data.build_is_current(s, task, sources, ns.keep_labels) and not ns.force:
+    if data.build_is_current(s, task, sources, ns.keep_labels, kind) and not ns.force:
         inputs = "sessions, edits and runs" if sources else "sessions and edits"
-        print(f"{data.train_root(s, task)} is up to date with the {inputs}. --force rebuilds it.")
+        if kind == data.SKILLS:
+            inputs += ", skills and program"
+        print(f"{data.dataset_root(s, task, kind)} is up to date with the {inputs}. --force rebuilds it.")
         return
-    run_build(s, task, sources, ns.keep_labels)
+    run_build(s, task, sources, ns.keep_labels, kind)
 
 
 def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
@@ -610,55 +638,63 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     base = parse_base(ns.base) if ns.base else None
     if base:
         check_base(*base, ns.policy)
+    kind = dataset_kind(ns, task)
+    skills = kind == data.SKILLS
     sources = build_sources(ns)
-    policy = task.policy_for(ns.policy)  # needs a Hugging Face login; fail before building
+    policy = task.policy_for(ns.policy, skills)  # needs a Hugging Face login; fail before building
+    dataset_repo = task.dataset_repo(skills)
     # A build with --keep-labels has the same demos and cuts, and training ignores its extra columns.
-    if not (data.build_is_current(s, task, sources) or data.build_is_current(s, task, sources, keep_labels=True)):
-        run_build(s, task, sources)
+    if not (data.build_is_current(s, task, sources, kind=kind)
+            or data.build_is_current(s, task, sources, keep_labels=True, kind=kind)):
+        run_build(s, task, sources, kind=kind)
     kept = data.kept_episodes(s, task)
     if kept < task.episodes:
         print(f"WARNING: {kept} of {task.episodes} demos; training anyway.", file=sys.stderr)
+    # Steps follow the demos for a skills model too: each demo's skills are its episodes there.
     steps = recipe.steps(kept)
-    root = data.train_root(s, task)
+    root = data.dataset_root(s, task, kind)
     args = [
         f"--policy.type={ns.policy}",
         f"--policy.repo_id={policy}",
         "--policy.private=true",
         *policy_flags(ns.policy, base),
         *([f"--policy.scheduler_decay_steps={steps}"] if ns.policy == "pi05" else []),
-        f"--job_name={ns.policy}_so101_{task.name}",
+        f"--job_name={ns.policy}_so101_{task.name}{'_skills' if skills else ''}",
         f"--steps={steps}",
         f"--batch_size={recipe.batch_size}",
         f"--num_workers={recipe.num_workers}",
         f"--save_freq={recipe.save_freq(steps)}",
         f"--job.target={target}",
     ]
-    cuts = sum("run" in e for e in json.loads(data.build_manifest_path(s, task).read_text())["episodes"])
+    cuts = sum("run" in e for e in json.loads(data.build_manifest_path(s, task, kind).read_text())["episodes"])
     also = f" and {cuts} run episode{'' if cuts == 1 else 's'} ({', '.join(sources)})" if sources else ""
+    if skills:
+        also += f", cut into {', '.join(skill.name for skill in task.skills)} for one model of all {len(task.skills)}"
     if base:
         also += f", starting from {ns.base}"
     elif start := default_base(ns.policy):
         also += f", starting from {start}"
     if target == "local":
-        local, output = local_train_args(s, task, ns.policy, root)
+        local, output = local_train_args(s, task, ns.policy, root, skills)
         args += local
         if (forwarded(extra, "policy.push_to_hub") or "").lower() in ("true", "1", "yes"):
             from huggingface_hub import HfApi
 
             refuse_public(HfApi(), forwarded(extra, "policy.repo_id") or policy, "model", "train")
+        run_with = f"serve {task.name} --skills" if skills else f"run {task.name}"
         print(f"Training {ns.policy} on {kept} demos{also} for {steps:,} steps on this computer ({s.run.device}). "
               f"Nothing is uploaded: the model is saved in {output}.\n"
-              f"To run it: uv run so101 run {task.name} --checkpoint {output}")
+              f"To run it: uv run so101 {run_with} --checkpoint {output}")
     else:
         from huggingface_hub import HfApi
 
         # The job pushes the model to this repo as it trains, or to a forwarded --policy.repo_id;
         # LeRobot's private=true doesn't change an existing one.
         refuse_public(HfApi(), forwarded(extra, "policy.repo_id") or policy, "model", "train")
-        print(f"Uploading the training dataset to the private Hub dataset {task.dataset}...")
-        push_dataset(root, task.dataset)
+        print(f"Uploading the training dataset to the private Hub dataset {dataset_repo}...")
+        push_dataset(root, dataset_repo)
         timeout = recipe.job_timeout(steps, target)
-        args += [f"--dataset.repo_id={task.dataset}", f"--job.timeout={timeout}",
+        args += [f"--dataset.repo_id={dataset_repo}", f"--job.timeout={timeout}",
                  "--save_checkpoint_to_hub=true",
                  # This Mac's decoder is sent along otherwise. That's PyAV when TorchCodec can't load here,
                  # and PyAV ran out of memory on the job's 192-core host.
@@ -671,15 +707,19 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     lerobot("lerobot-train", [*args, *extra])
 
 
-def local_train_args(s: settings.Settings, task, policy: str, root: Path) -> tuple[list[str], Path]:
+def local_train_args(s: settings.Settings, task, policy: str, root: Path, skills: bool = False) -> tuple[list[str], Path]:
     """lerobot-train's arguments for training on this Mac, and the folder the model is saved in. Nothing
     is uploaded: LeRobot pushes the model to --policy.repo_id when training ends unless told not to."""
-    output = s.outputs_dir / "train" / f"{policy}_so101_{task.name}_{time.strftime('%Y%m%d-%H%M%S')}"
-    return [f"--dataset.repo_id=local/so101_{task.name}", f"--dataset.root={root}", f"--policy.device={s.run.device}",
+    name = f"so101_{task.name}{'_skills' if skills else ''}"
+    output = s.outputs_dir / "train" / f"{policy}_{name}_{time.strftime('%Y%m%d-%H%M%S')}"
+    return [f"--dataset.repo_id=local/{name}", f"--dataset.root={root}", f"--policy.device={s.run.device}",
             "--policy.push_to_hub=false", f"--output_dir={output}"], output
 
 
 def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
+    if ns.skills:
+        sys.exit("run doesn't run skills models: it uses LeRobot's own loop, which can't switch skills. "
+                 "Use `uv run so101 serve --skills`.")
     task = policy_task(ns)
     setup = policy_setup(s, ns, task)
 
@@ -740,13 +780,16 @@ def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
             print("No policy server is running.")
         return
     task = get_task(ns.task)
+    if ns.skills:
+        task.require_skills()
     if ns.policy not in s.remote:
         sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
     recipe = s.remote[ns.policy]
     remote.refuse_action_steps(ns.policy, ns.action_steps)
-    config = task.policy_config(ns.revision, ns.policy)
+    config = task.policy_config(ns.revision, ns.policy, ns.skills)
     remote.start_server(
-        repo=task.policy_for(ns.policy),
+        repo=task.policy_for(ns.policy, ns.skills),
+        dataset=data.SKILLS if ns.skills else data.WHOLE,
         task=task.name,
         policy_type=ns.policy,
         revision=ns.revision or "main",
@@ -765,6 +808,16 @@ VIDEO_COMMANDS = {"record", "run", "serve", "build", "train"}
 
 def add_task(p: argparse.ArgumentParser) -> None:
     p.add_argument("task", nargs="?", help="default: `default` in tasks.toml")
+
+
+def add_skills_flag(p: argparse.ArgumentParser, help_text: str) -> None:
+    p.add_argument("--skills", action="store_true", help=help_text)
+
+
+def cmd_skills(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
+    from so_101.commands.skills import inspect
+
+    inspect(s, get_task(ns.task), sheets=not ns.no_sheets)
 
 
 def add_policy_flags(p: argparse.ArgumentParser, verb: str, remote_flag: bool) -> None:
@@ -884,7 +937,14 @@ def main() -> None:
                         "(default: the demos only)")
     p.add_argument("--keep-labels", action="store_true",
                    help="keep intervention and control.phase, and add control.label and control.attempt_success")
+    add_skills_flag(p, "build the skills dataset: each demo's skills from tasks.toml, for one model of all of them")
     p.set_defaults(fn=cmd_build)
+
+    p = sub.add_parser("skills", help="find each skill's span in every kept demo, check the handovers, and draw "
+                                      "contact sheets of the cuts to outputs/skills/ (read-only on data/)")
+    add_task(p)
+    p.add_argument("--no-sheets", action="store_true", help="print the cuts without drawing the contact sheets")
+    p.set_defaults(fn=cmd_skills)
 
     p = sub.add_parser("runs", help="summarise a task's serve runs and export failure-fix pairs to outputs/ (read-only on data/)")
     add_task(p)
@@ -903,6 +963,7 @@ def main() -> None:
     p.add_argument("--base", metavar="REPO[@REVISION]",
                    help="start from this Hub model instead of the default (act: none, from scratch; pi05: "
                         f"{default_base('pi05')}), such as a model you trained, pinned with @tag")
+    add_skills_flag(p, "train one model on the task's skills, from the skills dataset, into <policy>_so101_<task>_skills")
     p.set_defaults(fn=cmd_train, forwards=True)
 
     p = sub.add_parser("run", help="run a task's policy on the follower, recording to outputs/rollouts/")
@@ -912,12 +973,14 @@ def main() -> None:
     p.add_argument("--reset-time", type=float, help="seconds to reset the scene between attempts (default: the task's reset_time_s)")
     p.add_argument("--display", action="store_true", help="stream cameras and joints to a Rerun viewer")
     add_policy_flags(p, "run", remote_flag=True)
+    add_skills_flag(p, "not supported: a skills model runs in `serve --skills`")
     p.set_defaults(fn=cmd_run, forwards=True)
 
     p = sub.add_parser("serve", help="supervise a task's policy from a control page over Tailscale, or the terminal: start, pause, rewind, take over with the leader and end attempts")
     add_task(p)
     add_policy_flags(p, "run", remote_flag=True)
     p.add_argument("--operator", help="your name, recorded on every event your actions cause and shown on the page (default: none)")
+    add_skills_flag(p, "serve the skills model, switching skills at each handover")
     p.set_defaults(fn=cmd_serve, forwards=True)
 
     p = sub.add_parser("server", help="start, stop or check the cloud GPU job that `run --remote` and `serve --remote` use")
@@ -926,6 +989,7 @@ def main() -> None:
     add_policy_flags(p, "serve", remote_flag=False)
     p.add_argument("--target", help="HF Jobs flavor (default: [remote.<policy>] in so101.toml)")
     p.add_argument("--timeout", help="stop the job after this long, like 30m or 2h (default: [remote.<policy>] in so101.toml)")
+    add_skills_flag(p, "for start: serve the skills model, <policy>_so101_<task>_skills")
     p.set_defaults(fn=cmd_server)
 
     ns, extra = parser.parse_known_args()

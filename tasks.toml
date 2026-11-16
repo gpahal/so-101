@@ -19,6 +19,8 @@
 #   reset_time_s    Seconds between demos to put the props back (default 10).
 #   cameras         Your cameras to record, named as in so101.toml (default: ["top", "wrist"]).
 #   props, setup    What to put on the table and where the cameras go.
+#   [<task>.skills] Optional: the task's parts, for one model trained on all of them (docs/skills.md).
+#                   `so101 skills` checks the cuts; `train --skills` and `serve --skills` use them.
 # Copy a task's section and change the name, prompt and props to add another task.
 
 # The task every `so101` command uses when you don't name one.
@@ -26,7 +28,7 @@ default = "block-container"
 
 [block-container]
 prompt = "Pick up the red block and put it in the cylindrical container"
-episodes = 100
+episodes = 120
 episode_time_s = 30
 reset_time_s = 15
 props = [
@@ -36,7 +38,25 @@ props = [
 ]
 setup = [
   "Top camera above the mat, fixed: don't move it between recording and running",
-  "Container stays in one spot, within easy reach and off the wall; record 12 demos at each of 5 spots and keep the best 10, then go round the spots again (100 kept)",
-  "Start every demo from the same folded rest pose, and do the task the same way each time",
+  "Move the block and the container for every demo: the block somewhere new in a zone about 20 cm wide and 6 cm deep, turned up to 40 degrees either way, and the container at one of 6 places on an arc behind it, each chosen apart from the other. Policies trained with the container in one spot failed when it moved by its own width",
+  "Start every demo from the same folded rest pose, and do the task the same way each time: turn the wrist so the jaws meet two flat sides, and centre the block between them",
   "The policy learns the props' colours and the surface: if you change one, record new demos with it",
 ]
+
+# The task's skills, in the order they run. Each spans every kept demo from one event in the arm's readings
+# to another, plus or minus seconds; `so101 build --skills` makes them episodes of one dataset, each frame
+# with its skill's prompt and a one-hot of the skill. The events:
+#   start, end  the kept demo's first and last frames (start is the arm at rest)
+#   close       the gripper closes on the block (drops below 25)
+#   lift        shoulder_lift has moved 4 deg since the close: the block leaves the mat (0.63 s after, median)
+#   carry       the gripper has held steady in its holding band for 1.5 s (1.57 s after the close)
+#   release     the gripper opens 4 past where it held the block
+#   widest      the gripper's widest opening in the 2 s after the release (0.5 s after it, median)
+# `handover` is the event that switches to a skill as the policy runs: it must fall inside both that skill
+# and the one before, in every demo. Measured on the 144 demos: pick ends with the block lifted and held,
+# 0.5 s after the carry, before 43% of the carry is done; place starts at the lift, so it has seen every
+# state from the handover on; it ends 0.2 s after the widest opening, because the jaws start closing for
+# the return 0.57 s after it. The return to rest is in no skill: serve's Reset drives it.
+[block-container.skills]
+pick = { prompt = "Pick up the red block", from = "start", to = "carry + 0.5" }
+place = { prompt = "Put the red block in the cylindrical container", from = "lift", to = "widest + 0.2", handover = "carry" }

@@ -169,6 +169,16 @@ class EngineDriver:
         robot.hold()
         self.engine.acknowledge_hold()
 
+    def begin_episode(self, number: int) -> None:
+        """An attempt opened. The engine needs nothing: `run` clears it before the policy drives."""
+
+    def end_episode(self) -> None:
+        """The attempt closed."""
+
+    def asks(self) -> str | None:
+        """Why the policy wants a person now, or None. A layer over this driver may; the policy never does."""
+        return None
+
     @property
     def failure(self) -> str | None:
         if self.raised is not None:

@@ -264,17 +264,19 @@ def describe(job) -> str:
     pin = {"true": ", unused action columns pinned", "false": ", unused action columns not pinned"}.get(
         labels.get(PIN_LABEL), ", started before the unused action columns setting" if labels.get("policy") == "pi05" else "")
     return (
-        f"{labels.get('policy')} for {labels.get('task')} at {labels.get('revision')}, {steps}{pin}, "
+        f"{labels.get('policy')} for {labels.get('task')}{' skills' if labels.get('dataset') == 'skills' else ''} "
+        f"at {labels.get('revision')}, {steps}{pin}, "
         f"on {job.flavor} (job {job.id}, {job.status.stage})"
     )
 
 
-def _labels(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool) -> dict[str, str]:
-    """The job labels that say which model a server serves, how its chunks are joined and, for pi0.5,
-    whether its unused action columns are pinned: `start_server` sets them, and `require_server`
-    matches them."""
-    labels = {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps),
-              "execution": EXECUTION[policy_type]}
+def _labels(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool,
+            dataset: str = "whole") -> dict[str, str]:
+    """The job labels that say which model a server serves (the task's whole-demo model or its skills
+    model, `dataset`), how its chunks are joined and, for pi0.5, whether its unused action columns are
+    pinned: `start_server` sets them, and `require_server` matches them."""
+    labels = {"task": task, "dataset": dataset, "policy": policy_type, "revision": revision,
+              "action_steps": str(action_steps), "execution": EXECUTION[policy_type]}
     if policy_type == "pi05":
         labels[PIN_LABEL] = "true" if pin_unused_actions else "false"
     return labels
@@ -282,7 +284,7 @@ def _labels(task: str, policy_type: str, revision: str, action_steps: int, pin_u
 
 def start_server(
     *, repo: str, task: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int,
-    fps: int, target: str, timeout: str, pin_unused_actions: bool,
+    fps: int, target: str, timeout: str, pin_unused_actions: bool, dataset: str = "whole",
 ) -> None:
     """Start the job and wait until the model is loaded and serving."""
     from huggingface_hub import HfApi, get_token
@@ -301,7 +303,7 @@ def start_server(
         secrets={"HF_TOKEN": get_token()},
         flavor=target,
         timeout=timeout,
-        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps, pin_unused_actions)},
+        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps, pin_unused_actions, dataset)},
         ssh=True,
     )
     print(f"Started job {job.id} on {target}. It bills until `uv run so101 server stop`, or {timeout} at most.")
@@ -311,10 +313,12 @@ def start_server(
     except KeyboardInterrupt:
         sys.exit("\nStopped watching. The job is still running and billing: uv run so101 server stop")
     steps = steps_flag(policy_type, action_steps)
+    skills = " --skills" if dataset == "skills" else ""
+    run = "" if skills else f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision}{steps}\n"
     print(
         "\nThe policy server is ready. Next:\n"
-        f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision}{steps}\n"
-        f"  uv run so101 serve {task} --policy {policy_type} --remote --revision {revision}{steps}\n"
+        f"{run}"
+        f"  uv run so101 serve {task} --policy {policy_type} --remote --revision {revision}{steps}{skills}\n"
         "  uv run so101 server stop"
     )
 
@@ -365,16 +369,17 @@ def stop_server() -> None:
                  + "\n  ".join(failed))
 
 
-def require_server(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool):
+def require_server(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool,
+                   dataset: str = "whole"):
     """The running server, if it serves what this run asks for, as so101.toml sets it. Starting one
-    bills, so never do it implicitly."""
+    bills, so never do it implicitly. A server started before the `dataset` label serves the whole-demo model."""
     start = (f"uv run so101 server start {task} --policy {policy_type} --revision {revision}"
-             f"{steps_flag(policy_type, action_steps)}")
+             f"{steps_flag(policy_type, action_steps)}{' --skills' if dataset == 'skills' else ''}")
     server = active_server()
     if server is None:
         sys.exit(f"No policy server is running. Start one first:\n  {start}")
-    labels = server.labels or {}
-    wanted = _labels(task, policy_type, revision, action_steps, pin_unused_actions)
+    labels = {"dataset": "whole", **(server.labels or {})}
+    wanted = _labels(task, policy_type, revision, action_steps, pin_unused_actions, dataset)
     if {key: labels.get(key) for key in wanted} != wanted or server.status.stage != "RUNNING":
         sys.exit(f"The policy server isn't serving this model: {describe(server)}.\nStop it, then: {start}")
     return server

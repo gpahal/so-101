@@ -260,6 +260,17 @@ class Control:
     preview_fps: float
 
 
+SUPERVISOR_MODES = ("off", "shadow", "act")
+
+
+@dataclass(frozen=True)
+class Supervisor:
+    """The `[supervisor]` section of so101.toml: whether `so101 serve` runs the supervisor, and its program."""
+
+    mode: str  # off, shadow (decides and logs, sends nothing) or act (sends Pause, Rewind and Resume)
+    program: Path | None  # the program file, or None for the one in the package (`supervisor/program.toml`)
+
+
 @dataclass(frozen=True)
 class Settings:
     follower: Arm
@@ -273,6 +284,7 @@ class Settings:
     sim: dict
     data_dir: Path
     path: Path
+    supervisor: Supervisor = Supervisor("off", None)
 
     @property
     def outputs_dir(self) -> Path:
@@ -305,6 +317,17 @@ def _remote(policy: str, section: dict, path: Path) -> Remote:
     if not isinstance(pin, bool):
         raise ConfigError(f"[remote.{policy}] pin_unused_actions in {path} is {pin!r}: set it to true or false.")
     return Remote(job_target=section["job_target"], job_timeout=section["job_timeout"], pin_unused_actions=pin)
+
+
+def _supervisor(section: dict, path: Path) -> Supervisor:
+    mode = section.get("mode", "off")
+    if mode not in SUPERVISOR_MODES:
+        raise ConfigError(f"[supervisor] mode in {path} is {mode!r}: use {', '.join(SUPERVISOR_MODES)}.")
+    program = section.get("program", "")
+    if not isinstance(program, str):
+        raise ConfigError(f"[supervisor] program in {path} is {program!r}: give a file's path, or leave it out.")
+    file = Path(program).expanduser() if program else None
+    return Supervisor(mode=mode, program=None if file is None else file if file.is_absolute() else path.parent / file)
 
 
 def load() -> Settings:
@@ -379,6 +402,7 @@ def _parse(path: Path) -> Settings:
         sim=data.get("sim", {}),
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,
+        supervisor=_supervisor(data.get("supervisor", {}), path),
     )
 
 

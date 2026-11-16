@@ -672,6 +672,7 @@ function describe(e) {
       };
       let text = names[e.state] || e.state;
       if (e.ended_by) text += ` (ended by ${e.ended_by.replace("_", " ")})`;
+      if (e.cause === "policy_asked") text += ": the supervisor asks for you";
       if (e.note) text += `. ${e.note}`;
       return text;
     }
@@ -683,6 +684,9 @@ function describe(e) {
       return `Attempt ${e.attempt} ${e.saved ? "saved" : "not saved"} (${Math.round(seconds)} s, ended by ${String(e.ended_by).replace("_", " ")})`;
     }
     case "rewind": return `Rewound ${e.seconds} s`;
+    case "supervisor":
+      if (e.kind === "rewind") return `Supervisor played back ${e.seconds} s`;
+      return e.kind === "decision" && e.acted ? `Supervisor: ${e.decision}` : null;
     case "handover": return "The leader lined up with the follower: Teleop";
     case "fault": return `Fault: ${e.error}`;
     case "control_taken": return e.previous ? `A page (${e.who}) took control from ${e.previous}` : `A page (${e.who}) has control`;

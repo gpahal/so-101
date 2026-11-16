@@ -5,8 +5,11 @@
         dataset/        one LeRobot dataset per `so101 record` session; never modified
         session.json    what it was recorded with: settings, calibration, cameras, checks
       edits.toml        trims and deletions from `so101 review`
-      train/            the training dataset `so101 build` makes from sessions + edits, plus runs with --with
-      build.json        what `train/` was built from, to tell when it is out of date
+      datasets/         what models train on, which `so101 build` makes from sessions + edits
+        whole/          the whole demos, plus runs with --with: a LeRobot dataset
+          build.json    what it was built from, to tell when it is out of date
+        skills/         each kept demo's skills, in order (`so_101.skills`, `so101 build --skills`)
+          build.json    what it was built from, with the skill definitions and every demo's cuts
       runs/<YYYYmmdd-HHMMSS>/
         dataset/        one LeRobot dataset per `so101 serve` run, one episode per attempt; never modified
         run.json        what it ran with: settings, calibration, cameras, checks, policy, software.
@@ -25,8 +28,10 @@ only each run's labels.toml. Runs sit beside the sessions, never among them, so 
 reach a build only through `so101 build --with`, which reads the runs and their labels.toml and
 rebuilds when they change.
 
-The simulated twin `so101 sim build` makes from `train/` is not here but in the repo, in `sims/<task>/`
-beside so101.toml (`sim_dir`).
+A dataset's build.json sits inside it, so the rename that swaps in a new build swaps both together.
+
+The simulated twin `so101 sim build` makes from `datasets/whole/` is not here but in the repo, in
+`sims/<task>/` beside so101.toml (`sim_dir`).
 """
 
 import hashlib
@@ -47,6 +52,9 @@ if TYPE_CHECKING:
     from so_101.tasks import Task
 
 
+# The datasets `build` makes per task: the whole demos, and each demo's skills.
+WHOLE, SKILLS = "whole", "skills"
+DATASETS = (WHOLE, SKILLS)
 # A run's review decisions, the only file of a run edited after it's recorded.
 LABELS_FILE = "labels.toml"
 # Beside a run's dataset: the recorder's copy of the dataset's metadata after each finished save.
@@ -66,12 +74,15 @@ def edits_path(s: Settings, task: "Task") -> Path:
     return task_dir(s, task) / "edits.toml"
 
 
-def train_root(s: Settings, task: "Task") -> Path:
-    return task_dir(s, task) / "train"
+def dataset_root(s: Settings, task: "Task", kind: str = WHOLE) -> Path:
+    """The `kind` dataset `build` makes: WHOLE or SKILLS."""
+    if kind not in DATASETS:
+        raise ValueError(f"unknown dataset {kind!r}")
+    return task_dir(s, task) / "datasets" / kind
 
 
-def build_manifest_path(s: Settings, task: "Task") -> Path:
-    return task_dir(s, task) / "build.json"
+def build_manifest_path(s: Settings, task: "Task", kind: str = WHOLE) -> Path:
+    return dataset_root(s, task, kind) / "build.json"
 
 
 @dataclass(frozen=True)
@@ -338,7 +349,8 @@ def kept_episodes(s: Settings, task: "Task") -> int:
 
 
 def demo_start_pose(s: Settings, task: "Task") -> dict[str, float] | None:
-    """Each joint's median position at the start of the built demos, if there's a local training set.
+    """Each joint's median position at the start of the built demos, if there's a local training set:
+    the whole dataset, or else the skills dataset's first skill.
 
     Only the demos count: a run's cut added by `build --with` starts mid-task, wherever its Teleop
     or policy segment began. The demos are the build's first episodes, one per build.json entry
@@ -346,16 +358,20 @@ def demo_start_pose(s: Settings, task: "Task") -> dict[str, float] | None:
     import numpy as np
     import pandas as pd
 
-    root = train_root(s, task)
-    files = sorted(root.glob("data/*/*.parquet"))
-    manifest = build_manifest_path(s, task)
-    if not files or not manifest.is_file():
+    # The whole dataset, or else the skills dataset, whose first skill's episodes start where the demos do.
+    kind = next((k for k in DATASETS if build_manifest_path(s, task, k).is_file()), None)
+    if kind is None:
         return None
+    root, manifest = dataset_root(s, task, kind), build_manifest_path(s, task, kind)
+    files = sorted(root.glob("data/*/*.parquet"))
+    if not files:
+        return None
+    first = task.skills[0].name if kind == SKILLS and task.skills else None
+    demos = [n for n, e in enumerate(json.loads(manifest.read_text())["episodes"])
+             if "session" in e and e.get("skill") == first]
     names = json.loads((root / "meta" / "info.json").read_text())["features"]["observation.state"]["names"]
     frames = pd.concat(pd.read_parquet(f, columns=["episode_index", "frame_index", "observation.state"]) for f in files)
-    frames = frames[frames["frame_index"] == 0]
-    demos = sum("session" in e for e in json.loads(manifest.read_text())["episodes"])
-    frames = frames[frames["episode_index"] < demos]
+    frames = frames[(frames["frame_index"] == 0) & frames["episode_index"].isin(demos)]
     if frames.empty:
         return None
     starts = np.stack(frames["observation.state"])
@@ -370,11 +386,13 @@ def describe_pose(pose: dict[str, float]) -> str:
 # --- Builds ---------------------------------------------------------------------------------------
 
 
-def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_labels: bool = False) -> dict:
+def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_labels: bool = False,
+                 kind: str = WHOLE) -> dict:
     """Everything a build depends on. A build is current when this equals what build.json recorded.
 
     `sources` are the run sources besides the demos (`so101 build --with`). A demos-only build
-    without labels depends on no run, so it records no runs and a new run doesn't make it stale.
+    without labels depends on no run, so it records no runs and a new run doesn't make it stale. A
+    skills build also depends on the skill definitions and the program whose thresholds find the events.
     """
     inputs = {
         "prompt": task.prompt,
@@ -401,11 +419,18 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
         from so_101.control.analysis import RULES_VERSION
 
         inputs["rules"] = RULES_VERSION  # how runs are cut and labelled: a build under other rules isn't current
+    if kind == SKILLS:
+        from so_101.supervisor import program
+
+        found = program.load(s.supervisor.program)
+        inputs |= {"dataset": SKILLS, "skills": [skill.record() for skill in task.skills],
+                   "program": {"path": str(found.path), "version": found.version}}
     return inputs
 
 
-def build_is_current(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_labels: bool = False) -> bool:
-    path = build_manifest_path(s, task)
-    if not path.is_file() or not (train_root(s, task) / "meta" / "info.json").is_file():
+def build_is_current(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_labels: bool = False,
+                     kind: str = WHOLE) -> bool:
+    path = build_manifest_path(s, task, kind)
+    if not path.is_file() or not (dataset_root(s, task, kind) / "meta" / "info.json").is_file():
         return False
-    return json.loads(path.read_text()).get("inputs") == build_inputs(s, task, sources, keep_labels)
+    return json.loads(path.read_text()).get("inputs") == build_inputs(s, task, sources, keep_labels, kind)

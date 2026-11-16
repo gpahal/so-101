@@ -27,9 +27,10 @@ the `rewind` event's.
   time, in no training cut, count toward no blame window, and the policy hasn't started driving
   until its first action. A Teleop frame with no leader pose (`control.leader` all NaN, the tick the
   leader was lost) is in no cut either.
-- **Interruptions:** each Autonomous segment that an operator's Pause, Rewind or Teleop ended. Reset
-  and Quit end the attempt rather than interrupt it, and a time limit, fault or lost link isn't an
-  operator's judgement of the policy. Each has the reason from a `label` event, if the operator gave
+- **Interruptions:** each Autonomous segment that an operator's Pause, Rewind or Teleop ended, or
+  that the policy itself paused for a person (`policy_asked`, from the supervisor's layer: stuck, or
+  done). Reset and Quit end the attempt rather than interrupt it, and a time limit, fault or lost link
+  isn't a judgement of the policy. Each has the reason from a `label` event, if the operator gave
   one, and what came next: resume, rewind, teleop, how the attempt was asked to end (reset, quit or
   time_limit, from the `state` event into Returning), or end (the episode ended there). A Pause
   and Resume applied in the same tick leave no Paused frame, but their `state` events still make
@@ -38,7 +39,9 @@ the `rewind` event's.
   the operator rewound right after it (only pauses in between), they are the range the rewinds
   undid. Otherwise they are the last `blame_s` seconds of policy frames before it, counting back
   through pauses and waiting frames but not through anything else. The frames any other rewind
-  undid, such as one from Teleop or after a lost link, are suspect too.
+  undid, such as one from Teleop or after a lost link, are suspect too, and so are the frames each of
+  the supervisor's playbacks undid (its `supervisor` events of kind `rewind`). The playback's own
+  frames are waiting frames: the policy sent no action.
 - **Corrections:** the Teleop segments after the policy had driven in the attempt (sent its first
   action), a human stepping in on the policy. Only their frames are interventions
   (`intervention_mask`). Teleop before the policy first drove, as in a human attempt, corrects no
@@ -75,7 +78,7 @@ from pathlib import Path
 import numpy as np
 
 from so_101.control.recorder import OUTCOMES, Phase
-from so_101.control.states import STEP_INS
+from so_101.control.states import STEP_INS, Event
 from so_101.data import LABELS_FILE, Run, whole
 from so_101.settings import ConfigError, replace_file
 UNLABELLED = "unlabelled"
@@ -103,7 +106,9 @@ SOURCES = (CORRECTIONS, HUMAN_ATTEMPTS, POLICY_SUCCESSES)
 # The version of the rules that cut and label a run's frames, which build.json records. Raise it when
 # `training_cuts`, `intervention_mask` or `frame_labels` change what a build holds, so a build made
 # under other rules isn't current.
-RULES_VERSION = 6  # 6: a cut's action is the leader's pose or the policy's action, before the cap
+RULES_VERSION = 7  # 7: the supervisor's playbacks undo frames, and its pauses interrupt
+# What stops the policy for a judgement of it: an operator's step-in, or the policy asking for a person.
+STOPS = STEP_INS | {Event.POLICY_ASKED}
 
 Range = tuple[int, int]
 
@@ -138,7 +143,7 @@ class Segment:
 @dataclass(frozen=True)
 class Interruption:
     segment: Segment  # the Autonomous segment it ended
-    command: str  # pause, rewind or teleop
+    command: str  # pause, rewind, teleop or policy_asked
     reason: str | None  # why the operator paused, from a `label` event
     next: str  # resume, rewind, teleop, an ending (reset, quit or time_limit), or end
     rewound: Range | None  # the frames the rewinds right after it undid
@@ -553,13 +558,14 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
     segments = segments_of(phases)
     starts = {s.start: i for i, s in enumerate(segments)}
     rewinds = [e for e in events if e["type"] == "rewind" and "start_frame" in e]
+    playbacks = [e for e in events if e["type"] == "supervisor" and e.get("kind") == "rewind" and "start_frame" in e]
     states = [e for e in events if e["type"] == "state" and e.get("previous") == "autonomous"]
     reasons = [e for e in events if e["type"] == "label"]
 
     # Each interruption: the policy's segment up to it, the segments after it, and the command.
     found: list[tuple[Segment, tuple[Segment, ...], str]] = []
     stepped_in = sorted((e["frame"], e["cause"]) for e in states
-                        if isinstance(e.get("frame"), int) and e.get("cause") in STEP_INS)
+                        if isinstance(e.get("frame"), int) and e.get("cause") in STOPS)
     for i, segment in enumerate(segments):
         if segment.phase is not Phase.AUTONOMOUS:
             continue
@@ -575,7 +581,7 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
             continue  # the episode ended on the policy: a fault or a crash, not an operator
         ended = next((e for e in states if e.get("frame") == segment.stop), None)
         command = ended.get("cause") if ended else None
-        if command in STEP_INS:
+        if command in STOPS:
             found.append((Segment(Phase.AUTONOMOUS, start, segment.stop), segments[i + 1 :], command))
 
     interruptions = []
@@ -629,7 +635,8 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
         number=number, episode=episode, ended_by=end.get("ended_by") if end else None,
         recorded_outcome=recorded, outcome=outcome, phases=phases, waiting=frames.waiting,
         leaderless=frames.leaderless, segments=segments,
-        interruptions=tuple(interruptions), rewinds=tuple((e["start_frame"], e["end_frame"]) for e in rewinds),
+        interruptions=tuple(interruptions),
+        rewinds=tuple((e["start_frame"], e["end_frame"]) for e in rewinds + playbacks),
         failure_fixes=tuple(pairs), dropped_frames=dict((end or {}).get("dropped_frames") or {}),
     )
 

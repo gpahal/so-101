@@ -53,6 +53,19 @@ def gray(image: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32), (0, 0), BLUR)
 
 
+REFERENCE_DEMOS = 25  # first frames in the demos' view: enough for the median to drop the block wherever it lay
+
+
+def reference_episodes(recorded: list[tuple[str, int]], deleted: set[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Which demos give the demos' view: (session, episode) for up to REFERENCE_DEMOS of the recorded ones,
+    spread evenly from the first session to the last, leaving out those review deleted. `recorded` is each
+    session's name and episode count, oldest first."""
+    kept = [(name, episode) for name, count in recorded for episode in range(count) if (name, episode) not in deleted]
+    if len(kept) <= REFERENCE_DEMOS:
+        return kept
+    return [kept[int(i)] for i in np.linspace(0, len(kept) - 1, REFERENCE_DEMOS).round()]
+
+
 def reference(frames: list[np.ndarray]) -> np.ndarray:
     """The demos' view: the per-pixel median of their first frames (RGB), which drops the block."""
     return np.median(np.stack(frames), axis=0).astype(np.uint8)

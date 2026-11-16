@@ -27,7 +27,9 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     # pose. Only what's particular to this run goes to it, in run.json's contents (RUN_ENV).
     policy = {
         "type": ns.policy,
-        "repo": None if ns.checkpoint else task.policy_for(ns.policy),
+        "repo": None if ns.checkpoint else task.policy_for(ns.policy, ns.skills),
+        # A skills model: so101-control runs it under `skills.SkillPolicy`, which switches skills.
+        "skills": [skill.record() for skill in task.skills] if ns.skills else None,
         "revision": None if ns.checkpoint else ns.revision or "main",
         "checkpoint": str(setup.checkpoint) if ns.checkpoint else None,  # a model saved on this Mac
         "action_steps": setup.action_steps,

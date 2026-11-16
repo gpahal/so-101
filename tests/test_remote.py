@@ -140,7 +140,7 @@ class PolicySetupTest(unittest.TestCase):
     def test_run_and_serve_refuse_action_steps_for_pi05_before_asking_for_a_server(self) -> None:
         ns = argparse.Namespace(task="task", policy="pi05", remote=True, revision=None, checkpoint=None,
                                 action_steps=30)
-        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy: {"chunk_size": 50})
+        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy, skills=False: {"chunk_size": 50})
         with mock.patch.object(remote, "active_server") as active, contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as exited:
                 policy.policy_setup(types.SimpleNamespace(), ns, task)
@@ -151,7 +151,7 @@ class PolicySetupTest(unittest.TestCase):
         """Run `policy_setup` for pi0.5 on the cloud GPU up to where it asks for the server."""
         ns = argparse.Namespace(task="task", policy="pi05", remote=True, revision=None, checkpoint=None,
                                 action_steps=None)
-        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy: {"chunk_size": 50})
+        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy, skills=False: {"chunk_size": 50})
         with mock.patch.object(remote, "require_server", side_effect=SystemExit("asked")) as require:
             with self.assertRaises(SystemExit) as exited:
                 policy.policy_setup(s, ns, task)
@@ -163,7 +163,7 @@ class PolicySetupTest(unittest.TestCase):
             with self.subTest(pin=pin):
                 section = settings.Remote(job_target="l4x1", job_timeout="1h", pin_unused_actions=pin)
                 require = self.setup(types.SimpleNamespace(path="so101.toml", remote={"pi05": section}))
-                require.assert_called_once_with("task", "pi05", "main", 50, pin)
+                require.assert_called_once_with("task", "pi05", "main", 50, pin, "whole")
 
     def test_run_and_serve_stop_without_a_remote_section_for_the_policy(self) -> None:
         require = self.setup(types.SimpleNamespace(path="so101.toml", remote={}))

@@ -1,0 +1,493 @@
+# Samples for so101-failbench: one instant of a recorded policy attempt each, labelled ok or wrong.
+# Built from the policy rollouts under outputs/rollouts/ (ACT and pi0.5 on block-container, including the
+# moved-jar, no-mat and turned-block tests). Candidates came from gripper events: about 1 s after every close
+# (moment after_close), 1.5 s after every release from a hold (after_release), and the last frame (end).
+# Closes after a release in the same attempt (closing on the way back to rest) are left out: no grasp was tried.
+# Each candidate's top and wrist frames were labelled independently by two vision-model labellers against a
+# written rubric; they agreed on ok/wrong for 519 of 543. The 24 disagreements were settled by looking at the
+# frames: 11 decided, 13 left out as not decidable from the two frames (mostly end frames where the block can't be
+# seen in the jar), and the 14 both labellers called unsure were left out too. Within one attempt, at most 3
+# samples per moment and label are kept. Every row's note says how its label was reached.
+# Caveat: every label so far comes from Claude (the two labellers and the agent that settled disagreements),
+# not a person, so a Claude model under test may share their blind spots. Review rows before trusting small gaps.
+id,src,ep,t,moment,label,category,gripper,note
+act-20261113-122800-e0-t243,act_block-container_20261113-122800,0,243,after_close,wrong,bad_grasp,33.6,agreed; categories bad_grasp/missed_grasp: block at jaw tips by corner / jaw on block edge not between
+act-20261113-122800-e0-t290,act_block-container_20261113-122800,0,290,after_close,ok,none,18.6,agreed: block held centred / block held flat
+act-20261113-122800-e0-t421,act_block-container_20261113-122800,0,421,after_release,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-122800-e0-t554,act_block-container_20261113-122800,0,554,end,ok,none,1.3,agreed: faint red in jar none on table / faint red in jar
+act-20261113-122800-e1-t281,act_block-container_20261113-122800,1,281,after_close,ok,none,18.7,agreed: block held centred / block held flat
+act-20261113-122800-e1-t416,act_block-container_20261113-122800,1,416,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-122800-e1-t591,act_block-container_20261113-122800,1,591,end,ok,none,1.3,agreed: block in jar / red in jar
+act-20261113-124701-e0-t221,act_block-container_20261113-124701,0,221,after_close,wrong,bad_grasp,10.0,agreed; categories bad_grasp/missed_grasp: block at jaw tips not between jaws / block at jaw tip on table
+act-20261113-124701-e0-t313,act_block-container_20261113-124701,0,313,after_close,wrong,missed_grasp,9.2,agreed: block on table not between jaws / block away from jaws
+act-20261113-124701-e0-t491,act_block-container_20261113-124701,0,491,after_close,ok,none,18.9,agreed: block held centred / block held flat
+act-20261113-124701-e0-t689,act_block-container_20261113-124701,0,689,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-124701-e0-t820,act_block-container_20261113-124701,0,820,end,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-124950-e0-t282,act_block-container_20261113-124950,0,282,after_close,ok,none,18.6,agreed: block held centred / block held flat
+act-20261113-124950-e0-t421,act_block-container_20261113-124950,0,421,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-124950-e0-t559,act_block-container_20261113-124950,0,559,end,ok,none,1.3,agreed: block in jar / faint red in jar
+act-20261113-124950-e1-t269,act_block-container_20261113-124950,1,269,after_close,ok,none,18.9,agreed: block held centred / block held flat
+act-20261113-124950-e1-t398,act_block-container_20261113-124950,1,398,after_release,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e1-t645,act_block-container_20261113-124950,1,645,end,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e2-t282,act_block-container_20261113-124950,2,282,after_close,ok,none,18.3,agreed: block held centred / block held flat
+act-20261113-124950-e2-t412,act_block-container_20261113-124950,2,412,after_release,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e2-t562,act_block-container_20261113-124950,2,562,end,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e3-t314,act_block-container_20261113-124950,3,314,after_close,ok,none,18.9,agreed: block held centred / block held flat
+act-20261113-124950-e3-t455,act_block-container_20261113-124950,3,455,after_release,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e3-t589,act_block-container_20261113-124950,3,589,end,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e4-t299,act_block-container_20261113-124950,4,299,after_close,ok,none,18.7,agreed: block held centred / block held flat
+act-20261113-124950-e4-t503,act_block-container_20261113-124950,4,503,after_release,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e4-t651,act_block-container_20261113-124950,4,651,end,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e5-t278,act_block-container_20261113-124950,5,278,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+act-20261113-124950-e5-t415,act_block-container_20261113-124950,5,415,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-124950-e6-t269,act_block-container_20261113-124950,6,269,after_close,ok,none,18.8,agreed: block held centred / block held flat and centred
+act-20261113-124950-e6-t409,act_block-container_20261113-124950,6,409,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-124950-e6-t578,act_block-container_20261113-124950,6,578,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-124950-e7-t297,act_block-container_20261113-124950,7,297,after_close,wrong,missed_grasp,13.0,agreed: block on table not between jaws / block on table away
+act-20261113-124950-e7-t614,act_block-container_20261113-124950,7,614,after_close,wrong,missed_grasp,9.6,agreed: block on table not between jaws / block ahead of jaws
+act-20261113-124950-e7-t774,act_block-container_20261113-124950,7,774,after_close,wrong,missed_grasp,13.4,agreed: block on table not between jaws / block ahead of jaws
+act-20261113-124950-e7-t889,act_block-container_20261113-124950,7,889,end,wrong,not_picked,27.1,agreed: block on table under gripper / block tilted on mat
+act-20261113-124950-e8-t302,act_block-container_20261113-124950,8,302,after_close,ok,none,18.4,agreed: block held centred / block held flat and centred
+act-20261113-124950-e9-t314,act_block-container_20261113-124950,9,314,after_close,ok,none,18.6,agreed: block held centred / block held flat and centred
+act-20261113-124950-e9-t462,act_block-container_20261113-124950,9,462,after_release,ok,none,1.4,agreed: block in jar / block in jar
+act-20261113-124950-e9-t600,act_block-container_20261113-124950,9,600,end,ok,none,1.4,adjudicated: red block visible in jar / jar contents unclear
+act-20261113-124950-e10-t281,act_block-container_20261113-124950,10,281,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+act-20261113-124950-e10-t435,act_block-container_20261113-124950,10,435,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-124950-e10-t572,act_block-container_20261113-124950,10,572,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-124950-e11-t274,act_block-container_20261113-124950,11,274,after_close,ok,none,18.4,agreed: block held centred / block held flat and centred
+act-20261113-124950-e11-t411,act_block-container_20261113-124950,11,411,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-124950-e11-t592,act_block-container_20261113-124950,11,592,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-124950-e12-t331,act_block-container_20261113-124950,12,331,after_close,wrong,missed_grasp,13.4,agreed: block on table away from jaws / block on mat beyond jaws
+act-20261113-124950-e12-t797,act_block-container_20261113-124950,12,797,end,wrong,missed_jar,1.3,agreed: block on table against jar / block on mat in front of jar
+act-20261113-124950-e13-t297,act_block-container_20261113-124950,13,297,after_close,ok,none,18.6,agreed: block held centred / block held flat and centred
+act-20261113-124950-e13-t470,act_block-container_20261113-124950,13,470,after_release,wrong,missed_jar,1.3,agreed: block on table beside jar / block beyond jar outside
+act-20261113-124950-e13-t889,act_block-container_20261113-124950,13,889,end,wrong,missed_jar,1.2,agreed: block on mat against jar / block on mat beside jar
+act-20261113-124950-e14-t289,act_block-container_20261113-124950,14,289,after_close,ok,none,18.2,agreed: block held centred / block held flat and centred
+act-20261113-124950-e14-t420,act_block-container_20261113-124950,14,420,after_release,wrong,missed_jar,1.4,agreed: block on table beside jar / block on mat beside jar
+act-20261113-124950-e14-t737,act_block-container_20261113-124950,14,737,end,wrong,missed_jar,1.4,agreed: block on mat beside jar / block on mat left of jar
+act-20261113-124950-e15-t276,act_block-container_20261113-124950,15,276,after_close,ok,none,18.9,agreed: block held centred between jaws / held centred
+act-20261113-124950-e15-t406,act_block-container_20261113-124950,15,406,after_release,ok,none,1.4,agreed: block in jar / block visible in jar
+act-20261113-124950-e15-t604,act_block-container_20261113-124950,15,604,end,ok,none,1.4,agreed: block in jar / red block visible in jar
+act-20261113-124950-e16-t283,act_block-container_20261113-124950,16,283,after_close,wrong,missed_grasp,13.3,agreed: block on table away from jaws / block on mat beyond jaws
+act-20261113-124950-e16-t625,act_block-container_20261113-124950,16,625,after_close,wrong,missed_grasp,13.4,agreed: one jaw on block other jaw far / block on mat beyond jaws
+act-20261113-124950-e16-t753,act_block-container_20261113-124950,16,753,after_close,wrong,missed_grasp,34.3,agreed: one jaw on block other jaw far / block on mat beyond jaws
+act-20261113-124950-e16-t826,act_block-container_20261113-124950,16,826,after_close,ok,none,18.0,agreed: block held centred between jaws / held centred
+act-20261113-124950-e16-t890,act_block-container_20261113-124950,16,890,end,wrong,still_holding,18.0,agreed: block held above jar / block held above jar
+act-20261113-124950-e17-t290,act_block-container_20261113-124950,17,290,after_close,wrong,missed_grasp,11.8,agreed: block on table away from jaws / block on mat away from gripper
+act-20261113-124950-e17-t348,act_block-container_20261113-124950,17,348,end,wrong,not_picked,1.9,agreed: block on mat / block on mat by closed jaws
+act-20261113-124950-e18-t305,act_block-container_20261113-124950,18,305,after_close,wrong,missed_grasp,12.0,agreed: block on table away from jaws / block on mat away from gripper
+act-20261113-124950-e18-t728,act_block-container_20261113-124950,18,728,after_close,wrong,missed_grasp,7.4,adjudicated: jaws wide open block beyond tips / block against left jaw and right jaw open
+act-20261113-124950-e18-t889,act_block-container_20261113-124950,18,889,end,wrong,not_picked,10.0,agreed; categories not_picked/still_holding: jaws on block at table / block still between jaws
+act-20261113-124950-e19-t228,act_block-container_20261113-124950,19,228,after_close,wrong,missed_grasp,9.7,agreed; categories missed_grasp/bad_grasp: block on mat beside jaw / block edge at left jaw tip
+act-20261113-124950-e19-t516,act_block-container_20261113-124950,19,516,after_close,wrong,missed_grasp,10.1,agreed: jaws closed beside block / block on mat ahead of jaws
+act-20261113-124950-e19-t811,act_block-container_20261113-124950,19,811,end,wrong,not_picked,18.7,agreed: block on mat / block on mat away from jar
+act-20261113-124950-e20-t275,act_block-container_20261113-124950,20,275,after_close,ok,none,18.8,agreed: block held centred between jaws / held centred
+act-20261113-124950-e20-t416,act_block-container_20261113-124950,20,416,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-124950-e20-t535,act_block-container_20261113-124950,20,535,end,ok,none,1.3,agreed: block in jar / red block faintly visible in jar
+act-20261113-124950-e21-t284,act_block-container_20261113-124950,21,284,after_close,ok,none,18.7,agreed: block held centred between jaws / held centred
+act-20261113-124950-e22-t285,act_block-container_20261113-124950,22,285,after_close,ok,none,18.3,agreed: block held centred between jaws / held centred
+act-20261113-124950-e22-t437,act_block-container_20261113-124950,22,437,after_close,wrong,missed_grasp,23.6,agreed: block on table beyond jaws tipped / block beside jar jaws over jar
+act-20261113-124950-e22-t440,act_block-container_20261113-124950,22,440,after_release,wrong,missed_jar,18.0,agreed: block on mat beside jar / block on mat beside jar
+act-20261113-124950-e22-t597,act_block-container_20261113-124950,22,597,end,wrong,missed_jar,1.3,agreed: block on table beside jar / block beside jar
+act-20261113-124950-e23-t298,act_block-container_20261113-124950,23,298,after_close,ok,none,18.2,agreed: block held centred between jaws / held centred
+act-20261113-124950-e23-t450,act_block-container_20261113-124950,23,450,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-124950-e23-t562,act_block-container_20261113-124950,23,562,end,ok,none,1.3,agreed: block in jar / red in jar
+act-20261113-124950-e24-t265,act_block-container_20261113-124950,24,265,after_close,wrong,missed_grasp,26.2,agreed: block on table not between jaws / block ahead of jaws
+act-20261113-124950-e24-t310,act_block-container_20261113-124950,24,310,after_close,wrong,missed_grasp,9.1,agreed: block on table not between jaws / block away from jaws
+act-20261113-124950-e24-t482,act_block-container_20261113-124950,24,482,end,wrong,not_picked,31.6,agreed: block on table under gripper / block on table near jar
+act-20261113-130912-e0-t281,act_block-container_20261113-130912,0,281,after_close,ok,none,18.5,agreed: block held centred between jaws / held centred
+act-20261113-130912-e0-t527,act_block-container_20261113-130912,0,527,end,ok,none,1.2,agreed: block in jar / block in jar
+act-20261113-130912-e1-t289,act_block-container_20261113-130912,1,289,after_close,ok,none,19.0,agreed: block held centred between jaws / held centred
+act-20261113-130912-e1-t432,act_block-container_20261113-130912,1,432,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-130912-e1-t532,act_block-container_20261113-130912,1,532,end,ok,none,1.3,agreed: block in jar / faint red in jar
+act-20261113-130912-e2-t289,act_block-container_20261113-130912,2,289,after_close,ok,none,18.7,agreed: block held centred / block held flat
+act-20261113-130912-e2-t473,act_block-container_20261113-130912,2,473,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-130912-e2-t590,act_block-container_20261113-130912,2,590,end,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e3-t298,act_block-container_20261113-130912,3,298,after_close,ok,none,18.3,agreed: block held centred / block held flat
+act-20261113-130912-e3-t447,act_block-container_20261113-130912,3,447,after_release,ok,none,23.7,agreed: block in jar / block visible in jar
+act-20261113-130912-e4-t296,act_block-container_20261113-130912,4,296,after_close,ok,none,19.0,agreed: block held centred / block held flat
+act-20261113-130912-e4-t443,act_block-container_20261113-130912,4,443,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e4-t570,act_block-container_20261113-130912,4,570,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-130912-e5-t283,act_block-container_20261113-130912,5,283,after_close,ok,none,18.7,agreed: block held centred / block held flat
+act-20261113-130912-e5-t438,act_block-container_20261113-130912,5,438,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e5-t584,act_block-container_20261113-130912,5,584,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-130912-e6-t304,act_block-container_20261113-130912,6,304,after_close,ok,none,19.1,agreed: block held centred / block held flat
+act-20261113-130912-e6-t458,act_block-container_20261113-130912,6,458,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e6-t567,act_block-container_20261113-130912,6,567,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-130912-e7-t296,act_block-container_20261113-130912,7,296,after_close,ok,none,18.7,agreed: block held centred / block held flat
+act-20261113-130912-e7-t486,act_block-container_20261113-130912,7,486,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e7-t613,act_block-container_20261113-130912,7,613,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-130912-e8-t373,act_block-container_20261113-130912,8,373,after_close,wrong,bad_grasp,31.5,adjudicated: block between jaws but dark and tilted / block off centre under left jaw
+act-20261113-130912-e8-t402,act_block-container_20261113-130912,8,402,after_close,wrong,missed_grasp,10.8,agreed: block on table not between jaws / block on table far from gripper
+act-20261113-130912-e8-t535,act_block-container_20261113-130912,8,535,end,wrong,not_picked,34.6,agreed: block on table between open jaws / block on mat between open jaws
+act-20261113-130912-e9-t314,act_block-container_20261113-130912,9,314,after_close,ok,none,18.7,agreed: block held centred / block held flat
+act-20261113-130912-e9-t466,act_block-container_20261113-130912,9,466,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e9-t623,act_block-container_20261113-130912,9,623,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-130912-e10-t241,act_block-container_20261113-130912,10,241,after_close,ok,none,19.0,agreed: block held centred / block held flat
+act-20261113-130912-e10-t387,act_block-container_20261113-130912,10,387,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e10-t529,act_block-container_20261113-130912,10,529,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-130912-e11-t300,act_block-container_20261113-130912,11,300,after_close,ok,none,19.1,agreed: block held centred / block held flat and centred
+act-20261113-130912-e11-t446,act_block-container_20261113-130912,11,446,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e11-t702,act_block-container_20261113-130912,11,702,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-130912-e12-t279,act_block-container_20261113-130912,12,279,after_close,wrong,missed_grasp,12.0,agreed: block on table not between jaws / block away from jaws
+act-20261113-130912-e12-t493,act_block-container_20261113-130912,12,493,after_close,ok,none,18.6,agreed: block held centred / block held flat and centred
+act-20261113-130912-e12-t630,act_block-container_20261113-130912,12,630,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e12-t851,act_block-container_20261113-130912,12,851,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+act-20261113-130912-e13-t335,act_block-container_20261113-130912,13,335,after_close,ok,none,23.4,agreed: block held centred / block held flat
+act-20261113-130912-e13-t344,act_block-container_20261113-130912,13,344,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+act-20261113-130912-e13-t475,act_block-container_20261113-130912,13,475,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e13-t605,act_block-container_20261113-130912,13,605,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+act-20261113-130912-e14-t282,act_block-container_20261113-130912,14,282,after_close,ok,none,18.9,agreed: block held centred / block held flat and centred
+act-20261113-130912-e14-t471,act_block-container_20261113-130912,14,471,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e14-t588,act_block-container_20261113-130912,14,588,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+act-20261113-130912-e15-t274,act_block-container_20261113-130912,15,274,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+act-20261113-130912-e15-t431,act_block-container_20261113-130912,15,431,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e15-t603,act_block-container_20261113-130912,15,603,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+act-20261113-130912-e16-t288,act_block-container_20261113-130912,16,288,after_close,ok,none,19.0,agreed: block held centred / block held flat and centred
+act-20261113-130912-e16-t438,act_block-container_20261113-130912,16,438,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e16-t577,act_block-container_20261113-130912,16,577,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+act-20261113-130912-e17-t267,act_block-container_20261113-130912,17,267,after_close,ok,none,18.3,agreed: block held centred / block held flat and centred
+act-20261113-130912-e17-t436,act_block-container_20261113-130912,17,436,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e17-t577,act_block-container_20261113-130912,17,577,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+act-20261113-130912-e18-t342,act_block-container_20261113-130912,18,342,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+act-20261113-130912-e18-t489,act_block-container_20261113-130912,18,489,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e18-t608,act_block-container_20261113-130912,18,608,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+act-20261113-130912-e19-t277,act_block-container_20261113-130912,19,277,after_close,ok,none,18.8,agreed: block held centred between jaws / held centred
+act-20261113-130912-e19-t422,act_block-container_20261113-130912,19,422,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e19-t535,act_block-container_20261113-130912,19,535,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+act-20261113-130912-e20-t282,act_block-container_20261113-130912,20,282,after_close,ok,none,18.5,agreed: block held centred between jaws / held centred
+act-20261113-130912-e20-t438,act_block-container_20261113-130912,20,438,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e21-t261,act_block-container_20261113-130912,21,261,after_close,ok,none,18.7,agreed: block held centred between jaws / held centred
+act-20261113-130912-e21-t400,act_block-container_20261113-130912,21,400,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-130912-e21-t538,act_block-container_20261113-130912,21,538,end,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e22-t274,act_block-container_20261113-130912,22,274,after_close,wrong,missed_grasp,11.8,agreed: block on table ahead of jaws / block on mat beyond jaws
+act-20261113-130912-e22-t477,act_block-container_20261113-130912,22,477,after_close,ok,none,18.3,agreed: block held centred between jaws / held centred
+act-20261113-130912-e22-t613,act_block-container_20261113-130912,22,613,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-130912-e22-t740,act_block-container_20261113-130912,22,740,end,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e23-t331,act_block-container_20261113-130912,23,331,after_close,ok,none,18.4,agreed: block held centred between jaws / held centred
+act-20261113-130912-e23-t487,act_block-container_20261113-130912,23,487,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-130912-e23-t661,act_block-container_20261113-130912,23,661,end,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-130912-e24-t311,act_block-container_20261113-130912,24,311,after_close,ok,none,18.9,agreed: block held centred between jaws / held centred
+act-20261113-130912-e24-t484,act_block-container_20261113-130912,24,484,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-130912-e24-t762,act_block-container_20261113-130912,24,762,end,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-135757-e0-t203,act_block-container_20261113-135757,0,203,after_close,wrong,missed_grasp,9.8,agreed: block on table ahead of jaws / block on mat beyond jaws
+act-20261113-135757-e0-t370,act_block-container_20261113-135757,0,370,after_close,wrong,missed_grasp,10.4,agreed: jaw beside block not clamped / block on mat jaw at corner
+act-20261113-135757-e0-t611,act_block-container_20261113-135757,0,611,after_close,wrong,missed_grasp,9.8,agreed: jaw beside block not clamped / jaws open block on mat
+act-20261113-135757-e0-t749,act_block-container_20261113-135757,0,749,after_close,ok,none,18.0,agreed: block held centred between jaws / held centred
+act-20261113-141638-e0-t253,act_block-container_20261113-141638,0,253,after_close,ok,none,18.7,agreed: block held centred between jaws / held centred
+act-20261113-141638-e0-t378,act_block-container_20261113-141638,0,378,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-141638-e0-t499,act_block-container_20261113-141638,0,499,end,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-141638-e1-t274,act_block-container_20261113-141638,1,274,after_close,ok,none,19.1,agreed: block held centred / block held flat
+act-20261113-141638-e1-t405,act_block-container_20261113-141638,1,405,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-141638-e2-t263,act_block-container_20261113-141638,2,263,after_close,ok,none,18.7,agreed: block held centred / block held flat
+act-20261113-141638-e2-t425,act_block-container_20261113-141638,2,425,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+act-20261113-141638-e2-t568,act_block-container_20261113-141638,2,568,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261113-141638-e3-t305,act_block-container_20261113-141638,3,305,after_close,ok,none,18.4,agreed: block held centred / block held flat
+act-20261113-141638-e3-t458,act_block-container_20261113-141638,3,458,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261113-141638-e4-t284,act_block-container_20261113-141638,4,284,after_close,ok,none,18.9,agreed: block held centred / block held flat
+act-20261113-141638-e4-t462,act_block-container_20261113-141638,4,462,after_release,ok,none,3.1,agreed: block in jar / block in jar
+act-20261113-141638-e4-t615,act_block-container_20261113-141638,4,615,end,ok,none,1.3,adjudicated: red block visible in jar / jar contents unclear
+act-20261114-112227-e0-t276,act_block-container_20261114-112227,0,276,after_close,ok,none,19.0,agreed: block held centred / block held flat
+act-20261114-112227-e0-t398,act_block-container_20261114-112227,0,398,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261114-112227-e0-t516,act_block-container_20261114-112227,0,516,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261114-112852-e0-t281,act_block-container_20261114-112852,0,281,after_close,ok,none,18.5,agreed: block held centred / block held flat
+act-20261114-112852-e0-t403,act_block-container_20261114-112852,0,403,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261114-112852-e0-t493,act_block-container_20261114-112852,0,493,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261114-112852-e1-t288,act_block-container_20261114-112852,1,288,after_close,ok,none,18.9,agreed: block held centred / block held flat
+act-20261114-112852-e1-t477,act_block-container_20261114-112852,1,477,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261114-112852-e1-t867,act_block-container_20261114-112852,1,867,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261114-113107-e0-t299,act_block-container_20261114-113107,0,299,after_close,wrong,missed_grasp,14.1,agreed: jaws empty block on mat / block on mat ahead of jaws
+act-20261114-113107-e0-t462,act_block-container_20261114-113107,0,462,after_close,wrong,missed_grasp,11.5,adjudicated: jaws empty / jaws empty but block and jar not visible
+act-20261114-113107-e1-t279,act_block-container_20261114-113107,1,279,after_close,wrong,missed_grasp,10.3,agreed: jaws empty block on mat / block on mat and jaws empty
+act-20261114-113107-e1-t363,act_block-container_20261114-113107,1,363,end,wrong,not_picked,1.3,agreed: block on table near gripper / block on mat beyond closed jaws
+act-20261114-113107-e2-t293,act_block-container_20261114-113107,2,293,after_close,wrong,missed_grasp,12.4,adjudicated: jaws empty / jaws empty but block and jar not visible
+act-20261114-113107-e2-t474,act_block-container_20261114-113107,2,474,after_close,wrong,missed_grasp,13.5,agreed: jaws empty block on mat / block on mat and jaws empty
+act-20261114-113107-e2-t552,act_block-container_20261114-113107,2,552,end,wrong,not_picked,1.5,agreed: block on mat / block on mat by closed jaws
+act-20261114-113107-e3-t285,act_block-container_20261114-113107,3,285,after_close,wrong,missed_grasp,12.8,agreed: jaws empty block on mat / block on mat away from jaws
+act-20261114-113107-e3-t406,act_block-container_20261114-113107,3,406,end,wrong,not_picked,9.2,agreed: block on mat / block on mat ahead of open jaws
+act-20261114-113107-e4-t289,act_block-container_20261114-113107,4,289,after_close,wrong,missed_grasp,13.6,agreed: jaws empty block on mat / block on mat away from jaws
+act-20261114-113107-e4-t450,act_block-container_20261114-113107,4,450,after_close,wrong,missed_grasp,16.8,agreed: block on table not between jaws / block ahead of jaws
+act-20261114-113107-e4-t521,act_block-container_20261114-113107,4,521,after_close,wrong,missed_grasp,11.2,agreed: block on table not between jaws / block ahead of jaws
+act-20261114-113107-e4-t561,act_block-container_20261114-113107,4,561,end,wrong,not_picked,32.2,agreed: block on mat beyond jaws / block on mat between open jaws
+act-20261114-125905-e0-t281,act_block-container_20261114-125905,0,281,after_close,wrong,missed_grasp,10.0,agreed: block on table beside gripper / block on table far from gripper
+act-20261114-125905-e0-t408,act_block-container_20261114-125905,0,408,end,wrong,not_picked,36.8,agreed: block on mat / block on mat ahead of jaws
+act-20261114-125905-e1-t297,act_block-container_20261114-125905,1,297,after_close,wrong,missed_grasp,11.6,agreed: block on table not between jaws / block away from jaws
+act-20261114-125905-e1-t334,act_block-container_20261114-125905,1,334,end,wrong,not_picked,1.1,agreed: block on mat / block on mat beside gripper
+act-20261114-125905-e2-t288,act_block-container_20261114-125905,2,288,after_close,wrong,missed_grasp,12.2,agreed: block on table beside gripper / block on table not in jaws
+act-20261114-125905-e2-t418,act_block-container_20261114-125905,2,418,end,wrong,not_picked,34.4,agreed: block on mat / block on mat ahead of jaws
+act-20261114-125905-e3-t287,act_block-container_20261114-125905,3,287,after_close,wrong,missed_grasp,13.8,agreed: block on table not between jaws / block away from jaws
+act-20261114-125905-e3-t486,act_block-container_20261114-125905,3,486,after_close,wrong,missed_grasp,14.8,agreed: block on table not between jaws / block away from jaws
+act-20261114-125905-e3-t587,act_block-container_20261114-125905,3,587,end,wrong,not_picked,34.4,agreed: block on mat between open jaws / block on mat away from jar
+act-20261114-125905-e4-t252,act_block-container_20261114-125905,4,252,after_close,wrong,missed_grasp,20.1,agreed; categories missed_grasp/dropped: block on table not between jaws / block on mat away from gripper
+act-20261114-125905-e4-t407,act_block-container_20261114-125905,4,407,after_release,wrong,missed_jar,27.8,agreed: block on mat beside jar / block on table beside jar
+act-20261114-125905-e4-t455,act_block-container_20261114-125905,4,455,end,wrong,not_picked,32.4,agreed: block on mat beside jar / block on mat short of jar
+act-20261114-133124-e0-t647,act_block-container_20261114-133124,0,647,end,wrong,not_picked,1.2,agreed: block still on table / block on table
+act-20261114-133124-e1-t305,act_block-container_20261114-133124,1,305,after_close,wrong,missed_grasp,11.7,agreed: block on table not between jaws / block on table away from jaws
+act-20261114-133124-e1-t429,act_block-container_20261114-133124,1,429,after_close,wrong,missed_grasp,5.1,agreed: block on table beyond jaws / block on table beyond jaws
+act-20261114-133124-e1-t523,act_block-container_20261114-133124,1,523,after_close,wrong,missed_grasp,7.4,agreed: block on table beyond jaws / block on table beyond jaws
+act-20261114-133124-e1-t547,act_block-container_20261114-133124,1,547,end,wrong,not_picked,32.4,agreed: block still on table / block on table near jar
+act-20261114-133124-e2-t300,act_block-container_20261114-133124,2,300,after_close,wrong,missed_grasp,10.8,agreed: block on table beyond jaws / jaws closed block on table
+act-20261114-133124-e2-t615,act_block-container_20261114-133124,2,615,after_close,wrong,missed_grasp,8.5,agreed: block on table beyond jaws / jaws closed block on table
+act-20261114-133124-e2-t877,act_block-container_20261114-133124,2,877,end,wrong,not_picked,10.1,agreed: block still on table / block on table
+act-20261114-133124-e3-t646,act_block-container_20261114-133124,3,646,end,wrong,not_picked,1.3,agreed: block still on table / block on table
+act-20261114-133124-e4-t430,act_block-container_20261114-133124,4,430,after_close,wrong,missed_grasp,4.4,agreed: jaw on block corner / block on table ahead of open jaws
+act-20261114-133124-e4-t531,act_block-container_20261114-133124,4,531,after_close,wrong,missed_grasp,6.8,agreed: jaw tip on block corner / block on table beside jaw
+act-20261114-133124-e4-t598,act_block-container_20261114-133124,4,598,end,wrong,not_picked,7.7,agreed: block still on table / block on table between open jaws
+act-20261114-133807-e0-t286,act_block-container_20261114-133807,0,286,after_close,wrong,missed_grasp,13.8,agreed: block on mat away from jaws / block on mat away from jaws
+act-20261114-133807-e0-t494,act_block-container_20261114-133807,0,494,end,wrong,not_picked,11.7,agreed: block still on table / block on table
+act-20261114-133807-e1-t283,act_block-container_20261114-133807,1,283,after_close,wrong,missed_grasp,13.6,agreed: block on mat away from jaws / block on mat away from jaws
+act-20261114-133807-e1-t622,act_block-container_20261114-133807,1,622,after_close,wrong,missed_grasp,14.0,agreed: block on mat away from jaws / block on mat away from jaws
+act-20261114-133807-e1-t889,act_block-container_20261114-133807,1,889,end,wrong,not_picked,9.3,agreed; categories not_picked/missed_jar: block still on table / block on table beside jar
+act-20261114-133807-e2-t291,act_block-container_20261114-133807,2,291,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+act-20261114-133807-e2-t405,act_block-container_20261114-133807,2,405,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261114-133807-e3-t293,act_block-container_20261114-133807,3,293,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+act-20261114-133807-e3-t430,act_block-container_20261114-133807,3,430,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261114-133807-e3-t716,act_block-container_20261114-133807,3,716,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+act-20261114-134707-e0-t281,act_block-container_20261114-134707,0,281,after_close,ok,none,18.5,agreed: block held centred / block held flat and centred
+act-20261114-134707-e0-t405,act_block-container_20261114-134707,0,405,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261114-134707-e0-t471,act_block-container_20261114-134707,0,471,end,ok,none,1.3,agreed: red block visible in jar / block in jar
+act-20261114-135436-e0-t268,act_block-container_20261114-135436,0,268,after_close,ok,none,19.2,agreed: block held centred / block held flat and centred
+act-20261114-135436-e0-t396,act_block-container_20261114-135436,0,396,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261114-135436-e1-t280,act_block-container_20261114-135436,1,280,after_close,wrong,missed_grasp,17.1,agreed: jaws empty block on mat / block on its side beside left jaw
+act-20261114-135436-e1-t380,act_block-container_20261114-135436,1,380,after_release,wrong,missed_jar,33.7,agreed: block on table beside jar / block on its side on mat near jar
+act-20261114-135436-e1-t672,act_block-container_20261114-135436,1,672,end,wrong,not_picked,16.5,agreed: block on table not in jar / block on its side beside jar
+act-20261114-135436-e2-t296,act_block-container_20261114-135436,2,296,after_close,wrong,missed_grasp,16.5,agreed: block on table not between jaws / block away from jaws
+act-20261114-135436-e2-t462,act_block-container_20261114-135436,2,462,after_close,wrong,bad_grasp,34.3,agreed; categories bad_grasp/missed_grasp: block on side at jaw tips / block at left jaw tip on table
+act-20261114-135436-e2-t519,act_block-container_20261114-135436,2,519,after_close,wrong,bad_grasp,15.0,agreed; categories bad_grasp/missed_grasp: block on side at jaw tips / block at left jaw tip on table
+act-20261114-135436-e2-t565,act_block-container_20261114-135436,2,565,end,wrong,not_picked,27.8,agreed: block on table not in jar / block on its side on mat
+act-20261114-135436-e3-t295,act_block-container_20261114-135436,3,295,after_close,wrong,missed_grasp,14.8,agreed: block on table not between jaws / block away from jaws
+act-20261114-135436-e3-t429,act_block-container_20261114-135436,3,429,after_close,wrong,bad_grasp,9.9,agreed; categories bad_grasp/missed_grasp: block on side at jaw tips / upturned block at jaw tip
+act-20261114-135436-e3-t511,act_block-container_20261114-135436,3,511,after_close,wrong,missed_grasp,14.6,agreed: block beside left jaw on table / block upside down on mat
+act-20261114-135436-e3-t557,act_block-container_20261114-135436,3,557,end,wrong,not_picked,33.8,agreed: block on table not in jar / block upside down on mat
+act-20261114-135436-e4-t258,act_block-container_20261114-135436,4,258,after_close,ok,none,19.2,agreed: block held upside down centred / block held centred upside down
+act-20261114-135436-e4-t378,act_block-container_20261114-135436,4,378,after_release,ok,none,1.3,agreed: block in jar / block in jar
+act-20261114-135436-e4-t556,act_block-container_20261114-135436,4,556,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+pi05-20261113-120709-e0-t270,pi05_block-container_20261113-120709,0,270,after_close,wrong,missed_grasp,29.6,adjudicated: block between wide open jaws / jaws open around block
+pi05-20261113-120709-e0-t412,pi05_block-container_20261113-120709,0,412,after_close,ok,none,19.5,agreed: block held centred / block held flat and centred
+pi05-20261113-120709-e0-t434,pi05_block-container_20261113-120709,0,434,after_release,wrong,missed_jar,18.9,agreed; categories missed_jar/still_holding: block released on table near jar / block still between jaws
+pi05-20261113-120709-e0-t866,pi05_block-container_20261113-120709,0,866,end,ok,none,2.1,agreed: red block visible in jar / block in jar
+pi05-20261113-122953-e0-t285,pi05_block-container_20261113-122953,0,285,after_close,wrong,missed_grasp,15.1,agreed: block on table not between jaws / block tilted on mat
+pi05-20261113-122953-e0-t481,pi05_block-container_20261113-122953,0,481,end,wrong,not_picked,33.2,agreed: block on mat / block on mat under open gripper
+pi05-20261113-123117-e0-t315,pi05_block-container_20261113-123117,0,315,after_close,wrong,bad_grasp,19.0,agreed: block at jaw tips tilted / block at jaw tips rotated
+pi05-20261113-123117-e0-t346,pi05_block-container_20261113-123117,0,346,after_release,wrong,missed_jar,11.8,agreed: block released on table near jar / block on mat beside jar
+pi05-20261113-123117-e0-t866,pi05_block-container_20261113-123117,0,866,end,wrong,not_picked,33.8,agreed; categories not_picked/missed_jar: block on mat / block on mat beside jar
+pi05-20261113-123548-e0-t280,pi05_block-container_20261113-123548,0,280,after_close,wrong,missed_grasp,10.4,agreed: block on table not between jaws / block on mat beside jaws
+pi05-20261113-123548-e0-t530,pi05_block-container_20261113-123548,0,530,after_close,wrong,missed_grasp,5.0,agreed; categories missed_grasp/bad_grasp: jaw landed on top of block / left jaw over block edge
+pi05-20261113-123548-e0-t610,pi05_block-container_20261113-123548,0,610,after_close,wrong,bad_grasp,19.4,agreed: block held by corner at tip / block tilted at left jaw tip
+pi05-20261113-123548-e0-t652,pi05_block-container_20261113-123548,0,652,after_release,wrong,missed_jar,27.0,agreed; categories missed_jar/dropped: block released on table near jar / block on mat away from jar
+pi05-20261113-123548-e0-t865,pi05_block-container_20261113-123548,0,865,end,wrong,not_picked,40.8,agreed; categories not_picked/missed_jar: block on mat under jaw / block on mat in front of jar
+pi05-20261113-123647-e0-t324,pi05_block-container_20261113-123647,0,324,after_close,ok,none,19.1,agreed: block held centred between jaws / held centred
+pi05-20261113-123647-e0-t860,pi05_block-container_20261113-123647,0,860,end,wrong,still_holding,18.5,agreed: block held above jar human hand in / block in jaws with human hand reaching
+pi05-20261113-124200-e0-t424,pi05_block-container_20261113-124200,0,424,after_close,ok,none,18.3,agreed: block held centred between jaws / held centred
+pi05-20261113-124313-e0-t532,pi05_block-container_20261113-124313,0,532,after_close,wrong,missed_grasp,34.2,agreed; categories missed_grasp/bad_grasp: jaw on block corner off centre / block at jaw tips not centred
+pi05-20261113-124313-e0-t819,pi05_block-container_20261113-124313,0,819,after_close,wrong,missed_grasp,15.3,agreed: block on mat beside jaws / block on mat ahead of open jaws
+pi05-20261113-124313-e0-t865,pi05_block-container_20261113-124313,0,865,end,wrong,not_picked,29.1,agreed; categories not_picked/missed_jar: block on mat / block on mat beside jar
+pi05-20261113-130801-e0-t94,pi05_block-container_20261113-130801,0,94,after_close,wrong,missed_grasp,4.5,agreed: block on table not between jaws / jaws closed in front of block
+pi05-20261113-130801-e0-t277,pi05_block-container_20261113-130801,0,277,after_close,ok,none,18.8,agreed: block held centred between jaws / held centred
+pi05-20261113-130801-e0-t548,pi05_block-container_20261113-130801,0,548,after_release,ok,none,1.1,agreed: block in jar / block in jar
+pi05-20261113-130801-e0-t823,pi05_block-container_20261113-130801,0,823,end,ok,none,1.1,agreed: block in jar / red block visible in jar
+pi05-20261113-132159-e0-t220,pi05_block-container_20261113-132159,0,220,after_close,ok,none,19.0,agreed: block held centred between jaws / held centred
+pi05-20261113-132159-e0-t547,pi05_block-container_20261113-132159,0,547,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+pi05-20261113-132810-e0-t317,pi05_block-container_20261113-132810,0,317,after_close,ok,none,19.0,agreed: block held centred between jaws / held centred
+pi05-20261113-132810-e0-t864,pi05_block-container_20261113-132810,0,864,end,wrong,still_holding,18.5,agreed: block still in gripper over jar / block held above jar at end
+pi05-20261113-132810-e1-t288,pi05_block-container_20261113-132810,1,288,after_close,ok,none,25.4,agreed: block centred between jaws / block held flat and centred
+pi05-20261113-132810-e1-t303,pi05_block-container_20261113-132810,1,303,after_close,ok,none,19.1,agreed: block held centred between jaws / held centred
+pi05-20261113-132810-e1-t820,pi05_block-container_20261113-132810,1,820,end,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261113-132810-e2-t571,pi05_block-container_20261113-132810,2,571,after_close,wrong,missed_grasp,27.1,agreed: block beyond open jaws / block ahead of open jaws
+pi05-20261113-132810-e2-t868,pi05_block-container_20261113-132810,2,868,after_close,wrong,missed_grasp,25.2,agreed: block on table not between jaws / block ahead of jaws on table
+pi05-20261113-132810-e2-t874,pi05_block-container_20261113-132810,2,874,end,wrong,not_picked,25.4,agreed: block still on table / block on table
+pi05-20261113-132810-e3-t367,pi05_block-container_20261113-132810,3,367,after_close,ok,none,19.1,agreed: block held centred / block held flat
+pi05-20261113-132810-e3-t526,pi05_block-container_20261113-132810,3,526,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+pi05-20261113-132810-e3-t662,pi05_block-container_20261113-132810,3,662,end,ok,none,1.3,agreed: block in jar / faint red in jar
+pi05-20261113-132810-e4-t688,pi05_block-container_20261113-132810,4,688,after_close,wrong,missed_grasp,16.9,agreed; categories missed_grasp/bad_grasp: block on table jaws open / block tilted not between jaws
+pi05-20261113-132810-e4-t725,pi05_block-container_20261113-132810,4,725,after_release,wrong,missed_jar,34.8,agreed; categories missed_jar/dropped: released on mat far from jar / block on mat under open jaws
+pi05-20261113-132810-e4-t839,pi05_block-container_20261113-132810,4,839,end,wrong,not_picked,34.0,agreed: block still on table / block on table under gripper
+pi05-20261113-142345-e0-t266,pi05_block-container_20261113-142345,0,266,after_close,ok,none,18.7,agreed: block held centred / block held flat
+pi05-20261113-142345-e1-t276,pi05_block-container_20261113-142345,1,276,after_close,ok,none,19.1,agreed: block held centred / block held flat
+pi05-20261113-142345-e1-t559,pi05_block-container_20261113-142345,1,559,end,ok,none,1.2,agreed: block in jar / block in jar
+pi05-20261113-142345-e2-t292,pi05_block-container_20261113-142345,2,292,after_close,ok,none,18.5,agreed: block held centred / block held flat
+pi05-20261113-142345-e2-t452,pi05_block-container_20261113-142345,2,452,after_release,ok,none,5.3,agreed: block in jar / block visible in jar
+pi05-20261113-142345-e2-t587,pi05_block-container_20261113-142345,2,587,end,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261113-142345-e3-t318,pi05_block-container_20261113-142345,3,318,after_close,ok,none,19.1,agreed: block held centred / block held flat
+pi05-20261113-142345-e3-t582,pi05_block-container_20261113-142345,3,582,after_release,wrong,missed_jar,1.7,agreed: block on rim or beside jar / block on mat beside jar
+pi05-20261113-142345-e3-t680,pi05_block-container_20261113-142345,3,680,end,wrong,missed_jar,1.2,agreed: block on table beside jar / block behind jar outside
+pi05-20261113-142345-e4-t300,pi05_block-container_20261113-142345,4,300,after_close,wrong,missed_grasp,17.3,agreed: block on table beyond jaws / block beyond open jaws
+pi05-20261113-142345-e4-t389,pi05_block-container_20261113-142345,4,389,after_release,wrong,missed_jar,13.1,agreed; categories missed_jar/dropped: block on mat away from jar / block on mat away from jar
+pi05-20261113-142345-e4-t874,pi05_block-container_20261113-142345,4,874,end,wrong,not_picked,39.7,agreed: block on table not in jar / block on mat between open jaws
+pi05-20261113-183850-e0-t195,pi05_block-container_20261113-183850,0,195,after_close,wrong,missed_grasp,10.4,agreed: block on table not between jaws / block ahead of jaws
+pi05-20261113-183850-e0-t767,pi05_block-container_20261113-183850,0,767,after_close,wrong,missed_grasp,15.3,agreed: block on table beside gripper / block on table not in jaws
+pi05-20261113-183850-e0-t865,pi05_block-container_20261113-183850,0,865,end,wrong,not_picked,17.0,agreed: block on table not in jar / block on mat between open jaws
+pi05-20261113-183951-e0-t313,pi05_block-container_20261113-183951,0,313,after_close,ok,none,17.3,agreed: block held centred / block held flat
+pi05-20261113-184057-e0-t599,pi05_block-container_20261113-184057,0,599,after_close,wrong,missed_grasp,21.7,agreed: block on table not clamped / jaw on block edge block on mat
+pi05-20261113-184057-e0-t687,pi05_block-container_20261113-184057,0,687,end,wrong,not_picked,32.4,agreed: block on table not in jar / block on mat beside jar
+pi05-20261113-184057-e1-t252,pi05_block-container_20261113-184057,1,252,after_close,ok,none,18.4,agreed: block held centred / block held flat and centred
+pi05-20261113-184057-e1-t484,pi05_block-container_20261113-184057,1,484,after_release,wrong,missed_jar,2.4,agreed: block beyond jar outside it / block on mat beyond jar
+pi05-20261113-184057-e1-t617,pi05_block-container_20261113-184057,1,617,end,wrong,missed_jar,1.2,agreed: block on table beside jar / block on floor beyond jar
+pi05-20261113-184057-e2-t355,pi05_block-container_20261113-184057,2,355,after_close,ok,none,19.3,agreed: block held centred / block held flat and centred
+pi05-20261113-184812-e0-t398,pi05_block-container_20261113-184812,0,398,after_release,wrong,missed_jar,8.4,agreed: block on mat next to jar / block on mat beside jar
+pi05-20261113-184812-e0-t762,pi05_block-container_20261113-184812,0,762,end,wrong,not_picked,29.8,agreed: block on table not in jar / block on mat beside jar
+pi05-20261113-184812-e1-t449,pi05_block-container_20261113-184812,1,449,after_close,ok,none,25.7,agreed: both jaws on block sides / block between jaws
+pi05-20261113-184812-e1-t472,pi05_block-container_20261113-184812,1,472,after_close,ok,none,18.5,agreed: block held centred / block held flat and centred
+pi05-20261113-184812-e1-t824,pi05_block-container_20261113-184812,1,824,end,ok,none,1.2,agreed: block in jar / red block faintly visible in jar
+pi05-20261113-184812-e2-t304,pi05_block-container_20261113-184812,2,304,after_close,wrong,bad_grasp,21.9,adjudicated: both jaws on block sides / block between jaws grip unclear
+pi05-20261113-184812-e2-t367,pi05_block-container_20261113-184812,2,367,after_close,wrong,missed_grasp,24.3,agreed; categories missed_grasp/bad_grasp: jaw on block corner / left jaw on block edge and jaws open
+pi05-20261113-184812-e2-t539,pi05_block-container_20261113-184812,2,539,after_close,wrong,missed_grasp,28.2,agreed; categories missed_grasp/bad_grasp: block beyond left jaw / left jaw on block corner and jaws open
+pi05-20261113-184812-e2-t749,pi05_block-container_20261113-184812,2,749,end,wrong,not_picked,31.2,agreed; categories not_picked/missed_jar: block on mat / block on mat beside jar
+pi05-20261113-185717-e0-t276,pi05_block-container_20261113-185717,0,276,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+pi05-20261113-185717-e0-t492,pi05_block-container_20261113-185717,0,492,end,ok,none,1.1,agreed: block in jar / red block visible in jar
+pi05-20261113-185717-e1-t289,pi05_block-container_20261113-185717,1,289,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+pi05-20261113-185717-e1-t539,pi05_block-container_20261113-185717,1,539,after_release,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261113-185717-e2-t265,pi05_block-container_20261113-185717,2,265,after_close,ok,none,20.7,agreed: block held centred / block held flat and centred
+pi05-20261113-185717-e2-t588,pi05_block-container_20261113-185717,2,588,end,ok,none,1.3,agreed: block in jar / red block faintly visible in jar
+pi05-20261113-190317-e0-t247,pi05_block-container_20261113-190317,0,247,after_close,ok,none,18.5,agreed: block held centred / block held flat and centred
+pi05-20261113-190317-e0-t431,pi05_block-container_20261113-190317,0,431,after_release,ok,none,2.5,agreed: block in jar / block in jar
+pi05-20261113-190317-e0-t556,pi05_block-container_20261113-190317,0,556,end,ok,none,1.2,agreed: block in jar / red block visible in jar
+pi05-20261113-190317-e1-t249,pi05_block-container_20261113-190317,1,249,after_close,ok,none,18.6,agreed: block held centred between jaws / held centred
+pi05-20261113-190317-e1-t480,pi05_block-container_20261113-190317,1,480,end,ok,none,1.1,agreed: block in jar / red block faintly visible in jar
+pi05-20261113-190317-e2-t183,pi05_block-container_20261113-190317,2,183,end,wrong,not_picked,29.5,agreed; categories not_picked/missed_jar: block on mat / block on mat beside jar
+pi05-20261114-101344-e0-t262,pi05_block-container_20261114-101344,0,262,after_close,ok,none,18.8,agreed: block held centred between jaws / held centred
+pi05-20261114-101344-e0-t422,pi05_block-container_20261114-101344,0,422,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-101344-e0-t601,pi05_block-container_20261114-101344,0,601,end,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-101442-e0-t289,pi05_block-container_20261114-101442,0,289,after_close,ok,none,18.8,agreed: block held centred between jaws / held centred
+pi05-20261114-101442-e0-t443,pi05_block-container_20261114-101442,0,443,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-101442-e0-t565,pi05_block-container_20261114-101442,0,565,end,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-101737-e0-t255,pi05_block-container_20261114-101737,0,255,after_close,ok,none,18.7,agreed: block held centred between jaws / held centred
+pi05-20261114-101737-e0-t407,pi05_block-container_20261114-101737,0,407,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-101737-e1-t293,pi05_block-container_20261114-101737,1,293,after_close,ok,none,18.5,agreed: block held centred between jaws / held centred
+pi05-20261114-101737-e1-t457,pi05_block-container_20261114-101737,1,457,after_release,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261114-101737-e1-t560,pi05_block-container_20261114-101737,1,560,end,ok,none,1.3,agreed: block in jar / red visible in jar
+pi05-20261114-101737-e2-t275,pi05_block-container_20261114-101737,2,275,after_close,ok,none,18.7,agreed: block held centred between jaws / held centred
+pi05-20261114-101737-e2-t413,pi05_block-container_20261114-101737,2,413,after_release,ok,none,1.9,agreed: block in jar / block in jar
+pi05-20261114-101737-e2-t543,pi05_block-container_20261114-101737,2,543,end,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-101737-e3-t274,pi05_block-container_20261114-101737,3,274,after_close,wrong,missed_grasp,14.0,agreed: block on mat beside jaws / block on mat ahead of jaws
+pi05-20261114-101737-e3-t522,pi05_block-container_20261114-101737,3,522,after_close,wrong,bad_grasp,33.7,agreed: block tilted against one jaw / block tilted against left jaw only
+pi05-20261114-101737-e3-t600,pi05_block-container_20261114-101737,3,600,after_close,wrong,missed_grasp,11.0,agreed; categories missed_grasp/bad_grasp: jaw on block edge / left jaw on block corner
+pi05-20261114-101737-e3-t685,pi05_block-container_20261114-101737,3,685,end,wrong,not_picked,9.8,agreed: block still on table / block on table at jaws
+pi05-20261114-101737-e4-t282,pi05_block-container_20261114-101737,4,282,after_close,ok,none,18.7,agreed: block held centred between jaws / held centred
+pi05-20261114-101737-e4-t464,pi05_block-container_20261114-101737,4,464,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-101737-e4-t640,pi05_block-container_20261114-101737,4,640,end,ok,none,1.3,agreed: block in jar / red visible in jar
+pi05-20261114-103721-e0-t269,pi05_block-container_20261114-103721,0,269,after_close,ok,none,18.7,agreed: block held centred between jaws / held centred
+pi05-20261114-103721-e0-t401,pi05_block-container_20261114-103721,0,401,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-103721-e0-t515,pi05_block-container_20261114-103721,0,515,end,ok,none,1.3,agreed: block in jar / faint red in jar
+pi05-20261114-103721-e1-t291,pi05_block-container_20261114-103721,1,291,after_close,ok,none,18.6,agreed: block held centred / block held flat
+pi05-20261114-103721-e1-t443,pi05_block-container_20261114-103721,1,443,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-103721-e1-t608,pi05_block-container_20261114-103721,1,608,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+pi05-20261114-103721-e2-t269,pi05_block-container_20261114-103721,2,269,after_close,ok,none,18.7,agreed: block held centred / block held flat
+pi05-20261114-103721-e2-t413,pi05_block-container_20261114-103721,2,413,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-103721-e2-t590,pi05_block-container_20261114-103721,2,590,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+pi05-20261114-103721-e3-t306,pi05_block-container_20261114-103721,3,306,after_close,ok,none,18.7,agreed: block held centred / block held flat
+pi05-20261114-103721-e3-t449,pi05_block-container_20261114-103721,3,449,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-103721-e3-t600,pi05_block-container_20261114-103721,3,600,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+pi05-20261114-103721-e4-t285,pi05_block-container_20261114-103721,4,285,after_close,ok,none,18.5,agreed: block held centred / block held flat
+pi05-20261114-103721-e4-t445,pi05_block-container_20261114-103721,4,445,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-103721-e4-t570,pi05_block-container_20261114-103721,4,570,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+pi05-20261114-103721-e5-t262,pi05_block-container_20261114-103721,5,262,after_close,ok,none,18.7,agreed: block held centred / block held flat
+pi05-20261114-103721-e5-t404,pi05_block-container_20261114-103721,5,404,after_release,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261114-103721-e5-t559,pi05_block-container_20261114-103721,5,559,end,ok,none,1.4,agreed: red block visible in jar / block in jar arm at rest
+pi05-20261114-103721-e6-t272,pi05_block-container_20261114-103721,6,272,after_close,ok,none,18.9,agreed: block held centred / block held flat
+pi05-20261114-103721-e6-t410,pi05_block-container_20261114-103721,6,410,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-103721-e6-t554,pi05_block-container_20261114-103721,6,554,end,ok,none,1.3,agreed: red block visible in jar / block in jar arm at rest
+pi05-20261114-103721-e7-t302,pi05_block-container_20261114-103721,7,302,after_close,ok,none,18.9,agreed: block held centred / block held flat
+pi05-20261114-103721-e7-t445,pi05_block-container_20261114-103721,7,445,after_release,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261114-103721-e7-t589,pi05_block-container_20261114-103721,7,589,end,ok,none,1.4,agreed: red block visible in jar / block in jar arm at rest
+pi05-20261114-103721-e8-t317,pi05_block-container_20261114-103721,8,317,after_release,wrong,missed_jar,28.6,agreed: released on mat far from jar / released short of jar onto mat
+pi05-20261114-103721-e8-t624,pi05_block-container_20261114-103721,8,624,end,wrong,not_picked,31.0,agreed; categories not_picked/missed_jar: block on table beyond jaws / block on mat beside jar
+pi05-20261114-103721-e9-t262,pi05_block-container_20261114-103721,9,262,after_close,ok,none,18.6,agreed: block held centred / block held flat and centred
+pi05-20261114-103721-e9-t414,pi05_block-container_20261114-103721,9,414,after_release,ok,none,1.6,agreed: block in jar / block visible in jar
+pi05-20261114-103721-e9-t563,pi05_block-container_20261114-103721,9,563,end,ok,none,1.4,agreed: block in jar / red block visible in jar
+pi05-20261114-103721-e10-t243,pi05_block-container_20261114-103721,10,243,after_close,ok,none,18.6,agreed: block held centred / block held flat and centred
+pi05-20261114-103721-e10-t386,pi05_block-container_20261114-103721,10,386,after_close,ok,none,22.7,agreed: block already in jar / block already in jar
+pi05-20261114-103721-e10-t388,pi05_block-container_20261114-103721,10,388,after_release,ok,none,1.4,agreed: block in jar / block visible in jar
+pi05-20261114-103721-e10-t536,pi05_block-container_20261114-103721,10,536,end,ok,none,1.4,agreed: block in jar / red block visible in jar
+pi05-20261114-103721-e11-t271,pi05_block-container_20261114-103721,11,271,after_close,ok,none,19.1,agreed: block held centred / block held flat and centred
+pi05-20261114-103721-e11-t408,pi05_block-container_20261114-103721,11,408,after_release,ok,none,1.1,agreed: block in jar / block visible in jar
+pi05-20261114-103721-e11-t542,pi05_block-container_20261114-103721,11,542,end,ok,none,1.1,agreed: block in jar / red block visible in jar
+pi05-20261114-103721-e12-t267,pi05_block-container_20261114-103721,12,267,after_close,ok,none,18.8,agreed: block held centred / block held flat and centred
+pi05-20261114-103721-e12-t405,pi05_block-container_20261114-103721,12,405,after_release,wrong,missed_jar,1.3,agreed: block on mat beside jar / block on mat behind jar
+pi05-20261114-103721-e12-t661,pi05_block-container_20261114-103721,12,661,end,wrong,missed_jar,6.1,agreed: block on mat beyond jar / block on mat behind jar
+pi05-20261114-103721-e13-t289,pi05_block-container_20261114-103721,13,289,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+pi05-20261114-103721-e13-t436,pi05_block-container_20261114-103721,13,436,after_release,wrong,missed_jar,1.4,agreed: block outside jar behind it / block on mat beyond jar
+pi05-20261114-103721-e13-t551,pi05_block-container_20261114-103721,13,551,end,wrong,missed_jar,1.4,agreed: block on mat beside jar / block on mat beside jar
+pi05-20261114-103721-e14-t270,pi05_block-container_20261114-103721,14,270,after_close,ok,none,18.6,agreed: block held centred / block held flat and centred
+pi05-20261114-103721-e14-t436,pi05_block-container_20261114-103721,14,436,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+pi05-20261114-103721-e14-t583,pi05_block-container_20261114-103721,14,583,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+pi05-20261114-103721-e15-t248,pi05_block-container_20261114-103721,15,248,after_close,ok,none,18.7,agreed: block held centred / block held flat and centred
+pi05-20261114-103721-e15-t387,pi05_block-container_20261114-103721,15,387,after_release,ok,none,1.3,agreed: block in jar / block visible in jar
+pi05-20261114-103721-e15-t507,pi05_block-container_20261114-103721,15,507,end,ok,none,1.3,agreed: block in jar / red block faintly visible in jar
+pi05-20261114-103721-e16-t263,pi05_block-container_20261114-103721,16,263,after_close,ok,none,18.6,agreed: block held centred / block held flat and centred
+pi05-20261114-103721-e16-t397,pi05_block-container_20261114-103721,16,397,after_release,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261114-103721-e16-t532,pi05_block-container_20261114-103721,16,532,end,ok,none,1.4,agreed: block in jar / red block visible in jar
+pi05-20261114-103721-e17-t295,pi05_block-container_20261114-103721,17,295,after_close,wrong,bad_grasp,15.2,agreed: block held tilted by edge / block tilted held by edge
+pi05-20261114-103721-e17-t449,pi05_block-container_20261114-103721,17,449,after_close,ok,none,1.5,agreed: block already in jar / block already in jar
+pi05-20261114-103721-e17-t561,pi05_block-container_20261114-103721,17,561,end,ok,none,1.1,agreed: block in jar / block in jar
+pi05-20261114-103721-e18-t349,pi05_block-container_20261114-103721,18,349,after_close,wrong,bad_grasp,28.0,agreed; categories bad_grasp/missed_grasp: block at jaw tips not between jaws / left jaw on block corner
+pi05-20261114-103721-e18-t410,pi05_block-container_20261114-103721,18,410,after_close,wrong,bad_grasp,30.6,agreed; categories bad_grasp/missed_grasp: block at jaw tips not between jaws / jaw on block edge
+pi05-20261114-103721-e18-t488,pi05_block-container_20261114-103721,18,488,end,wrong,not_picked,30.2,agreed: block still on table / block on table under gripper
+pi05-20261114-103721-e19-t265,pi05_block-container_20261114-103721,19,265,after_close,ok,none,19.1,agreed: block held centred between jaws / held centred
+pi05-20261114-103721-e19-t395,pi05_block-container_20261114-103721,19,395,after_release,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261114-103721-e19-t545,pi05_block-container_20261114-103721,19,545,end,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261114-103721-e20-t256,pi05_block-container_20261114-103721,20,256,after_close,ok,none,18.9,agreed: block held centred between jaws / held centred
+pi05-20261114-103721-e20-t417,pi05_block-container_20261114-103721,20,417,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-103721-e21-t277,pi05_block-container_20261114-103721,21,277,after_close,ok,none,18.4,agreed: block held centred between jaws / held centred
+pi05-20261114-103721-e21-t401,pi05_block-container_20261114-103721,21,401,after_release,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261114-103721-e22-t267,pi05_block-container_20261114-103721,22,267,after_close,ok,none,18.8,agreed: block held centred between jaws / held centred
+pi05-20261114-103721-e22-t400,pi05_block-container_20261114-103721,22,400,after_release,ok,none,1.6,agreed: block in jar / block in jar
+pi05-20261114-103721-e22-t567,pi05_block-container_20261114-103721,22,567,end,ok,none,1.4,agreed: block in jar / red visible in jar
+pi05-20261114-103721-e23-t291,pi05_block-container_20261114-103721,23,291,after_close,ok,none,18.5,agreed: block held centred between jaws / held centred
+pi05-20261114-103721-e23-t439,pi05_block-container_20261114-103721,23,439,after_release,ok,none,4.2,agreed: block in jar / block in jar
+pi05-20261114-103721-e23-t595,pi05_block-container_20261114-103721,23,595,end,ok,none,1.4,adjudicated: jar contents not clear block not seen / red visible in jar
+pi05-20261114-103721-e24-t275,pi05_block-container_20261114-103721,24,275,after_close,ok,none,18.9,agreed: block held centred between jaws / held centred
+pi05-20261114-103721-e24-t493,pi05_block-container_20261114-103721,24,493,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-103721-e24-t638,pi05_block-container_20261114-103721,24,638,end,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-130637-e0-t225,pi05_block-container_20261114-130637,0,225,after_close,ok,none,18.6,agreed: block held centred between jaws / held centred
+pi05-20261114-130637-e0-t234,pi05_block-container_20261114-130637,0,234,end,wrong,still_holding,18.4,agreed: block still between jaws / block still between jaws beside jar
+pi05-20261114-130801-e0-t130,pi05_block-container_20261114-130801,0,130,end,wrong,not_picked,5.6,agreed: block on table not in jar / block on mat beside jar
+pi05-20261114-131712-e0-t251,pi05_block-container_20261114-131712,0,251,after_close,ok,none,18.9,agreed: block held centred between jaws / held centred
+pi05-20261114-131712-e0-t465,pi05_block-container_20261114-131712,0,465,after_release,wrong,missed_jar,1.9,agreed: block against jar outside / block outside jar beside it
+pi05-20261114-131712-e0-t578,pi05_block-container_20261114-131712,0,578,end,wrong,missed_jar,1.4,agreed: block on table beside jar / block against jar outside
+pi05-20261114-131712-e1-t264,pi05_block-container_20261114-131712,1,264,after_close,ok,none,18.7,agreed: block held centred / block held flat
+pi05-20261114-131712-e1-t793,pi05_block-container_20261114-131712,1,793,after_release,wrong,missed_jar,26.9,agreed: block on table beside jar / block beside jar outside
+pi05-20261114-131712-e1-t802,pi05_block-container_20261114-131712,1,802,end,wrong,missed_jar,26.8,agreed: block on table beside jar / block beside jar outside
+pi05-20261114-131712-e2-t498,pi05_block-container_20261114-131712,2,498,after_close,wrong,missed_grasp,29.4,agreed: block on table beyond jaws / block beyond open jaws
+pi05-20261114-131712-e2-t518,pi05_block-container_20261114-131712,2,518,after_close,wrong,missed_grasp,27.8,agreed: block on table beyond jaws / block beyond open jaws
+pi05-20261114-131712-e2-t532,pi05_block-container_20261114-131712,2,532,end,wrong,not_picked,27.6,agreed: block on table not in jar / block on table beyond open jaws
+pi05-20261114-131712-e3-t269,pi05_block-container_20261114-131712,3,269,after_close,ok,none,19.1,agreed: block held centred / block held flat
+pi05-20261114-131712-e3-t466,pi05_block-container_20261114-131712,3,466,after_release,wrong,missed_jar,8.1,agreed: block on table beside jar / block tilted beside jar
+pi05-20261114-131712-e3-t478,pi05_block-container_20261114-131712,3,478,end,wrong,missed_jar,2.4,agreed: block on table beside jar / block tilted beside jar
+pi05-20261114-131712-e4-t288,pi05_block-container_20261114-131712,4,288,after_close,wrong,missed_grasp,27.6,agreed: block on mat away from gripper / block on mat beside jaw
+pi05-20261114-131712-e4-t298,pi05_block-container_20261114-131712,4,298,end,wrong,not_picked,20.8,agreed: block on table not in jar / block on mat left of jar
+pi05-20261114-132716-e0-t268,pi05_block-container_20261114-132716,0,268,after_close,ok,none,18.9,agreed: block held centred / block held flat
+pi05-20261114-132716-e0-t399,pi05_block-container_20261114-132716,0,399,after_release,ok,none,2.4,agreed: block in jar / block in jar
+pi05-20261114-132716-e1-t564,pi05_block-container_20261114-132716,1,564,end,wrong,not_picked,27.4,agreed; categories not_picked/missed_jar: block on table / block on table beside jar
+pi05-20261114-132716-e2-t560,pi05_block-container_20261114-132716,2,560,end,wrong,not_picked,31.0,agreed; categories not_picked/missed_jar: block on table / block on table beside jar
+pi05-20261114-132716-e3-t425,pi05_block-container_20261114-132716,3,425,end,wrong,not_picked,31.4,agreed: block on table / block on table under open gripper
+pi05-20261114-132716-e4-t281,pi05_block-container_20261114-132716,4,281,after_close,ok,none,18.7,agreed: block held centred / block held flat
+pi05-20261114-132716-e4-t427,pi05_block-container_20261114-132716,4,427,after_release,ok,none,1.5,agreed: block in jar / block in jar
+pi05-20261114-134759-e0-t329,pi05_block-container_20261114-134759,0,329,after_close,wrong,missed_grasp,28.9,agreed: block on table beyond jaws / block tilted on mat between open jaws
+pi05-20261114-134759-e0-t376,pi05_block-container_20261114-134759,0,376,after_close,wrong,missed_grasp,26.7,agreed; categories missed_grasp/bad_grasp: jaw at corner of rotated block / block diagonal with jaw on corner
+pi05-20261114-134759-e0-t402,pi05_block-container_20261114-134759,0,402,end,wrong,not_picked,19.5,agreed; categories not_picked/still_holding: block on mat at jaws / block still between jaws at jar
+pi05-20261114-134759-e1-t256,pi05_block-container_20261114-134759,1,256,after_close,wrong,bad_grasp,13.6,adjudicated: block on its side held centred / block held tipped on its side
+pi05-20261114-134759-e1-t407,pi05_block-container_20261114-134759,1,407,after_close,ok,none,1.7,agreed: block already in jar / block already in jar
+pi05-20261114-134759-e1-t516,pi05_block-container_20261114-134759,1,516,end,ok,none,1.4,agreed: block in jar / red block visible in jar
+pi05-20261114-134759-e2-t285,pi05_block-container_20261114-134759,2,285,after_close,ok,none,19.0,agreed: block held upside down centred / block held flat upside down
+pi05-20261114-134759-e2-t433,pi05_block-container_20261114-134759,2,433,after_release,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-134759-e2-t589,pi05_block-container_20261114-134759,2,589,end,ok,none,1.3,agreed: block in jar / red block visible in jar
+pi05-20261114-134759-e3-t305,pi05_block-container_20261114-134759,3,305,after_close,wrong,missed_grasp,9.9,agreed: jaws empty block on mat / block on mat away from jaws
+pi05-20261114-134759-e3-t324,pi05_block-container_20261114-134759,3,324,end,wrong,not_picked,29.0,agreed: block on mat / block on mat in middle
+pi05-20261114-135125-e0-t294,pi05_block-container_20261114-135125,0,294,after_close,wrong,missed_grasp,13.2,agreed: jaws empty block on mat / block on mat ahead of jaws
+pi05-20261114-135125-e0-t386,pi05_block-container_20261114-135125,0,386,after_close,wrong,missed_grasp,27.6,agreed: block beyond jaws / block on mat ahead of jaws
+pi05-20261114-135125-e0-t605,pi05_block-container_20261114-135125,0,605,end,wrong,not_picked,28.7,agreed: block still on table / block on table near gripper not in jar
+pi05-20261114-135125-e1-t267,pi05_block-container_20261114-135125,1,267,after_close,ok,none,18.5,agreed: block held upside down centred / block held flat upside down
+pi05-20261114-135125-e1-t392,pi05_block-container_20261114-135125,1,392,after_release,ok,none,2.9,agreed: block in jar / block in jar
+pi05-20261114-135125-e1-t508,pi05_block-container_20261114-135125,1,508,end,ok,none,1.3,agreed: block in jar / block in jar
+pi05-20261114-135125-e2-t345,pi05_block-container_20261114-135125,2,345,after_close,wrong,missed_grasp,9.1,agreed: block on table not between jaws / block on table away from jaws
+pi05-20261114-135125-e2-t584,pi05_block-container_20261114-135125,2,584,end,wrong,not_picked,3.1,agreed: block still on table / block on table
+pi05-20261114-135125-e3-t508,pi05_block-container_20261114-135125,3,508,end,wrong,not_picked,32.6,agreed: block on table upside down / block on table near jar
+pi05-20261114-135125-e4-t251,pi05_block-container_20261114-135125,4,251,after_close,ok,none,18.8,agreed: block held upside down centred / block held flat upside down
+pi05-20261114-135125-e4-t407,pi05_block-container_20261114-135125,4,407,after_release,ok,none,1.4,agreed: block in jar / block in jar
+pi05-20261114-135125-e4-t527,pi05_block-container_20261114-135125,4,527,end,ok,none,1.3,agreed: block in jar / block in jar
+pi05_so100_101-20261114-175016-e0-t281,pi05_so100_101_block-container_20261114-175016,0,281,after_close,wrong,missed_grasp,25.4,agreed: block on table not between jaws / jaws open block on table
+pi05_so100_101-20261114-175016-e0-t292,pi05_so100_101_block-container_20261114-175016,0,292,after_close,wrong,missed_grasp,15.5,agreed: block on table not between jaws / jaws open block on table
+pi05_so100_101-20261114-175016-e0-t354,pi05_so100_101_block-container_20261114-175016,0,354,after_close,wrong,missed_grasp,19.3,agreed: jaws open block on mat / block on mat not in jaws
+pi05_so100_101-20261114-175016-e0-t377,pi05_so100_101_block-container_20261114-175016,0,377,after_release,wrong,missed_jar,25.4,agreed; categories missed_jar/dropped: released on mat away from jar / block on mat away from jar
+pi05_so100_101-20261114-175016-e0-t543,pi05_so100_101_block-container_20261114-175016,0,543,end,wrong,not_picked,29.2,agreed: block still on table / block on table

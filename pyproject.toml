@@ -26,7 +26,15 @@ so101-teleoperate = "so_101.connect:teleoperate"
 so101-record = "so_101.connect:record"
 so101-replay = "so_101.connect:replay"
 so101-calibrate = "so_101.connect:calibrate"
+so101-failbench = "so_101.failbench.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+failbench = [
+    "google-genai>=3.3",
+    "openai>=3.51",
+    "typesafe-sdk>=0.7.5",
+]

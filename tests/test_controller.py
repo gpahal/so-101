@@ -56,10 +56,12 @@ check = unittest.TestCase()  # its assertions, for the rig's own steps
 
 
 class Rig:
-    def __init__(self, run_dir: Path | None = None, actions: list[list[float]] = POLICY_ACTIONS, **options) -> None:
+    def __init__(self, run_dir: Path | None = None, actions: list[list[float]] = POLICY_ACTIONS, wrap=None,
+                 **options) -> None:
         """With `run_dir`, the run is recorded there, and `disk.full` makes every flush of its event log
         fail as on a full disk; without, nothing is recorded (`fakes.NoRecorder`). The policy sends
-        `actions` in order. `options` go to the Controller. The `[control]` settings are so101.toml's
+        `actions` in order; `wrap(driver, recorder, clock)`, if given, returns a layer over its driver
+        that the controller steps instead. `options` go to the Controller. The `[control]` settings are so101.toml's
         defaults, without camera previews, unless `options` has `control`. A leader is plugged in, folded
         at rest like the follower; it connects on the first tick. While `presence_error` is set, the
         device watch raises it."""
@@ -84,6 +86,9 @@ class Rig:
 
             with mock.patch.object(Path, "open", open_events):
                 recorder = Recorder(Run.at(run_dir), self.robot, fps=FPS, task="test", clock=self.clock)
+        if wrap is not None:
+            driver = wrap(driver, recorder, self.clock)
+        self.driver = driver
         self.controller = Controller(
             self.robot, driver, fps=FPS, rest_pose=pose_from_steps(self.robot.inner.bus, REST_STEPS),
             start_pose=START_POSE, clock=self.clock, recorder=recorder, presence=self.presence,
@@ -1395,6 +1400,63 @@ class ArmsTest(RigTest):
         self.assertIn("gripper reads 200", rig.status()["fault"])
         elbow = rig.motors.registers[MOTORS.index("elbow_flex") + 1]
         self.assertEqual(elbow["torque_limit"], elbow["max_torque_limit"] - 1, "the others keep their mark")
+
+
+
+class Asking:
+    """A layer over the driver, as the supervisor's is: it asks for a person on its `ask_at`th step, and
+    notes each episode it hears of."""
+
+    def __init__(self, inner, ask_at: int) -> None:
+        self.inner, self.ask_at, self.steps, self.heard, self._asking = inner, ask_at, 0, [], None
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def begin_episode(self, number: int) -> None:
+        self.heard.append(("begin", number))
+
+    def end_episode(self) -> None:
+        self.heard.append(("end",))
+
+    def step(self, robot, observation):
+        self.steps += 1
+        if self.steps == self.ask_at:
+            self._asking = "stuck: a person should look"
+        return self.inner.step(robot, observation)
+
+    def asks(self):
+        asking, self._asking = self._asking, None
+        return asking
+
+
+class PolicyLayerTest(unittest.TestCase):
+    """What a layer over the policy, such as the supervisor's, gets from the controller."""
+
+    def test_a_policy_that_asks_for_a_person_is_paused_like_a_lost_link(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            said = []
+            rig = Rig(Path(folder) / "run", wrap=lambda driver, recorder, clock: Asking(driver, ask_at=5),
+                      notify=lambda message, state: said.append(message))
+            rig.start_policy(ticks=10)
+            self.assertEqual(rig.status()["state"], "paused")
+            self.assertEqual(rig.driver.steps, 5, "no step after the one that asked")
+            paused = [e for e in rig.events("state") if e["state"] == "paused"]
+            self.assertEqual([e["cause"] for e in paused], ["policy_asked"])
+            self.assertTrue(any("a person should look" in m for m in said), "the operator is told why")
+            self.assertTrue(rig.command("resume").accepted, "a person resumes it as after any pause")
+            self.assertEqual(rig.status()["state"], "autonomous")
+            rig.reset("failed")
+            rig.close()
+            self.assertEqual(rig.driver.heard, [("begin", 1), ("end",)])
+
+    def test_the_policy_is_asked_only_while_it_drives(self) -> None:
+        rig = Rig(wrap=lambda driver, recorder, clock: Asking(driver, ask_at=1))
+        rig.driver._asking = "too early"  # set before the policy drives: Starting never takes it
+        rig.command("resume")
+        rig.tick_until("autonomous")
+        rig.tick()
+        self.assertEqual(rig.status()["state"], "paused", "asked on the first step it drove")
 
 
 if __name__ == "__main__":

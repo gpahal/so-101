@@ -111,6 +111,41 @@ def check_settings(s) -> None:
         sys.exit(f"so101-control can't start with these settings from {s.path}:\n{problems}")
 
 
+def supervisor_parts(s):
+    """The supervisor's program and judges when `[supervisor] mode` isn't off, else (None, None). Exits on
+    a bad program, before anything is connected. API keys come from the environment or
+    .scratch/bench.env beside so101.toml, as `so101-failbench` reads them; a judge without its key or
+    SDK is left out, and the start event names why."""
+    if s.supervisor.mode == "off":
+        return None, None
+    from so_101.failbench.cli import load_env
+    from so_101.supervisor import judges, program
+
+    try:
+        loaded = program.load(s.supervisor.program)
+    except program.ProgramError as error:
+        sys.exit(f"so101-control can't start the supervisor: {error}")
+    load_env(s.path.parent / ".scratch" / "bench.env")
+    made = judges.Judges(loaded)
+    missing = ", ".join(f"{key} ({why})" for key, why in made.missing.items())
+    print(f"Supervisor: {s.supervisor.mode} mode, program v{loaded.version}."
+          + (f" Left out: {missing}." if missing else ""), flush=True)
+    return loaded, made
+
+
+def skills_program(s, task):
+    """The program whose gripper thresholds find each skill's handover, for a skills run. Exits, before
+    anything is connected, when the task has no skills or the program doesn't load."""
+    from so_101.supervisor import program
+
+    if not task.skills:
+        sys.exit(f"so101-control: this run serves a skills model, but {task.name} has no [{task.name}.skills] in tasks.toml.")
+    try:
+        return program.load(s.supervisor.program)
+    except program.ProgramError as error:
+        sys.exit(f"so101-control can't find the skills' handovers: {error}")
+
+
 def leader_maker(arm):
     """Makes a new, unconnected SO-101 leader each call, on the port its board is on now, in degrees
     like the follower, LeRobot's default, so its pose can drive the follower."""
@@ -240,11 +275,13 @@ def control(cfg) -> None:
     # so101.toml, read once for the whole run.
     s = settings.load()
     check_settings(s)  # before anything is connected or bound
+    program, judges = supervisor_parts(s)
     control_settings = s.control
     run = json.loads(os.environ[RUN_ENV])
     folder, manifest = data.Run.at(Path(run["dir"])), run["manifest"]
     policy, fps = manifest["policy"], manifest["control"]["fps"]
     task = tasks.load()[folder.task]
+    skill_program = skills_program(s, task) if policy.get("skills") else None
     # Worked out once, before the robot connects: it reads every training file, and one that can't be
     # read stops this process with nothing connected.
     start_pose = data.demo_start_pose(s, task)
@@ -336,9 +373,21 @@ def control(cfg) -> None:
         print(f"Recording this run to {folder.path}: one episode per attempt, saved when the arm is back at "
               "rest.", flush=True)
         recorder = Recorder(folder, robot, fps=fps, task=cfg.task)
+        # Layers over the policy, each with the driver's methods: serve steps the outermost as its driver.
+        policy_layer = driver
+        if skill_program is not None:  # a skills model: one skill at a time, switched at each handover
+            from so_101.skills import SkillPolicy
+
+            policy_layer = SkillPolicy(driver, task.skills, skill_program, log=recorder.event)
+        if program is not None:  # the supervisor is a policy over the policy: serve steps it as its driver
+            from so_101.supervisor.layer import SupervisedPolicy
+
+            policy_layer = SupervisedPolicy(policy_layer, program, judges, mode=s.supervisor.mode, log=recorder.event,
+                                            frame=lambda: recorder.frames, cameras=tuple(robot.inner.cameras))
+            cleanup.callback(policy_layer.close)  # before the recorder closes: late verdicts are dropped
         controller = Controller(
             robot,
-            driver,
+            policy_layer,
             fps=fps,
             rest_pose=pose_from_steps(robot.inner.bus, control_settings.rest_pose),
             control=s.control,
@@ -357,7 +406,7 @@ def control(cfg) -> None:
         server.start()
         cleanup.callback(interrupt_on_signals)
         quit_on_signals(controller.submit)
-        driver.start()
+        policy_layer.start()
         keys = terminal.KeyReader(controller.submit, controller.status)
         cleanup.callback(keys.stop)  # restores the terminal's settings
         keys.start()

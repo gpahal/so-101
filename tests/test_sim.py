@@ -555,6 +555,22 @@ class AimTest(unittest.TestCase):
         self.assertFalse(offset.camera_aligned)
         self.assertIn("Can't find the demos' view", offset.advice()[0])
 
+    def test_the_view_comes_from_recorded_demos_review_kept(self):
+        from so_101.sim import aim
+
+        few = aim.reference_episodes([("s1", 3), ("s2", 2)], deleted={("s1", 1)})
+        self.assertEqual(few, [("s1", 0), ("s1", 2), ("s2", 0), ("s2", 1)], "every kept demo when there are few")
+
+        recorded = [(f"s{i}", 12) for i in range(1, 5)]
+        deleted = {("s2", 3), ("s4", 11)}
+        picks = aim.reference_episodes(recorded, deleted)
+        self.assertEqual(len(picks), aim.REFERENCE_DEMOS)
+        self.assertEqual(len(set(picks)), len(picks), "no demo twice")
+        self.assertFalse(set(picks) & deleted, "a demo review deleted is left out")
+        self.assertEqual((picks[0], picks[-1]), (("s1", 0), ("s4", 10)), "from the first session to the last")
+        self.assertEqual({name for name, _ in picks}, {"s1", "s2", "s3", "s4"}, "every session")
+        self.assertEqual(aim.reference_episodes([("s1", 0)], set()), [], "a session with no episodes gives none")
+
     def test_a_camera_too_far_off_to_measure_still_gets_steered(self):
         from so_101.sim import aim
 

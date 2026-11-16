@@ -1,6 +1,7 @@
 """Record a `so101 serve` run: one LeRobot dataset episode per attempt, and an event log.
 
-The controller owns the recorder and is its only caller. Every tick of an open attempt adds one
+The controller owns the recorder and is its only caller (the supervisor's layer, stepped by the controller
+as its policy, writes its `supervisor` events with `event` on the same thread). Every tick of an open attempt adds one
 frame, whatever the arm is doing, so timestamps stay evenly spaced. The episode is saved when the
 arm arrives at rest, or where the arm holds: at once after a fault, or where a quit's drive to rest
 stopped short. Each attempt's data file is finished (finalized) on disk before the attempt counts as
@@ -58,6 +59,13 @@ up with the `control.phase` column. No other field can replace these.
     recording_failed  error: saving or finishing an attempt's file failed (its attempt_end says saved
                    false), or the dataset couldn't be reopened after a saved attempt. Either way no new
                    attempt can be recorded in this run
+    supervisor     what the supervisor's layer saw, asked and did (`supervisor.layer`): kind (start, attempt,
+                   close, carry, regrasp, release, rule, check, decision, rewind, escalation, attempt_end
+                   or error), mode (shadow or act), for_attempt (the attempt it's about, which a late
+                   check's event may name after the next attempt opened) and policy_t, then the kind's
+                   own fields. A decision has acted (false in shadow mode, or while serve has the arm). A
+                   rewind is one of its playbacks, with the `rewind` event's start_frame, end_frame,
+                   seconds, cause, farthest and gap
     run_end        the last event of a run that ended with a quit: finished (local time,
                    YYYY-mm-ddTHH:MM:SS), attempts (opened) and episodes (saved)
 

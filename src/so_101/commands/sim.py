@@ -57,8 +57,9 @@ def record_nudges(s: settings.Settings, ns: argparse.Namespace, extra: list[str]
 
 
 def aim_camera(s: settings.Settings, ns: argparse.Namespace) -> None:
-    """Show the top camera's live picture against the demos' view, and how to turn it back. Reads the
-    camera only (and sets its controls, as `check` does); `s` saves a picture under outputs/sim/aim/."""
+    """Show the top camera's live picture against the demos' view, and how to turn it back. The view comes
+    from the recorded sessions, not a build, so it works between recording sessions. Reads the camera only
+    (and sets its controls, as `check` does); `s` saves a picture under outputs/sim/aim/."""
     import cv2
 
     from so_101.check import find_cameras, open_cameras
@@ -67,12 +68,16 @@ def aim_camera(s: settings.Settings, ns: argparse.Namespace) -> None:
     from so_101.sim.demos import Demos
 
     task = get_task(ns.task)
-    root = data.train_root(s, task)
-    if not (root / "meta" / "info.json").is_file():
-        sys.exit(f"No built demos in {root}: the demos' view comes from them. Build them with `uv run so101 build {task.name}`.")
-    demos = Demos(root)
-    print(f"Taking the demos' view from the first frames of {len(demos)} demos...", flush=True)
-    reference = aim.reference([demos.frame(episode, 0) for episode in range(0, len(demos), 4)])
+    sessions = {session.name: session for session in data.sessions(s, task) if session.episodes}
+    deleted = {key for key, edit in data.load_edits(s, task).items() if edit.delete is not None}
+    picks = aim.reference_episodes([(name, session.episodes) for name, session in sessions.items()], deleted)
+    if not picks:
+        sys.exit(f"No recorded demos of {task.name}: the demos' view comes from their first frames. "
+                 f"Record some with `uv run so101 record {task.name}`.")
+    demos = {name: Demos(sessions[name].dataset_root) for name in {name for name, _ in picks}}
+    print(f"Taking the demos' view from the first frames of {len(picks)} recorded demos, "
+          f"in {len(demos)} of {len(sessions)} sessions...", flush=True)
+    reference = aim.reference([demos[name].frame(episode, 0) for name, episode in picks])
     reference_gray = aim.gray(reference)
     report = Report()
     lookups = find_cameras(report, [s.camera("top")])
@@ -119,7 +124,7 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     if ns.action == "nudge":  # on the arm's computer, which needs neither MuJoCo nor the demos
         record_nudges(s, ns, extra)
         return
-    if ns.action == "aim":  # needs the camera and the built demos, not MuJoCo
+    if ns.action == "aim":  # needs the camera and the recorded demos, not a build or MuJoCo
         if extra:
             sys.exit(f"so101 sim aim doesn't take {' '.join(extra)}.")
         aim_camera(s, ns)
@@ -137,7 +142,7 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         sys.exit(f"The sim draws a top and a wrist camera, and {task.name} records {', '.join(task.cameras)}.")
     if ns.action in ("check", "eval") and ns.policy != "act":
         sys.exit(f"sim {ns.action} runs the model on this Mac, which only ACT fits: {ns.policy} runs on a cloud GPU.")
-    demos, scene = data.train_root(s, task), data.sim_dir(s, task)
+    demos, scene = data.dataset_root(s, task), data.sim_dir(s, task)
     if ns.action != "build" and not (scene / "scene.json").is_file():
         sys.exit(f"No scene yet. Run `uv run so101 sim build {task.name}` first.")
     if ns.action != "physics":  # which only needs the scene

@@ -116,7 +116,9 @@ class Controller:
         operator: str | None = None,
     ) -> None:
         """`robot` is LeRobot's robot wrapper (ThreadSafeRobot) with hold configured. `policy` is an
-        EngineDriver. Poses are in the arm's units, keyed like its actions. `rest_pose` is the
+        EngineDriver, or a layer over one with the same methods (`supervisor.layer.SupervisedPolicy`):
+        it hears each attempt open and close (`begin_episode`, `end_episode`), and in Autonomous may ask
+        for a person (`asks`), which pauses it like a lost link. Poses are in the arm's units, keyed like its actions. `rest_pose` is the
         `[control]` rest pose, already converted from raw steps with `pose_from_steps`. Without
         `start_pose` (no build), attempts start from wherever the arm is. `notify(message,
         state)` hears every message, with the new state when it announces one. `recorder` records the
@@ -387,6 +389,9 @@ class Controller:
             policy_action, leader_pose, event = Driven(event=Event.LEADER_LOST)
         if state is State.AUTONOMOUS and (failure := self.policy.failure):
             raise Failure(f"The policy failed: {_last_line(failure)}", detail=failure)
+        if state is State.AUTONOMOUS and event is None and (asked := self.policy.asks()) is not None:
+            self._say(asked)
+            event = Event.POLICY_ASKED  # applied once this tick's frame is recorded, like a scripted move's end
         if (attempt := self.open_attempt) is not None:
             if leader_pose is None and self.leader.connected:
                 leader_pose = self.leader.pose_for_frame()
@@ -671,6 +676,7 @@ class Controller:
                 self.open_attempt = Attempt(self.attempt_number, self.clock())
                 self.prompt = None  # a new attempt leaves the last one unlabelled
                 self.recorder.start_attempt(self.attempt_number)
+                self.policy.begin_episode(self.attempt_number)
             case Action.MOVE_TO_REST:
                 self.scripted_move = rollout.Move(self.rest_pose, self.fps, self.clock)
                 self._leader_to_rest()
@@ -775,6 +781,8 @@ class Controller:
             if attempt is not None:
                 self.open_attempt, self.closed_attempt = None, attempt
                 attempt.history = None  # nothing rewinds a closed attempt
+                with contextlib.suppress(Exception):  # the policy's bookkeeping never stops a close
+                    self.policy.end_episode()
             self._held_up()
 
     def _save_attempt(self, attempt: Attempt) -> None:

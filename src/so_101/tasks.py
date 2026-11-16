@@ -2,6 +2,8 @@
 
 A task's demos are recorded under the data directory (see `so_101.data`), in degrees, uploaded for
 training to <your Hub user>/so101_<task>, and trained into <your Hub user>/<policy type>_so101_<task>.
+A task with `[<task>.skills]` also has a skills dataset and models, with `_skills` after each name
+(`so_101.skills`).
 """
 
 import json
@@ -11,6 +13,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+from so_101 import skills
 from so_101.settings import ConfigError, config_path
 
 
@@ -38,23 +41,35 @@ class Task:
     reset_time_s: float
     props: list[str]
     setup: list[str]
+    skills: tuple = ()  # `skills.Skill`s, in the order they run; empty without [<task>.skills]
 
-    def policy_for(self, policy_type: str) -> str:
-        """Hub repo that training this task with `policy_type` pushes to."""
-        return f"{hf_user()}/{policy_type}_so101_{self.name}"
+    def policy_for(self, policy_type: str, skills: bool = False) -> str:
+        """Hub repo that training this task with `policy_type` pushes to; with `skills`, on its skills."""
+        return f"{hf_user()}/{policy_type}_so101_{self.name}{'_skills' if skills else ''}"
+
+    def dataset_repo(self, skills: bool = False) -> str:
+        """Hub dataset a built dataset is uploaded to: the whole demos, or with `skills` the skills dataset."""
+        return f"{hf_user()}/so101_{self.name}{'_skills' if skills else ''}"
 
     @property
     def dataset(self) -> str:
         """Hub dataset your built demos are uploaded to."""
-        return f"{hf_user()}/so101_{self.name}"
+        return self.dataset_repo()
+
+    def require_skills(self) -> tuple:
+        """The task's skills, or exit saying how to define them."""
+        if not self.skills:
+            sys.exit(f"{self.name} has no skills: list them under [{self.name}.skills] in {tasks_path()} "
+                     "(see docs/skills.md).")
+        return self.skills
 
     # Only ACT runs locally: pi0.5 needs --remote (`commands.policy.policy_task`).
-    def local_policy_dir(self, revision: str | None) -> Path:
+    def local_policy_dir(self, revision: str | None, skills: bool = False) -> Path:
         """Where a checkpoint is downloaded. Each revision gets its own folder, so they can't mix."""
-        folder = config_path().parent / "outputs" / "policies" / self.policy_for("act")
+        folder = config_path().parent / "outputs" / "policies" / self.policy_for("act", skills)
         return folder.with_name(f"{folder.name}@{revision.replace('/', '_')}") if revision else folder
 
-    def download_policy(self, revision: str | None) -> Path:
+    def download_policy(self, revision: str | None, skills: bool = False) -> Path:
         """Download the checkpoint and make its config loadable by the installed LeRobot.
 
         Checkpoints saved by newer LeRobot versions can carry config fields this version doesn't
@@ -69,7 +84,7 @@ class Task:
         # Training checkpoints are several times the size of the final model, and running doesn't use them.
         path = Path(
             snapshot_download(
-                self.policy_for("act"), revision=revision, local_dir=self.local_policy_dir(revision),
+                self.policy_for("act", skills), revision=revision, local_dir=self.local_policy_dir(revision, skills),
                 ignore_patterns=["checkpoints/**"],
             )
         )
@@ -79,19 +94,19 @@ class Task:
         unknown = {k: v for k, v in config.items() if k not in known}
         if set_fields := {k: v for k, v in unknown.items() if v is not None}:
             raise ConfigError(
-                f"{self.policy_for("act")} sets config fields this LeRobot version doesn't support: {set_fields}. "
+                f"{self.policy_for("act", skills)} sets config fields this LeRobot version doesn't support: {set_fields}. "
                 "It needs a newer LeRobot."
             )
         if unknown:
             config_file.write_text(json.dumps({k: v for k, v in config.items() if k in known}, indent=4))
         return path
 
-    def policy_config(self, revision: str | None, policy_type: str) -> dict:
+    def policy_config(self, revision: str | None, policy_type: str, skills: bool = False) -> dict:
         """The checkpoint's config.json."""
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import EntryNotFoundError, RevisionNotFoundError
 
-        repo = self.policy_for(policy_type)
+        repo = self.policy_for(policy_type, skills)
         try:
             config_file = hf_hub_download(repo, "config.json", revision=revision)
         except RevisionNotFoundError as e:
@@ -154,7 +169,10 @@ def load() -> dict[str, Task]:
                 reset_time_s=t.get("reset_time_s", 10),
                 props=t.get("props", []),
                 setup=t.get("setup", []),
+                skills=skills.parse(t["skills"], name) if "skills" in t else (),
             )
+        except skills.SkillError as e:
+            raise ConfigError(f"{tasks_path()}: {e}") from e
         except (KeyError, ValueError, TypeError) as e:
             problem = f"the setting {e.args[0]!r} is missing" if isinstance(e, KeyError) else e
             raise ConfigError(f"{tasks_path()}: task {name!r}: {problem}") from e

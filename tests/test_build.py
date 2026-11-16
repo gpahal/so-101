@@ -220,7 +220,7 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(set(data.demo_start_pose(self.s, TASK).values()), {0.0})
 
         # The built episodes hold exactly the correction frames: Teleop only, none suspect.
-        built = table(data.train_root(self.s, TASK))
+        built = table(data.dataset_root(self.s, TASK))
         recorded = table(run_dir / "dataset")
         # A demo corrects no policy: not an intervention, label 0.
         demo = built[built["episode_index"] == 0]
@@ -241,7 +241,7 @@ class BuildTest(unittest.TestCase):
 
         # A policy success's action is the policy's own, before the cap.
         build(self.s, TASK, (analysis.POLICY_SUCCESSES,))
-        built = table(data.train_root(self.s, TASK))
+        built = table(data.dataset_root(self.s, TASK))
         entries = json.loads(data.build_manifest_path(self.s, TASK).read_text())["episodes"][1:]
         self.assertTrue(entries)
         for n, entry in enumerate(entries, start=1):

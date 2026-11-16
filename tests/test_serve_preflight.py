@@ -79,12 +79,12 @@ class ServePreflightTest(ConfigTest):
         """Run `serve` up to where it would download the policy, with the checks that open a device or
         ask the Hub stubbed out. Raises SystemExit when the preflight fails."""
 
-        def download_policy(revision=None):
+        def download_policy(revision=None, skills=False):
             raise AssertionError("serve passed its preflight")
 
         task = types.SimpleNamespace(name="test", prompt="test", cameras=(), fps=30,
-                                     policy_config=lambda revision, policy: {"chunk_size": 10, "input_features": {}},
-                                     policy_for=lambda policy: "x/y",
+                                     policy_config=lambda revision, policy, skills=False: {"chunk_size": 10, "input_features": {}},
+                                     policy_for=lambda policy, skills=False: "x/y",
                                      download_policy=download_policy)
         ns = argparse.Namespace(task="test", policy="act", remote=False, revision=None, checkpoint=None, action_steps=None,
                                 operator=None)

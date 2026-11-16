@@ -1,4 +1,9 @@
-"""`so101 build`: turn recorded sessions plus edits.toml into one training dataset.
+"""`so101 build`: turn recorded sessions plus edits.toml into a training dataset.
+
+Two kinds (`data.DATASETS`): `whole`, each kept demo as one episode (plus runs with --with), and `skills`
+(`--skills`), each kept demo's skills as episodes in order, cut where `so_101.skills` finds their events,
+each frame with its skill's prompt as `task` and its one-hot as `observation.environment_state`. A demo
+the skills can't be cut from is left out, with a note.
 
 Raw sessions are never changed. Each kept episode is read back (joint rows and decoded video
 frames), cut to its `keep` range, and written into a fresh dataset with LeRobot's own writer, so
@@ -69,6 +74,7 @@ class Plan:
     stop: int  # one past the last frame kept
     attempt: analysis.Attempt | None = None
     source: str | None = None
+    skill: int | None = None  # in a skills build: the skill's index in `task.skills`
 
     @property
     def meta(self):
@@ -91,7 +97,10 @@ class Plan:
         return _labels(bool(self.intervention_mask[i]), int(self.attempt.phases[i]),
                        int(self.frame_labels[i]), self.attempt.outcome == "succeeded")
 
-    def entry(self) -> dict:
+    def entry(self, task: Task | None = None) -> dict:
+        if self.skill is not None:
+            return {"session": self.recording.name, "episode": self.episode, "frames": [self.start, self.stop],
+                    "skill": task.skills[self.skill].name}
         if self.attempt is None:
             return {"session": self.recording.name, "episode": self.episode, "frames": [self.start, self.stop]}
         return {"run": self.recording.name, "attempt": self.attempt.number, "episode": self.episode,
@@ -227,15 +236,46 @@ def plan_runs(s: Settings, task: Task, sources: tuple[str, ...], reference) -> t
     return plans, notes
 
 
-def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: bool = False) -> Report:
-    """Build data/<task>/train from the sessions and edits, plus the runs' training cuts from
-    `sources`. `keep_labels` adds the LABEL_FEATURES columns. Returns the validation report."""
+def skill_plans(s: Settings, task: Task) -> tuple[list[Plan], list[str], list[dict]]:
+    """Each kept demo's skills as plans, in order; the notes, with a note per demo that couldn't be
+    cut; and every demo's cuts for build.json."""
+    from so_101 import skills
+    from so_101.supervisor import program
+
+    cuts, notes = skills.cut_demos(s, task, program.load(s.supervisor.program))
+    plans = []
+    for c in cuts:
+        p = c.plan
+        if c.error:
+            notes.append(f"session {p.recording.name} episode {p.episode}: left out, its skills can't be cut ({c.error})")
+            continue
+        for n, skill in enumerate(task.skills):
+            start, stop = c.spans[skill.name]
+            plans.append(Plan(p.recording, p.episode, p.start + start, p.start + stop, skill=n))
+    return plans, notes, [c.record() for c in cuts]
+
+
+def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: bool = False,
+          kind: str = data.WHOLE) -> Report:
+    """Build the `kind` dataset (data.dataset_root) from the sessions and edits, plus, for `whole`, the
+    runs' training cuts from `sources`. `keep_labels` adds the LABEL_FEATURES columns. Returns the
+    validation report."""
     from lerobot.configs.video import RGBEncoderConfig
     from lerobot.datasets import LeRobotDataset
 
+    from so_101 import skills
+
+    if kind == data.SKILLS:
+        task.require_skills()
+        if sources or keep_labels:
+            raise ConfigError("A skills build takes the demos only: --with and --keep-labels aren't supported for it yet.")
     # Taken before reading anything, so an edit or a run recorded during the build rebuilds next time.
-    inputs = data.build_inputs(s, task, sources, keep_labels)
-    plans, notes = plan(s, task)
+    inputs = data.build_inputs(s, task, sources, keep_labels, kind)
+    cuts = None
+    if kind == data.SKILLS:
+        plans, notes, cuts = skill_plans(s, task)
+    else:
+        plans, notes = plan(s, task)
     if not plans:
         for note in notes:
             print(f"  {note}")
@@ -250,12 +290,16 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
     features = demo_columns(source.features)
     if keep_labels:
         features |= LABEL_FEATURES
-    root = data.train_root(s, task)
-    tmp = root.with_name("train.tmp")
+    if kind == data.SKILLS:
+        features[skills.STATE_KEY] = skills.state_feature(task.skills)
+    repo_id = f"local/so101_{task.name}{'' if kind == data.WHOLE else '_' + kind}"
+    root = data.dataset_root(s, task, kind)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    tmp = root.with_name(f"{root.name}.tmp")
     if tmp.exists():
         shutil.rmtree(tmp)
     out = LeRobotDataset.create(
-        repo_id=f"local/so101_{task.name}",
+        repo_id=repo_id,
         fps=source.fps,
         features=features,
         root=tmp,
@@ -280,8 +324,10 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
             state, action = column(table, "observation.state"), column(table, ACTION_COLUMN.get(p.source, "action"))
             streams = [episode_frames(meta, p.episode, key, p.start, p.stop) for key in video_keys]
             try:
+                prompt = task.prompt if p.skill is None else task.skills[p.skill].prompt
+                extra = {} if p.skill is None else {skills.STATE_KEY: skills.one_hot(task.skills, p.skill)}
                 for i in range(p.start, p.stop):
-                    frame = {"observation.state": state[i], "action": action[i], "task": task.prompt}
+                    frame = {"observation.state": state[i], "action": action[i], "task": prompt, **extra}
                     for key, stream in zip(video_keys, streams, strict=True):
                         index, image = next(stream)
                         assert index == i, f"{key}: got frame {index}, expected {i}"
@@ -297,7 +343,7 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
             # parallel, and the build tests 7.6 s against 59.7 s.
             out.save_episode(parallel_encoding=False)
             done += p.stop - p.start
-            mapping.append(p.entry())
+            mapping.append(p.entry(task))
             elapsed = time.perf_counter() - started
             print(
                 f"\r  episode {n + 1}/{len(plans)}: {done}/{total} frames, {done / max(elapsed, 1e-6):.0f} frames/s ",
@@ -314,22 +360,22 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
 
     report = Report()
     # Tracking only warns here: the demos are already recorded, and the dry run is where it should block.
-    validate_dataset(tmp, f"local/so101_{task.name}", report, group="train dataset", strict_tracking=False)
+    validate_dataset(tmp, repo_id, report, group=f"{kind} dataset", strict_tracking=False)
     if report.failures:
         report.print("Validation of the new build")
         raise ConfigError(f"The build failed validation; it was left at {tmp} for inspection. The old build is unchanged.")
-    # build.json goes first: a kill during the swap then leaves no build that claims to be current.
-    manifest_path = data.build_manifest_path(s, task)
-    manifest_path.unlink(missing_ok=True)
-    if root.exists():
-        shutil.rmtree(root)
-    tmp.rename(root)
     manifest = {
         "built": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "inputs": inputs,
         "episodes": mapping,
         "frames": total,
         "notes": notes,
+        **({"cuts": cuts} if cuts is not None else {}),
     }
-    replace_file(manifest_path, json.dumps(manifest, indent=2) + "\n")
+    # build.json goes inside the new dataset, so the rename swaps both at once: a kill leaves the old
+    # build with its own record, or no build at all, never a dataset beside another build's record.
+    replace_file(tmp / "build.json", json.dumps(manifest, indent=2) + "\n")
+    if root.exists():
+        shutil.rmtree(root)
+    tmp.rename(root)
     return report

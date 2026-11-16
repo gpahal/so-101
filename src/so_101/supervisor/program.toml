@@ -1,0 +1,65 @@
+# The supervisor's program: every threshold, judge and response it uses, read once when `so101 serve`
+# starts. `[supervisor] program` in so101.toml names another file in this format. Raise `version` with
+# every change, because each run's events record the version they ran with.
+#
+# The numbers were fitted offline on 150 recorded ACT and pi0.5 attempts from the first, 5-spot demos
+# (docs/supervisor.md), and scored on the same attempts. Those recordings are deleted, and the policies
+# trained on the new demos fail in their own ways: refit every number on new serve runs before trusting it.
+version = 2
+
+[gripper]
+closed_below = 25.0        # a close is the gripper falling below this
+carry_open_above = 12.0    # a close carries when the elbow then moves carry_elbow_deg with the gripper above this
+carry_elbow_deg = 25.0     # a miss reopened after a median of 5 deg of elbow travel; a real grasp moved 36
+hold_band = [16.5, 22.0]   # a held block keeps the gripper here (18 to 19 on this arm)
+hold_steady = 2.0          # within this of where it was, to count as holding steady
+hold_s = 1.5               # holding steady this long counts as a carry
+release_above = 4.0        # after a carry, the gripper opening this far above its hold is a release
+
+[speed]
+window_s = 0.3             # the arm's speed is its fastest joint's travel over this window, gripper left out
+
+# The stuck rules. Each fires at most once per attempt, before any carry unless noted.
+[rules.regrasp_loop]
+regrasps = 2               # closes that reopened without a carry
+[rules.hover]
+open_above = 25.0
+speed_below = 10.0         # deg/s
+from_start_deg = 15.0      # some joint this far from where the attempt started
+seconds = 5.0
+[rules.chatter]
+crossings = 4              # crossings of closed_below, either way
+within_s = 3.0
+[rules.frozen]
+speed_below = 3.0
+seconds = 4.0
+[rules.no_carry]
+seconds = 14.0             # of the policy's driving time
+[rules.not_released]       # after a carry
+seconds = 10.0             # holding steady, never released
+
+[timing]
+after_close_s = 1.0        # the event check looks this long after a close
+after_release_s = 1.5      # and this long after a release
+
+[watch]
+near = 0.7                 # a rule this close to firing (its progress, 0 to 1) starts the watch check
+period_s = 1.0
+lookback_s = 2.0           # its second frame is from this long before
+max_per_attempt = 12
+
+[judges]
+decision = "jev"                  # a failbench model key: fast, a probability per question
+chat = "gemini-3.8-flash"         # asked at the same time at events, and trusted when the decision model is unsure
+escalation = "claude-opus-5.5"    # reads the attempt's closes and log when the others can't settle it
+sure_ok_below = 0.2               # p_wrong under this is a sure ok
+sure_wrong_above = 0.8            # and over this a sure wrong
+success_p_wrong = 0.1             # after a release, the task counts as done only when both judges answer under this
+max_cost_usd = 2.0                # per run; the checks stop once the run has spent this
+
+[responses]
+# For the nth miss an after_close check found, the supervisor plays back this many seconds of the policy's
+# own motion, newest first, then hands the arm back to the policy. 2.5 s is one of serve's Rewinds
+# ([control] rewind_s): it undoes a close and the lift after it. A miss past the list, or a stuck rule,
+# holds the arm, asks the watch check, and asks a person unless that check is sure nothing is wrong.
+miss_rewind_s = [2.5, 5.0]

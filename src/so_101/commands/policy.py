@@ -14,6 +14,7 @@ from so_101.check import preflight
 from so_101.console import run_lerobot
 from so_101.report import Report
 from so_101.settings import ARMS, PortNotFoundError, cameras_arg
+from so_101.skills import STATE_KEY
 from so_101.tasks import get_task
 
 
@@ -80,8 +81,14 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
     stop`, so it's never done here. With `serving`, for `serve`, the leader is checked too when it's
     plugged in, and its failures are only warnings, since only Teleop needs it, and the checks also
     fail on a bad rest pose or `[control]` setting."""
+    skills = bool(getattr(ns, "skills", False))
+    if skills:
+        task.require_skills()
     local = local_checkpoint(ns.checkpoint, ns.policy) if ns.checkpoint else None
-    config = json.loads((local / "config.json").read_text()) if local else task.policy_config(ns.revision, ns.policy)
+    config = json.loads((local / "config.json").read_text()) if local else task.policy_config(ns.revision, ns.policy, skills)
+    if skills and STATE_KEY not in config["input_features"] and ns.policy == "act":
+        sys.exit(f"{local or task.policy_for(ns.policy, skills)} has no {STATE_KEY} input, so it can't be told which "
+                 "skill it's on: train it with `so101 train --skills`.")
     if ns.remote:
         remote.refuse_action_steps(ns.policy, ns.action_steps)
     action_steps = resolve_action_steps(ns.action_steps, config)
@@ -90,13 +97,14 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
         if ns.policy not in s.remote:
             sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
         server = remote.require_server(
-            task.name, ns.policy, ns.revision or "main", action_steps, s.remote[ns.policy].pin_unused_actions
+            task.name, ns.policy, ns.revision or "main", action_steps, s.remote[ns.policy].pin_unused_actions,
+            "skills" if skills else "whole",
         )
 
     # Capture each camera at the size the checkpoint was trained on.
     sizes = tasks.image_sizes(config)
     if set(sizes) != set(task.cameras):
-        model = local or task.policy_for(ns.policy)
+        model = local or task.policy_for(ns.policy, skills)
         sys.exit(f"{model} expects cameras {sorted(sizes)}, but the task records {sorted(task.cameras)}.")
     arms: tuple[settings.ArmName, ...] = ("follower",)
     if serving:
@@ -110,7 +118,7 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
                               control="FAIL" if serving else None, teleop_only=("leader",) if serving else (),
                               video=True)
     specs = [cam.lerobot_spec(width=sizes[cam.name][0], height=sizes[cam.name][1]) for cam in found]
-    checkpoint = None if server else local or task.download_policy(ns.revision)
+    checkpoint = None if server else local or task.download_policy(ns.revision, skills)
     args = [
         f"--strategy.type={'base' if serving else 'episodic'}",
         # A remote server sets the action steps itself, and its client rejects --policy flags.
