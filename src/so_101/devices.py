@@ -132,7 +132,7 @@ def arm_problem(arm: Arm) -> str | None:
     else:
         board = f"board ({arm.port})"
     return (f"The {arm.name}'s {board} isn't connected. Plug in its USB cable and power, then restart "
-            "so101 serve: the open connection doesn't survive a replug.")
+            "so101 serve or so101 run: the open connection doesn't survive a replug.")
 
 
 def presence(arms: list[Arm], cameras: list[Camera]) -> dict[str, str | None]:
@@ -151,7 +151,7 @@ def presence(arms: list[Arm], cameras: list[Camera]) -> dict[str, str | None]:
         else:
             problem = find_camera(cam, devices).problem
         found[cam.name] = (
-            f"The {cam.name} camera is missing: {problem}. Plug it back in, then restart so101 serve: "
+            f"The {cam.name} camera is missing: {problem}. Plug it back in, then restart so101 serve or so101 run: "
             "the open camera doesn't survive a replug."
         ) if problem else None
     return found

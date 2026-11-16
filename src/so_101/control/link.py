@@ -26,7 +26,7 @@ ONLY_PAGES = "Only a page takes control: the terminal works whichever page has i
 
 class Link:
     """`record(type, **fields)` logs an event; `say(message)` tells the operator. `operator` is the
-    name given with `so101 serve --operator`, or None: it goes on `control_taken`, which a person
+    name given with `--operator` to `so101 serve` or `so101 run`, or None: it goes on `control_taken`, which a person
     causes, but not on `link_lost` or `link_restored`."""
 
     def __init__(self, control: Control, clock: Callable[[], float], record: Callable[..., None],

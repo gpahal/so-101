@@ -246,6 +246,18 @@ class RigTest(unittest.TestCase):
 
 
 class ControllerTest(RigTest):
+    def test_messages_name_the_command_that_is_running(self) -> None:
+        # so101 serve and so101 run are the same process: what it tells the operator to restart, or says
+        # is exiting, is the command they ran.
+        for command in ("so101 serve", "so101 run"):
+            rig = self.new_rig(command=command) if command != "so101 serve" else self.new_rig()
+            rig.engine.error = "the policy failed"
+            rig.tick()
+            self.assertIn(f"can't run again until {command} restarts", rig.status()["refusals"]["resume"])
+            rig.engine.error = None
+            rig.controller.done = True  # as after a Quit that exited this tick
+            self.assertEqual(rig.command("pause").reason, f"{command} is exiting.")
+
     def test_space_and_toggle_pause_but_never_start_resume_or_restart_the_arm(self) -> None:
         # At the terminal, Space pauses but never starts or resumes the arm.
         self.rig.tick(2 * FPS)  # the arm has rested for 2 s, past the 1 s that lets the page's Space resume

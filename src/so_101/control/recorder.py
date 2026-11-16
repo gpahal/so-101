@@ -1,4 +1,4 @@
-"""Record a `so101 serve` run: one LeRobot dataset episode per attempt, and an event log.
+"""Record a `so101 serve` or `so101 run` run: one LeRobot dataset episode per attempt, and an event log.
 
 The controller owns the recorder and is its only caller (the supervisor's layer, stepped by the controller
 as its policy, writes its `supervisor` events with `event` on the same thread). Every tick of an open attempt adds one
@@ -83,7 +83,7 @@ OTHER in every other phase, where `control.phase` already says).
     run_end        the last event of a run that ended with a quit: finished (local time,
                    YYYY-mm-ddTHH:MM:SS), attempts (opened) and episodes (saved)
 
-`operator` (the name given with `so101 serve --operator`, or None) is on the events a person's
+`operator` (the name given with `--operator`, or None) is on the events a person's
 action causes: command, label, outcome, control_taken, check and pose. Events the robot causes on
 its own, such as fault, link_lost and loop_rate, don't have it.
 
@@ -250,7 +250,7 @@ class Recorder:
                 self._unwritten.add(type_)
                 warn(f"Couldn't write a {type_} event to {self.folder.events_path}: {error}. The arm and "
                      f"the control loop carry on; {type_} events are written once the disk takes them again, "
-                     "and lost if it doesn't before so101 serve exits. Is the disk full or unplugged?")
+                     "and lost if it doesn't before so101 exits. Is the disk full or unplugged?")
 
     # --- Attempts ----------------------------------------------------------------------------------
 
@@ -334,7 +334,7 @@ class Recorder:
             self.attempt = None
             self.failure = (f"Saving attempt {attempt} failed ({type(error).__name__}: {error}), so it isn't in the "
                             "run's dataset and no new attempt can be recorded. Check the disk the run is recorded "
-                            "on, then restart so101 serve to start a new run.")
+                            "on, then restart so101 serve or so101 run to start a new run.")
             self.event("recording_failed", error=self.failure)
             return None
         self.saved += 1
@@ -376,7 +376,7 @@ class Recorder:
         except Exception as error:  # the episode was saved; only the next attempt can't be recorded
             self.failure = (f"The run's dataset couldn't be reopened after episode {self.saved - 1} "
                             f"({type(error).__name__}: {error}), so no new attempt can be recorded. Restart "
-                            "so101 serve to start a new run.")
+                            "so101 serve or so101 run to start a new run.")
             self.event("recording_failed", error=self.failure)
 
     def discard_attempt(self, ended_by: str | None, **details) -> None:
@@ -412,5 +412,5 @@ class Recorder:
                 self._events.close()  # closed even when its last flush fails
             except (OSError, ValueError) as error:
                 warn(f"Couldn't finish writing {self.folder.events_path}: {error}. The events it couldn't "
-                     "write before so101 serve exited are lost; the page showed them.")
+                     "write before so101 exited are lost; the page showed them.")
 

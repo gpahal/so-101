@@ -377,9 +377,9 @@ class ResolveBindTest(unittest.TestCase):
     TS_IP = "100.101.102.103"
     WEB = {f"{TS_NAME}:443": {"/": {"Proxy": "http://127.0.0.1:8101"}}}
 
-    def resolve(self, bind: str, *, ip: str = "", serve: str = "") -> Bind:
+    def resolve(self, bind: str, *, ip: str = "", serve: str = "", command: str = "so101 serve") -> Bind:
         """resolve_bind for `bind`, with the Tailscale CLI printing `ip` for `ip -4` and `serve` for
-        `serve status --json`."""
+        `serve status --json`, for the control page `command` serves."""
         outputs = {"ip": ip, "serve": serve, "status": json.dumps({"Self": {"DNSName": f"{TS_NAME}."}})}
 
         def tailscale(*args: str):
@@ -387,7 +387,7 @@ class ResolveBindTest(unittest.TestCase):
 
         with mock.patch.object(web, "_tailscale", tailscale), \
                 mock.patch.object(web.subprocess, "run", side_effect=AssertionError("only the Tailscale CLI runs")):
-            return server.resolve_bind(control(bind=bind, port=self.PORT))
+            return server.resolve_bind(control(bind=bind, port=self.PORT), command)
 
     def test_funnel_or_a_tcp_forward_on_any_route_to_the_port_is_reported(self) -> None:
         # With bind = "tailscale" and Tailscale running.
@@ -443,6 +443,8 @@ class ResolveBindTest(unittest.TestCase):
         self.assertEqual(self.resolve("127.0.0.1", ip=self.TS_IP), Bind("127.0.0.1"), "no route, no warning")
         self.assertEqual(self.resolve("tailscale"), Bind("127.0.0.1", warnings=(server.SITE.say(web.NO_TAILSCALE),)),
                          "Tailscale stopped: the page stays on this computer, and it says so")
+        [stopped] = self.resolve("tailscale", command="so101 run").warnings
+        self.assertIn("restart `so101 run`", stopped, "it names the command that's running")
 
     def test_routes_checked_while_serve_runs(self) -> None:
         def check(bind: Bind, serve: str) -> str | None:

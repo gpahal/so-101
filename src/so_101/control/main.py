@@ -366,7 +366,7 @@ def control(cfg) -> None:
     # serve here, before anything connects.
     port = control_settings.port
     try:
-        bind = resolve_bind(control_settings)
+        bind = resolve_bind(control_settings, command)
     except ValueError as error:
         sys.exit(str(error))
     # Each cleanup is registered as its resource is made, so every one runs, even when one before it
@@ -375,8 +375,9 @@ def control(cfg) -> None:
     # turning off, and the page's server, bound first, stops last.
     with contextlib.ExitStack() as cleanup:
         try:
-            # Tailscale's routes are checked again every few seconds while serve runs, off the control loop.
-            server = ControlServer(bind, port, task=task.name, routes=lambda: route_warning(bind, port))
+            # Tailscale's routes are checked again every second while serve or run runs, off the control loop.
+            server = ControlServer(bind, port, task=task.name, routes=lambda: route_warning(bind, port, command),
+                                   command=command)
         except OSError as error:
             sys.exit(f"Can't serve the control page on {bind.address}:{port}: {error}. Is another "
                      "`so101 serve` or `so101 run` running? Stop it, or set another port under [control] in so101.toml.")
@@ -470,6 +471,7 @@ def control(cfg) -> None:
             leader=leader_maker(s.leader),
             operator=manifest["operator"],
             checks=checker(s, task.name),
+            command=command,
         )
         if autopilot:
             from so_101.control.autopilot import Autopilot

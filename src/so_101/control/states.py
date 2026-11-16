@@ -171,8 +171,9 @@ NEEDS_DEVICES = frozenset({"resume", "rewind", "teleop"})
 
 
 # A quit at rest waits for the leader's move to rest: nothing starts meanwhile, or the quit, still under
-# way, would refuse every Esc for the whole attempt.
-WAITING_TO_QUIT = "Quitting: serve exits once the leader is at rest, so nothing starts now."
+# way, would refuse every Esc for the whole attempt. It names no command: `so101 serve` and `so101 run`
+# both refuse with it, and the state machine doesn't know which is running.
+WAITING_TO_QUIT = "Quitting: so101 exits once the leader is at rest, so nothing starts now."
 
 
 def _resume(state: State, facts: Facts) -> Transition:
@@ -298,7 +299,7 @@ def _quit(state: State, facts: Facts) -> Transition:
     if facts.quitting:
         if state is State.RESTING:
             return _refuse(state, WAITING_TO_QUIT)
-        return _refuse(state, "Already quitting. The arm is on its way to rest, and serve exits once it's there; "
+        return _refuse(state, "Already quitting. The arm is on its way to rest, and so101 exits once it's there; "
                               "Pause cancels the quit.")
     if state is State.RESTING:
         if not facts.at_rest:

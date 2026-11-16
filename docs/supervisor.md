@@ -1,8 +1,8 @@
 # Supervisor: catching stuck and failed attempts while a policy runs
 
-Status: built through shadow mode, as a policy layer (`src/so_101/supervisor/`; how to use it is in the README, under The supervisor), tested only on the fake arm with stand-in models. Nothing here has run on the arm. The stuck rules below were measured offline on the first 150 recorded attempts, which were deleted for a fresh start; the numbers need refitting on `serve` runs of the policies trained on the new demos. Not built: the compile loop (step 1 below), the layer in `so101 run` and `sim eval`, and acting on Reset, which stays the operator's.
+Status: built, as a policy layer in `so101 serve` and `so101 run` (`src/so_101/supervisor/`, program version 4; how to use it is in the README, under The supervisor), tested only on the fake arm with stand-in models. Nothing here has run on the arm, and no judge has answered from it. The stuck rules below were measured offline on the first 150 recorded attempts, which were deleted for a fresh start; the numbers need refitting on `serve` and `run` runs of the policies trained on the new demos. The judges' thresholds (`sure_ok_below`, `sure_wrong_above`, `success_p_wrong`) were tuned with the shared prompt as it was then, which told every model it got two frames, the top camera then the wrist camera; every request now says which frames it carries (`vision.prompt.describe`), so they need checking with `so101-failbench` too. Not built: the compile loop (step 1 below), the layer in `sim eval`, and acting on Reset, which stays the operator's.
 
-The supervisor watches a policy attempt and acts when it fails or gets stuck. It's a policy over the policy (System 2 over System 1): it wraps the trained policy's driver, and each tick either passes the tick to the policy or drives the arm itself, to play back a missed grasp or to hold. Code decides most cases from the arm's own readings. A fast decision model (Jev) and Gemini 3.8 Flash check the camera frames at gripper events, and Jev checks again when a stuck rule holds the arm. A missed grasp is played back only when both are sure it's wrong, and a frontier model is asked only to advise a person once the supervisor has stopped. It sends `serve` no commands: `serve` is the operator's, and the supervisor is part of the policy it runs.
+The supervisor watches a policy attempt and acts when it fails or gets stuck. It's a policy over the policy (System 2 over System 1): it wraps the trained policy's driver, and each tick either passes the tick to the policy or drives the arm itself, to play back a missed grasp or to hold. Code decides most cases from the arm's own readings. A fast decision model (Jev) and Gemini 3.8 Flash check the camera frames at gripper events, and Jev checks again when a stuck rule holds the arm. A missed grasp is played back only when both are sure it's wrong, and a frontier model is asked only to advise a person once the supervisor has stopped. It sends the control center no commands: `serve` and `run` belong to the operator (and to `run`'s autopilot), and the supervisor is part of the policy they run.
 
 ## Why stuck comes first
 
@@ -18,7 +18,7 @@ The reviews show five ways of getting stuck:
 | Frozen | Both | The arm barely moves for seconds before it has carried anything |
 | Not released | π0.5 | Holds the block and never lets go, for example over the jar's old place |
 
-Vision models can't see the first four in a single frame, and none of them produces a clean gripper event. That's why the supervisor needs both rules over time and a periodic check, not only checks at events.
+Vision models can't see the first four in a single frame, and none of them produces a clean gripper event. That's why the supervisor needs rules over the arm's readings over time, not only checks at events. The camera check on a stuck attempt (the watch check) runs once a rule has fired and the arm holds; an earlier design also checked about once a second while a rule was close to firing, which version 4 of the program dropped, because nothing acted on those answers.
 
 ## What code can tell from the arm alone
 
@@ -45,7 +45,7 @@ All rules together catch 41 of 56 stuck attempts, at a median of 14 s into the a
 
 Successful attempts sometimes miss once or twice and recover: 76 of 83 had no regrasp, 4 had one, 2 had two and 1 had three. One regrasp alone is not stuck.
 
-The offline replay scripts are in `.scratch/stuck/` (git-ignored); the recordings they read are gone. The rules now live in `grasp/detector.py`, their thresholds in `grasp/grasp.toml`, and `so101-failbench candidates` replays `serve` runs through them. Thresholds were chosen on the same attempts they're scored on, so expect somewhat worse on new runs.
+The offline replay scripts are in `.scratch/stuck/` (git-ignored); the recordings they read are gone. The rules now live in `grasp/detector.py`, their thresholds in `grasp/grasp.toml`, and `so101-failbench candidates` replays `serve` and `run` runs through them. Thresholds were chosen on the same attempts they're scored on, so expect somewhat worse on new runs.
 
 ## Who does what
 
@@ -54,9 +54,9 @@ The offline replay scripts are in `.scratch/stuck/` (git-ignored); the recording
 | Controller | The existing 30 Hz loop and state machine, unchanged | Every tick | `control/controller.py` |
 | Stuck and event detector | Code: the rules above, the gripper bands, and the events (after a close, after a release) | Every tick the policy drives | The layer, on the loop's thread |
 | Event check | One Jev request with every question for the moment, plus one Gemini 3.8 Flash request sent at the same time, each its own call; settled as soon as the answers in can't be overturned, or after `answer_within_s` (5 s) | At after_close and after_release | Supervisor's worker pool |
-| Watch check | One Jev request with two frames (now and 2 s ago) and narrow questions | Once per hold, when a stuck rule or a third miss holds the arm; a hold it hasn't cleared in `hold_deadline_s` (5 s) asks for a person | Supervisor's worker pool |
-| Escalation | A frontier model reads a contact sheet of the attempt's closes and the log, and picks from a fixed list | Only when the program has no rule or both judges are unsure | Supervisor's worker pool |
-| Program | The questions, thresholds and rule table, written offline by a frontier model and tested against failbench | Read at start | A versioned file |
+| Watch check | One Jev request with four frames, each camera now and 2 s before (`lookback_s`), and the `stuck` moment | Once per hold, when a stuck rule or a third miss holds the arm; a hold it hasn't cleared in `hold_deadline_s` (5 s) asks for a person | Supervisor's worker pool |
+| Escalation | A frontier model reads a contact sheet of the attempt's closes and the log, and picks from a fixed list | Once an attempt, when a hold asks for a person | Supervisor's worker pool |
+| Program | The timing, judges, responses and budget (`supervisor/program.toml`); the gripper and stuck-rule thresholds are `grasp/grasp.toml`'s | Read at start, every version recorded in the run's `run.json` | Two versioned files |
 | Operator | Takes over with Teleop, confirms Reset and unsure successes | When asked | The page |
 
 ### Why a layer, not a second operator
@@ -69,7 +69,7 @@ The first build ran the supervisor as a thread in `so101-control` that sent Paus
 
 So the supervisor is now the top layer of the policy stack ([`policy-layers.md`](policy-layers.md)): `supervisor/layer.py`'s `Supervisor`, over the perception (and the skill sequencer, for a skills model), with the interface every policy in the stack has. It reads the perception's signals rather than keeping a detector of its own, asks for a person with `Output.asks`, which the state machine takes as the `policy_asked` event (Autonomous to Paused, like a lost link), and hands the arm back after a playback with a `Handback` that says the arm moved. It shares code with `serve` rather than calling it: its playback is `control/rewind.py`'s `History` and `Rewind`. Its own ticks are recorded with `control.driver` playback or hold, never as the model's. Each playback's `playback` event has the frames it undid, which analysis treats as suspect, and a `policy_asked` pause counts as an interruption. Neither is ever trained on as policy data.
 
-Everything runs on the control loop's thread except the judges, whose calls the loop sends to a worker pool, one call per judge, and collects on later ticks, so a step never waits. The pool's workers are daemon threads, so a call that hangs never keeps `serve` from exiting, and closing it cancels the calls still queued. An exception in the layer's own logic is logged and announced once, and from then on every tick goes straight to the policy; the layer's own logic runs in `Layer.safely`, and every call down the stack outside it, so an exception from the arm or the policy reaches `serve` as it would without the layer.
+Everything runs on the control loop's thread except the judges, whose calls the loop sends to a worker pool, one call per judge, and collects on later ticks, so a step never waits. The pool's workers are daemon threads, so a call that hangs never keeps `serve` or `run` from exiting, and closing it cancels the calls still queued. A judge whose key or SDK is missing is left out and named once; once the run has spent `max_cost_usd` (2 USD), the checks stop calling and the operator is told once. An exception in the layer's own logic is logged and announced once, and from then on every tick goes straight to the policy; the layer's own logic runs in `Layer.safely`, and every call down the stack outside it, so an exception from the arm or the policy reaches the control loop as it would without the layer.
 
 Every check carries the generation it was asked in, which `pause`, `run` and each hold raise. A watch verdict settles only the hold it was asked for. An after_close verdict is dropped after a pause or resume, a newer close, a carry or release since it was asked, or once it is `after_close_answer_s` (1.5 s) of the policy's time old: by then the first playback, 2.5 s, would no longer reach back past the close, which the program's loader checks. Each dropped check is logged with `stale` saying why, and an answer that comes in after its check settled is logged as `late_answer`. After each `run` the playback history starts again, so the layer never drives back past a pose a person set.
 
@@ -79,7 +79,7 @@ Responses get more expensive only as evidence grows, because a false alarm on a 
 
 1. **First miss** (after_close, both Jev and Flash sure it's wrong): play back 2.5 s of the policy's own motion, newest first, and hand the arm back to the policy with its queue cleared (`miss_rewind_s`). The handback says the arm moved, so the perception forgets the close it undid (`Detector.resumed`): it never counts as a regrasp, and the next close starts a new grasp. One judge alone never plays anything back: a false miss costs a retry, and a wrong Jev answer on a real grasp would undo it.
 2. **Second miss:** play back 5 s, so the policy approaches along a different path. ACT has no randomness at inference, so a retry from the same pose would very likely repeat the miss. While the ladder has a rung left and both judges answer, a `regrasp_loop` rule is logged as `ignored` and left to it: the ladder sees each miss, and the rule would hold the arm a rung early.
-3. **A stuck rule fires, or a third miss:** hold the arm. The watch check confirms with two frames, which cuts false alarms. A sure ok after a stuck rule hands the arm back. Otherwise, or with no answer within `hold_deadline_s`, the layer asks for a person, `serve` pauses, and one escalation follows: the frontier model gets every close of the attempt and picks the advice for that person:
+3. **A stuck rule fires, or a third miss:** hold the arm. The watch check looks at each camera now and 2 s before, which cuts false alarms. A sure ok after a stuck rule hands the arm back. Otherwise, or with no answer within `hold_deadline_s` (5 s), the layer asks for a person with an `Ask` of kind `stuck`, the control center pauses, and one escalation follows: the frontier model gets every close of the attempt and picks the advice for that person:
    - take over with Teleop (block in a pose the demos don't cover);
    - check the gripper (it isn't following its commands);
    - Reset as a failure (the scene changed).
@@ -91,19 +91,20 @@ A Teleop takeover from a stuck pause is recorded as a correction from the failur
 ## Building it
 
 1. **Offline, no arm.**
-   - Built: the stuck detector as a pure module (`grasp/detector.py`), tested on made-up traces. The recorded attempts it should have matched are deleted, so it's checked against new `serve` runs instead.
-   - Built: a `stuck` moment in failbench, and `so101-failbench candidates`, which picks frames from `serve` runs where each rule fires and at each check, for labelling.
-   - Built: the program format, its loader and the rule engine (`supervisor/program.toml`, `program.py`).
+   - Built: the stuck detector as a pure module (`grasp/detector.py`), tested on made-up traces. The recorded attempts it should have matched are deleted, so it's checked against new `serve` and `run` runs instead.
+   - Built: a `stuck` moment in failbench, and `so101-failbench candidates`, which picks frames from `serve` and `run` runs where each rule fires and at each check, for labelling.
+   - Built: the program format and its loader (`supervisor/program.toml`, `program.py`), and the thresholds' (`grasp/grasp.toml`, `grasp/thresholds.py`).
    - Not built: the compile loop, in which a frontier model proposes questions and a change is kept only if held-out failbench accuracy rises. It needs a labelled benchmark from new runs first.
-2. **In `serve`, off by default** (`[supervisor] mode = "off"` in `so101.toml`, or `shadow` or `act`):
-   - Built: the layer (`supervisor/layer.py`), the three policy hooks in the controller and the `policy_asked` event, and analysis of its playbacks and pauses, with tests on the fake arm.
-   - Decided: the layer sends `serve` no commands. Teleop, Reset and labels stay the operator's; the layer only asks.
+2. **In `serve` and `run`, off by default** (`[supervisor] mode = "off"` in `so101.toml`, or `shadow` or `act`; `--supervisor` sets it for one run, and `run.json` records it):
+   - Built: the layer (`supervisor/layer.py`), the policy stack's interface the controller steps it through and the `policy_asked` event, and analysis of its playbacks and pauses, with tests on the fake arm.
+   - Decided: the layer sends the control center no commands. Teleop, Reset and labels stay the operator's, and in `run` the autopilot's; the layer only asks.
 3. **On the arm:** measure stuck attempts caught, false alarms, event-to-command latency and the cost of each false alarm. Run `shadow` first, then `act`.
 
 ## Open questions
 
-- Whether gripper load, logged in `serve` runs as `gripper_load` about once a second, separates an empty edge pinch from a held block. The 5 empty carries need it or the wrist camera.
+- Whether gripper load, logged in `serve` and `run` runs as `gripper_load` about once a second, separates an empty edge pinch from a held block. The 5 empty carries need it or the wrist camera.
 - How well the watch check works on mid-approach frames. Failbench has no such frames yet.
 - Whether a 5 s playback gives ACT a different enough approach to break a regrasp loop.
-- Whether the layer belongs in `so101 run` and `sim eval` too. Both run LeRobot's own rollout loops, so each needs a wrapper around LeRobot's policy rather than this driver. The sim would let the rules and the playbacks be tested without the arm, though its rendered frames may not suit the judges.
-- All thresholds are fitted on the same 150 attempts. They need checking on new runs.
+- Whether the layer belongs in `sim eval` too. It runs LeRobot's own rollout loop, so it needs a wrapper around LeRobot's policy rather than the policy stack. The sim would let the rules and the playbacks be tested without the arm, though its rendered frames may not suit the judges.
+- All thresholds are fitted on the same 150 attempts, and the judges' with the old two-frame prompt. They need checking on new runs.
+- The time limits (`after_close_answer_s`, `hold_deadline_s`, `home_within_s`, `answer_within_s`) are unmeasured: no judge has answered from the arm yet.

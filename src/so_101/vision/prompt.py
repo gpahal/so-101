@@ -18,8 +18,9 @@ MOMENTS = {
     "after_close": "About 1 second ago the gripper closed: the robot just tried to grasp the block.",
     "after_release": "About 1.5 seconds ago the gripper opened: the robot just tried to drop the block into the container.",
     "end": "The attempt is over. This is its last frame; the robot will do nothing more.",
-    # Where a stuck rule fired or was close to firing (`grasp.detector`). The supervisor's watch check
-    # adds the same cameras from a moment earlier, named like `top_2s_ago`.
+    # The supervisor's watch check, asked once when a stuck rule (`grasp.detector`) or a third miss holds
+    # the arm, and `so101-failbench candidates`' frame where a rule fired. The watch check adds the same
+    # cameras from `lookback_s` earlier, named like `top_2s_ago`.
     "stuck": ("The arm may be stuck: for several seconds it has barely moved, hovered with the jaws open, or "
               "closed and opened again without carrying the block. Frames named like top_2s_ago show the same "
               "camera from that long before."),

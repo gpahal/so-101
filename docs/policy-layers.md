@@ -1,8 +1,8 @@
 # Policy layers: one interface from the model up, and what each frame records
 
 Status: built, tested on the fake arm and stand-in models, not yet run on the arm. Replaced the ad hoc driver
-methods that `serve`'s supervisor and skill layers shared in the first build. How to use what it records is
-in the README, under What serve records. `run` on the control center is in [`run.md`](run.md); the web reviewer that
+methods that `serve`'s supervisor and skill layers shared in the first build. `serve` and `run` both step it.
+How to use what it records is in the README, under What serve records. `run` on the control center is in [`run.md`](run.md); the web reviewer that
 shows what these record is in [`reviewer.md`](reviewer.md).
 
 ## The idea
@@ -13,7 +13,7 @@ stack that one function builds:
 
 ```
 EngineDriver   the model: LeRobot's inference engine, local or on the cloud GPU (the only LeRobot code)
-Perception     the gripper rules over each tick the model drove: close, lift, carry, release, stuck rules
+Perception     the grasp detector (grasp/) over each tick the model drove: close, carry, release, stuck rules
 SkillSequencer with --skills: which skill the model is told to do, switched at each handover
 Supervisor     with [supervisor] mode shadow or act: vision checks, playback, hold, asking for a person
 ```
@@ -68,7 +68,9 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
 ## The layers
 
 - **`EngineDriver`** (`policy/engine.py`, from `control/policy.py`): unchanged inside, plus `condition`.
-- **`Perception`** (`policy/perception.py`): one detector per attempt, fed on each tick the model drove,
+- **`Perception`** (`policy/perception.py`): one detector (`grasp/detector.py`, a pure module that
+  `so101 skills`, `build --skills` and `so101-failbench candidates` run too) per attempt, fed on each tick
+  the model drove,
   with the policy's own seconds. Logs a `grasp` event for each close, carry, regrasp and release, and a
   `rule` event when a stuck rule fires. After a handback, on the next tick it feeds, it calls
   `Detector.resumed(moved, pose)`: the detector's timers start again, and after a move with the jaws open
@@ -76,7 +78,9 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
   second grasp is seen in full. The detector (`grasp/detector.py`) counts hover and frozen time only on
   ticks the model's action reached the arm.
 - **`SkillSequencer`** (`policy/skills.py`): starts each attempt on the first skill; at the next skill's
-  handover signal it conditions the model on that skill and logs a `skill` event. On a handback with
+  handover signal it conditions the model on that skill and logs a `skill` event. Deciding to switch runs
+  under `safely`; telling the model (`inner.condition`) runs outside it, right after in the same call, so
+  an error from the model reaches the loop as the model's, not as a broken sequencer. On a handback with
   `moved`, it checks the gripper on its next tick: reading open, it goes back to the first skill, since
   whatever was held was let go or undone. This covers a playback that undid a grasp and your own Rewind.
 - **`Supervisor`** (`supervisor/layer.py`): as before, but reads the perception's signals and readings
@@ -105,16 +109,17 @@ Every `serve` and `run` recording gets two columns:
 ## Training on runs per skill
 
 `build --skills --with corrections,policy-successes,...` cuts runs as `build --with` does, then splits each
-cut where the skill changes:
-- a skills run: by its `control.skill` column;
-- a whole-model run: by its `grasp` events, the first skill until the next skill's handover event (the
-  carry), the next skill after it.
+cut where the skill changes, by what happened (`build.run_skills`, `skills.label_run`): the attempt's joint
+readings go through the detector as a demo's do, frames a script or a layer's playback moved aren't
+replayed, each skill's `to` bound applies, and only the frames a skills model drove keep the skill it was
+told (`control.skill`). So a person's correction is cut by what the arm did, whatever the model was told.
+[`skills.md`](skills.md) has the steps.
 
 Each piece is an episode with its skill's prompt and one-hot. A piece under 0.5 s is left out.
 
 ## Tests
 
-A contract suite runs against every policy (the leaf over a scripted engine, each layer over a fake leaf,
+A contract suite in `tests/test_policy.py` runs against every policy (the leaf over a scripted engine, each layer over a fake leaf,
 and the full stack): nothing reaches the arm after `pause`; `begin_episode`, `end_episode`, `condition`,
 `health` and `record_failure` reach the leaf; a handback reaches the leaf; `maintain` returns a list; a
 layer's own error never escapes, checked by making each of every layer's own methods raise in turn while a

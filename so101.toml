@@ -107,8 +107,8 @@ auto-white-balance-temp = 1
 contrast = 32
 saturation = 40
 
-# Where `so101 record` saves demos (<dir>/<task>/sessions/) and `so101 serve` its runs
-# (<dir>/<task>/runs/), plus edits and the training dataset.
+# Where `so101 record` saves demos (<dir>/<task>/sessions/) and `so101 serve` and `so101 run` their
+# runs (<dir>/<task>/runs/), plus edits and the training datasets.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.
 # The environment variable SO101_DATA_DIR overrides it.
 [data]
@@ -118,7 +118,7 @@ dir = "data"
 [run]
 # How many attempts each `so101 run` makes: its autopilot starts each one, ends it at [control]
 # attempt_limit_s of policy time (or `--duration`), and resets between them. Runs record to
-# data/<task>/runs/, as serve's do.
+# data/<task>/runs/, as serve's do. A whole number, 1 or more.
 episodes = 1
 # Torch device for the policy, here and when training locally: "mps" (Apple GPU), "cpu" or "cuda".
 device = "mps"
@@ -197,10 +197,10 @@ job_timeout = "1h"
 # other value, so stop and start the server after changing it.
 pin_unused_actions = true
 
-# `uv run so101 serve [task]`: the control center, a web page for supervising the follower from a
-# phone or laptop over Tailscale. `serve` checks every setting here before it starts, and refuses to
-# start on a missing or partial rest pose or a value out of its range; `so101 check` warns about the
-# same problems. Only blame_s is used elsewhere: `runs`, `build --with` and `review --runs` read it to
+# `uv run so101 serve [task]` and `uv run so101 run [task]`: the control center, a web page for
+# supervising the follower from a phone or laptop over Tailscale. Both check every setting here before
+# they start, and refuse to start on a missing or partial rest pose or a value out of its range;
+# `so101 check` warns about the same problems. Only blame_s is used elsewhere: `runs`, `build --with` and `review --runs` read it to
 # find the suspect frames, and stop if it isn't a number of 0 or more.
 [control]
 rest_pose = { shoulder_pan = 2037, shoulder_lift = 836, elbow_flex = 3029, wrist_flex = 2873, wrist_roll = 2037, gripper = 859 }
@@ -210,8 +210,8 @@ rest_pose_calibration = "3aceb365a7e9"
 # off, move the arm there by hand, and save it with `uv run so101 pose --save-rest`, which writes
 # rest_pose and rest_pose_calibration right under [control], replacing any saved before.
 # rest_pose_calibration is the first 12 hex digits of the follower calibration file's SHA-256 when
-# rest_pose was saved. Recalibrating changes where each step count puts a joint, so `serve` refuses
-# to start when the calibration file no longer matches, or when the line is missing: save the rest
+# rest_pose was saved. Recalibrating changes where each step count puts a joint, so `serve` and `run`
+# refuse to start when the calibration file no longer matches, or when the line is missing: save the rest
 # pose again. `so101 check` only warns about either.
 # Seconds of the arm's actual motion each Rewind plays back, newest first, in real time. Short
 # enough to undo only the mistake; press Rewind again to go back another rewind_s, never past the
@@ -221,7 +221,8 @@ rewind_s = 2.5
 # Teleop. Demos record for up to 30 s (episode_time_s in tasks.toml), so 45 s gives a policy half as
 # long again to finish or retry, while a forgotten attempt still ends. Only policy time counts because
 # the backstop limits how long the policy gets: a pause to look closer or step away never ends an
-# attempt. At the limit the arm returns to rest, the attempt is saved, and `serve` asks how it went.
+# attempt. At the limit the arm returns to rest, the attempt is saved, and `serve` asks how it went;
+# `run` leaves it unlabelled.
 # The right arrow or Reset is the normal way an attempt ends. `so101 run` ends its attempts here too;
 # `so101 run --duration` sets another limit for one run, and `so101 sim eval` gives each simulated
 # attempt this long unless its own --duration says otherwise.
@@ -248,24 +249,26 @@ link_timeout_s = 3
 # running. "127.0.0.1" allows only this computer's browser. It never listens on 0.0.0.0. The checks of
 # Tailscale's routes are in the README, under The control page.
 bind = "tailscale"
-# The control page's port: `serve` serves the page at http://<address>:<port>/.
+# The control page's port: `serve` and `run` serve the page at http://<address>:<port>/.
 port = 8101
 # The reviewer's port: `review` and `review --runs` serve their page at http://<address>:<review_port>/,
-# where `bind` above says, so you can review while `serve` runs. It must differ from port.
+# where `bind` above says, so you can review while `serve` or `run` runs. It must differ from port.
 review_port = 8766
 # Frames per second of each camera preview on the page, 320 px wide. Enough to see what the robot
 # sees, at a sixth of the cameras' 30 fps, so previews over Tailscale stay light on a phone. When
 # the control loop falls under 95% of the task's fps, previews drop to half this rate, then stop.
 preview_fps = 5
 
-# The supervisor in `so101 serve` (docs/supervisor.md), a policy over the policy: rules on the arm's
-# readings catch stuck attempts, and vision models check the cameras after each close and release.
+# The supervisor in `so101 serve` and `so101 run` (docs/supervisor.md), a policy over the policy: rules
+# on the arm's readings catch stuck attempts, and vision models check the cameras after each close and
+# release.
 [supervisor]
 # "off" runs none. "shadow" decides and logs every decision as a `supervisor` event in the run's
 # events.jsonl, and leaves every tick to the policy: run it first, to measure what it would catch and
-# its false alarms. "act" plays back a missed grasp and retries, holds the arm on a stuck rule, and
-# pauses for you when the cameras don't clear it or the task looks done, with advice for a stuck
-# attempt. It never ends or labels an attempt, and acts on nothing while you have the arm. Its vision checks bill the keys in
+# its false alarms. "act" plays back a grasp both judges call missed and retries, holds the arm on a
+# stuck rule, and pauses for you when the cameras don't clear the hold within 5 s, with advice, or when
+# the task looks done and the arm is home. It never ends or labels an attempt, and acts on nothing while
+# you have the arm; in `so101 run` the autopilot ends an attempt it calls done. Its vision checks bill the keys in
 # .scratch/bench.env (TYPESAFE_API_KEY for Jev, OPENROUTER_API_KEY for Gemini 3.8 Flash and the
 # escalation), up to max_cost_usd per run in the program, and need `uv sync --group failbench`.
 # Without them it runs the rules alone. `--supervisor off|shadow|act` on `so101 serve` and `so101 run`

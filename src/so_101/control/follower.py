@@ -79,12 +79,12 @@ POWER_BACK_S = 0.5
 # under 20 steps can't move the arm more than 1.8°. The arm is limp meanwhile, as it is in any restart.
 RESTART_SETTLE_S = 1.0
 RESTART_STEADY_STEPS = 20
-FOLLOWER_SETTLING = ("The follower answers again. serve waits until its readings have been steady for 1 s before "
+FOLLOWER_SETTLING = ("The follower answers again. so101 waits until its readings have been steady for 1 s before "
                      "turning its torque on, because a servo that is starting up can report a wrong position.")
 SUPPLY_DROPPED = ("The follower's power dropped: {listed} V, where it read {reference:.1f} V at start. Its motors "
                   "went limp, so the arm holds where it's measured, never where it was told to go, and holds "
                   "there once the power is back. Check the arm's power switch, supply and cables.")
-TORQUE_LIMIT_CHANGED = ("The follower's torque_limit changed without a restart: {listed}, where serve set it one below "
+TORQUE_LIMIT_CHANGED = ("The follower's torque_limit changed without a restart: {listed}, where so101 set it one below "
                         "max_torque_limit. Something else changed it, such as the servo's own overload protection; it's left "
                         "as found. The arm holds its last goal: look for a joint straining against something, then "
                         "Reset.")
@@ -246,7 +246,7 @@ class Follower:
             for name, camera in self.cameras().items():
                 if not camera.is_connected:
                     raise Failure(f"The {name} camera reports itself disconnected. Check its USB cable; if it was "
-                                  "unplugged, restart so101 serve.", name)
+                                  "unplugged, restart so101 serve or so101 run.", name)
             observation = self.robot.get_observation()
         else:
             observation = self._read_follower()
@@ -638,8 +638,8 @@ class Follower:
             return str(error)
         if device == "follower":
             return (f"The follower stopped answering: {error}. Check its power and USB cable; "
-                    "if it was unplugged, restart so101 serve.")
+                    "if it was unplugged, restart so101 serve or so101 run.")
         if device is not None:
             return (f"The {device} camera stopped sending frames: {error}. Check its USB cable; "
-                    "if it was unplugged, restart so101 serve.")
+                    "if it was unplugged, restart so101 serve or so101 run.")
         return f"{type(error).__name__}: {error}"

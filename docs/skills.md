@@ -16,7 +16,7 @@ skill instead of the whole task.
 | Word | What it is | Example |
 |---|---|---|
 | **task** | What you record demos of, in `tasks.toml` | `block-container` |
-| **recordings** | What `record`, `serve` and `sim nudge` saved: never changed | `sessions/`, `runs/`, `nudges/` |
+| **recordings** | What `record`, `serve`, `run` and `sim nudge` saved: never changed | `sessions/`, `runs/`, `nudges/` |
 | **edits** | Your decisions about the recordings | `edits.toml`, each run's `labels.toml` |
 | **dataset** | What a model trains on, built from recordings and edits. Two kinds per task | `whole`, `skills` |
 | **skill** | A named part of every demo, cut where the arm's readings show an event | `pick`, `place` |
@@ -140,13 +140,13 @@ data/<task>/
       build.json            what it was built from, the skill definitions and every demo's cuts
 outputs/
   skills/<task>/            `so101 skills`' contact sheets (new)
-  policies/ rollouts/ train/ check/ runs/ sim/ failbench/   (unchanged)
+  policies/ train/ check/ cameras/ dry-run/ runs/ sim/ failbench/   (unchanged)
 ```
 
 Why `build.json` moves inside: a build writes its dataset to a temporary folder and renames it into
 place. With the record inside, the rename swaps both at once, so a kill can never leave a dataset beside
-a record of another build. Today `build` has to delete `build.json` before the swap to get the same
-guarantee.
+a record of another build. Before the move, `build` had to delete `build.json` before the swap to get
+the same guarantee.
 
 ## On the Hub
 
@@ -285,7 +285,7 @@ which nothing reads now and which can be deleted.
   `build.json` inside the dataset.
 - `commands/policy.py`: the checks that tie a model to the task's skills; `remote.py` and
   `control/main.py`'s `remote_context`: the one-hot on the cloud GPU.
-- `cli.py`: the `skills` command, `--skills` on `build`, `train`, `serve` and `server start`, and the
+- `cli.py`: the `skills` command, `--skills` on `build`, `train`, `serve`, `run` and `server start`, and the
   `_skills` repo names (`tasks.Task.policy_for` and `dataset` take the kind).
 - `policy/stack.py`: adds the `SkillSequencer` when the run is a skills run.
 - Tests (`tests/test_skills.py`, `tests/test_remote.py`): the definitions and their refusals; the events and spans on made-up

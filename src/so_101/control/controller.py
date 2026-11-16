@@ -129,6 +129,7 @@ class Controller:
         presence: Callable[[], dict[str, str | None]],
         notify: Callable[[str, str], None] | None = None,
         operator: str | None = None,
+        command: str = "so101 serve",
     ) -> None:
         """`robot` is LeRobot's robot wrapper (ThreadSafeRobot) with hold configured. `policy` is the
         policy stack (`policy.stack.build`, `policy.base.Policy`): it hears each attempt open and close
@@ -144,8 +145,10 @@ class Controller:
         is called whenever the leader is to be connected: while the arm rests or is paused, the watch
         reports it present (or doesn't watch it) and its calibration file exists.
 
-        `operator` is the name given with `so101 serve --operator`, or None. It is recorded on every
-        event a person's action causes: command, label, outcome, control_taken, check and pose.
+        `operator` is the name given with `--operator` to `so101 serve` or `so101 run`, or None. It is
+        recorded on every event a person's action causes: command, label, outcome, control_taken, check
+        and pose. `command` is the command this process runs for, `so101 serve` or `so101 run`
+        (`main.command_name`), which the operator's messages name.
 
         `presence()` returns the device watch's latest answer: for each watched device, None when it
         is connected, or why it is missing and the fix. It must not block. The follower and every
@@ -159,6 +162,7 @@ class Controller:
         it left out: `check.check_control` refuses any other before `so101-control` connects."""
         self.recorder = recorder
         self.operator = operator
+        self.command = command
         self.policy = policy
         self.fps = fps
         self.rest_pose = rest_pose
@@ -638,7 +642,7 @@ class Controller:
             return None
         if retrying := health.retrying:
             return f"The policy failed: {_last_line(failure)}. {retrying}"
-        return f"The policy failed and can't run again until so101 serve restarts: {_last_line(failure)}"
+        return f"The policy failed and can't run again until {self.command} restarts: {_last_line(failure)}"
 
     def label_reason(self) -> str | None:
         """Why `label` is refused now, or None when it would be accepted."""
@@ -782,7 +786,7 @@ class Controller:
         if self.state is not before:
             self._say(wording.announcement(self, ended_by, no_attempt), self.state.value)
         if self.quitting and given is Event.ARRIVED and Action.EXIT not in transition.actions:
-            self._say(wording.WAIT_FOR_LEADER)
+            self._say(wording.WAIT_FOR_LEADER.format(command=self.command))
         if self.prompt is not None and Action.CLOSE_ATTEMPT in transition.actions:
             self._say(wording.ASK_OUTCOME.format(attempt=self.prompt))
         if Action.CONFIRM_QUIT in transition.actions:
@@ -843,7 +847,7 @@ class Controller:
             case Action.QUIT_AT_REST:
                 self.quitting = True
                 if self.state is State.RESTING:
-                    self._say(wording.WAIT_FOR_LEADER)
+                    self._say(wording.WAIT_FOR_LEADER.format(command=self.command))
             case Action.CONFIRM_QUIT:
                 self.quitting = False
                 self._confirm_until = self.clock() + CONFIRM_S  # asked again: CONFIRM_S from now
@@ -853,7 +857,7 @@ class Controller:
                 # No attempt is open here: it was saved at rest, where the arm stopped short, or at a fault.
                 if action is Action.EXIT_LEAVING_MOTORS:
                     self.leaves_motors = True
-                    self._say(wording.LEAVING_MOTORS)
+                    self._say(wording.LEAVING_MOTORS.format(command=self.command))
                 self.done = True
                 try:
                     self.policy.pause()

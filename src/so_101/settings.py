@@ -204,8 +204,8 @@ FINGERPRINT_DIGITS = 12
 
 @dataclass(frozen=True)
 class ControlSetting:
-    """What `load()` uses when so101.toml leaves a `[control]` setting out, and what `serve`'s
-    preflight (`check.check_control`) allows for it."""
+    """What `load()` uses when so101.toml leaves a `[control]` setting out, and what the preflight of
+    `serve` and `run` (`check.check_control`) allows for it."""
 
     default: float | str
     minimum: float | None = None  # the lowest a number may be
@@ -236,11 +236,11 @@ CONTROL_SETTINGS = {
 
 @dataclass(frozen=True)
 class Control:
-    """The `[control]` section of so101.toml: settings for `so101 serve`, the control center.
+    """The `[control]` section of so101.toml: settings for the control center, `so101 serve` and `so101 run`.
 
     `load()` keeps each value as the file writes it, without checking it, so a bad value never stops
-    the commands that fix it, such as `pose --save-rest`. `serve`'s preflight (`check.check_control`)
-    checks every value before the control center starts. Only `blame_s` is read elsewhere: by `runs`,
+    the commands that fix it, such as `pose --save-rest`. The preflight of `serve` and `run`
+    (`check.check_control`) checks every value before the control center starts. Only `blame_s` is read elsewhere: by `runs`,
     `build --with` and `review --runs`, which check it as they read runs (`analysis.check_blame_s`)."""
 
     # Each motor's raw position in encoder steps (0-4095), independent of calibration and units, so it
@@ -267,9 +267,12 @@ SUPERVISOR_MODES = ("off", "shadow", "act")
 
 @dataclass(frozen=True)
 class Supervisor:
-    """The `[supervisor]` section of so101.toml: whether `so101 serve` runs the supervisor, and its program."""
+    """The `[supervisor]` section of so101.toml: whether `so101 serve` and `so101 run` run the supervisor,
+    and its program. `--supervisor` on either command overrides `mode` for one run."""
 
-    mode: str  # off, shadow (decides and logs, sends nothing) or act (sends Pause, Rewind and Resume)
+    # off; shadow (decides and logs, never drives); or act (plays back a missed grasp, holds the arm on a
+    # stuck rule, and asks for a person through the policy stack, never with a command)
+    mode: str
     program: Path | None  # the program file, or None for the one in the package (`supervisor/program.toml`)
 
 
@@ -497,7 +500,8 @@ def save_rest_pose(pose: dict[str, int], path: Path | None = None, *, calibratio
     result parses to the same values, before writing.
     """
     path = path or config_path()
-    # The same rule `serve`'s preflight applies, checked first: a bad value written here would stop `serve`.
+    # The same rule the preflight of `serve` and `run` applies, checked first: a bad value written here
+    # would stop both.
     for motor, steps in pose.items():
         if isinstance(steps, bool) or not isinstance(steps, int) or not 0 <= steps < MOTOR_STEPS:
             raise ConfigError(

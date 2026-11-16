@@ -2,7 +2,7 @@
 
 Status: built (`web/review.py`, `web/review.html`, `web/server.py`), and the README's Reviewing demos and
 Reviewing runs sections describe it; run only on the tests' recordings and scratch copies of them in a
-browser, not yet on real ones. `record`, `teleop --cameras` and the failure benchmark keep Rerun.
+browser, not yet on real ones. `record` and `teleop --cameras` keep Rerun.
 
 `so101 review` (demos) and `so101 review --runs` (`serve` and `run` attempts) each open the same web page,
 showing only their kind, and take every decision on it. `--terminal` keeps today's text prompts, without a

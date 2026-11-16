@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass
 
 from so_101.supervisor.program import Program
 
-JPEG_QUALITY = 90  # as failbench's samples
+JPEG_QUALITY = 90  # as so101-failbench's samples, so its scores hold for these checks
 OK, WRONG, UNSURE = "ok", "wrong", "unsure"
 CHOICES = {
     "teleop": "Take over with the leader: the block is in a pose or place the demos don't cover.",
@@ -107,7 +107,7 @@ def decided(outcome, program: Program, decision: Verdict | None, chat: Verdict |
 
 
 def success(program: Program, decision: Verdict | None, chat: Verdict | None) -> bool:
-    """The end check counts as a success only when both judges answered, both under `success_p_wrong`."""
+    """The after_release check calls the task done only when both judges answered, both under `success_p_wrong`."""
     limit = program.judges.success_p_wrong
     return all(v is not None and v.p_wrong is not None and v.p_wrong < limit for v in (decision, chat))
 
@@ -196,9 +196,9 @@ class DaemonPool:
 
 class Judges:
     def __init__(self, program: Program, *, adapters=None, pool=None) -> None:
-        """`adapters` maps a model key to an object with failbench's `predict(images, moment)` (and, for the
-        escalation model, `escalate(sheet, log)`), for tests; without it, failbench's own adapters are made
-        for the models whose key and SDK are there. `pool` runs the calls: a `DaemonPool` by default, with
+        """`adapters` maps a model key to an object with the shared adapters' `predict(images, moment)` (and,
+        for the escalation model, `escalate(sheet, log)`), for tests; without it, `so_101.vision`'s own
+        adapters, which `so101-failbench` scores too, are made for the models whose key and SDK are there. `pool` runs the calls: a `DaemonPool` by default, with
         a worker for every call one attempt can have out at once and spares for calls that hang."""
         from so_101.vision.models import MODELS
 

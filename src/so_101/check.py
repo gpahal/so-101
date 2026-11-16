@@ -42,8 +42,8 @@ VOLTAGE_SPREAD_WARN_V = 1.0
 POSITION_SLACK_TICKS = 50  # how far outside its calibrated range a joint may read before it's flagged
 CAMERA_SAMPLE_S = 2.5
 LOOP_SAMPLE_S = 3.0
-# Free disk below which recording is refused, and below which it's warned about. `serve` checks them
-# before each attempt too.
+# Free disk below which recording is refused, and below which it's warned about. `serve` and `run` check
+# them before each attempt too.
 DISK_FAIL_GB = 1
 DISK_WARN_GB = 5
 
@@ -638,7 +638,7 @@ def _number(value: object) -> bool:
 
 
 def rest_pose_problem(s: Settings) -> str | None:
-    """The first thing wrong with the rest pose `serve` drives to, or None. Without the follower's
+    """The first thing wrong with the rest pose `serve` and `run` drive to, or None. Without the follower's
     calibration file there's nothing to compare `rest_pose_calibration` with, so it isn't compared."""
     pose, saved, now = s.control.rest_pose, s.control.rest_pose_calibration, s.follower.calibration_fingerprint()
     if pose is None:
@@ -658,7 +658,7 @@ def rest_pose_problem(s: Settings) -> str | None:
         return (f"rest_pose has positions that aren't raw motor steps from 0 to {settings.MOTOR_STEPS - 1}: "
                 + ", ".join(bad))
     if saved is None:
-        return ("rest_pose has no rest_pose_calibration, so `serve` can't tell whether the follower was "
+        return ("rest_pose has no rest_pose_calibration, so `serve` and `run` can't tell whether the follower was "
                 "recalibrated since it was saved, and the pose may no longer fold the arm")
     if now is not None and saved != now:
         return (f"the follower was recalibrated since rest_pose was saved (rest_pose_calibration {saved!r}, "
@@ -667,23 +667,23 @@ def rest_pose_problem(s: Settings) -> str | None:
 
 
 def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] = "FAIL") -> None:
-    """The rest pose and the `[control]` settings, which `serve` needs. Reads so101.toml and the
+    """The rest pose and the `[control]` settings, which `serve` and `run` need. Reads so101.toml and the
     follower's calibration file only.
 
     `settings.load()` doesn't check them, so a bad value never stops the commands that fix it. Each
-    problem gets `status`: FAIL in `serve`'s preflight, WARN in `so101 check`. `runs`, `build --with`
+    problem gets `status`: FAIL in the preflight of `serve` and `run`, WARN in `so101 check`. `runs`, `build --with`
     and `review --runs` check `blame_s` themselves (`analysis.check_blame_s`)."""
     c = s.control
 
     def problem(group: str, detail: str, fix: str) -> None:
-        report.add(group, status, detail if status == "FAIL" else f"{detail}; `serve` won't start", fix)
+        report.add(group, status, detail if status == "FAIL" else f"{detail}; `serve` and `run` won't start", fix)
 
     if detail := rest_pose_problem(s):
         problem("rest pose", detail, REST_POSE_FIX)
     elif s.follower.calibration_fingerprint() is None:
         # The follower's own check fails on the missing file; this only says what couldn't be compared.
         report.warn("rest pose", f"there's no calibration file ({s.follower.calibration_file}) to compare "
-                    f"rest_pose_calibration {c.rest_pose_calibration!r} with, so `serve` can't tell whether rest_pose "
+                    f"rest_pose_calibration {c.rest_pose_calibration!r} with, so `serve` and `run` can't tell whether rest_pose "
                     "still folds the arm", fix="put the follower's calibration file back, or calibrate it (`uv run "
                     "so101 calibrate follower`) and save the rest pose again")
     else:
@@ -718,8 +718,8 @@ def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] =
             ports_ok = False
             bad_value(key, "isn't a port number", "a whole number from 1 to 65535")
     if ports_ok and c.review_port == c.port:
-        # `so101 review` may run while `serve` does, so the two pages can't share a port.
-        bad_value("review_port", "is the control page's port too, so `review` couldn't run while `serve` does",
+        # `so101 review` may run while `serve` or `run` does, so the two pages can't share a port.
+        bad_value("review_port", "is the control page's port too, so `review` couldn't run while `serve` or `run` does",
                   f"a whole number from 1 to 65535 other than port's {c.port}")
     for key, rule in rules.items():
         if rule.choices and getattr(c, key) not in rule.choices:
@@ -731,7 +731,7 @@ def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] =
 
 def check_supervisor(report: Report, s: Settings, problem) -> None:
     """The grasp thresholds every run's perception reads and the supervisor's program, whatever
-    `[supervisor] mode` is, since both load for every run: each must load (a FAIL in `serve`'s preflight,
+    `[supervisor] mode` is, since both load for every run: each must load (a FAIL in the preflight of `serve` and `run`,
     through `problem`). With the supervisor on, a judge without its API key or its provider's SDK is a
     warning: the supervisor runs without it. Reads files, the environment and the SDKs' imports only."""
     from so_101.grasp import thresholds

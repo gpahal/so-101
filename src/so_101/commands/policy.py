@@ -110,7 +110,7 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task)
         arms = ARMS
     except PortNotFoundError:
         pass  # the leader is optional: only Teleop needs it
-    found, report = preflight(s, "serving the policy", arms=arms, cameras=[s.camera(name) for name in task.cameras],
+    found, report = preflight(s, "running the policy", arms=arms, cameras=[s.camera(name) for name in task.cameras],
                               control="FAIL", teleop_only=("leader",), video=True)
     specs = [cam.lerobot_spec(width=sizes[cam.name][0], height=sizes[cam.name][1]) for cam in found]
     checkpoint = None if server else local or task.download_policy(ns.revision, skills)

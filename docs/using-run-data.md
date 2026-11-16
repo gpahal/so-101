@@ -1,6 +1,6 @@
 # Using run data beyond `build --with`
 
-Status: ideas, none built. Written in November 2026 against LeRobot 0.7.0 and this repo's control center (`so101 serve`). The README covers what `build --with` does today; this note covers what else the same data could train, and what each would take.
+Status: ideas, none built. Written in November 2026 against LeRobot 0.7.0 and this repo's control center (`so101 serve`, and since then `so101 run` too). The README covers what `build --with` does today; this note covers what else the same data could train, and what each would take.
 
 ## What a build uses today
 

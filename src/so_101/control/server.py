@@ -36,6 +36,7 @@ events: by its login, "this Mac" for a local request, or its address when the pa
 HTTPS.
 """
 
+import dataclasses
 import secrets
 from collections.abc import Callable
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -49,6 +50,11 @@ from so_101.web.server import Bind
 
 SITE = web.Site(page="control page", command="so101 serve", posts="Commands", guards="the arm's controls",
                 remote="remote operator", thread="control-page")
+
+
+def site(command: str) -> web.Site:
+    """SITE for the command this process runs for, `so101 serve` or `so101 run`, which its messages name."""
+    return dataclasses.replace(SITE, command=command)
 COMMAND_WAIT_S = 2.0  # a command waits one tick, 33 ms at 30 fps; longer means the loop is stuck
 # Run checks samples the cameras for 2.5 s and reads the arms' motors: about 3 s, with room for a
 # slow bus or a camera that takes long to answer.
@@ -58,17 +64,17 @@ VISIBLE_HEADER = "X-SO101-Visible"  # "0" when the page polling is out of sight
 MAX_CLIENT = 64  # characters: the page sends 32
 
 
-def resolve_bind(control) -> Bind:
+def resolve_bind(control, command: str = "so101 serve") -> Bind:
     """Where the control page listens for `control`, so101.toml's `[control]` section: on its `port`,
     by its `bind` (`web.server.resolve_bind`). A TCP forward to the port while it would listen on
-    127.0.0.1 raises ValueError."""
-    return web.resolve_bind(control.bind, control.port, SITE)
+    127.0.0.1 raises ValueError. `command` is the one its messages say to restart."""
+    return web.resolve_bind(control.bind, control.port, site(command))
 
 
-def route_warning(bind: Bind, port: int) -> str | None:
+def route_warning(bind: Bind, port: int, command: str = "so101 serve") -> str | None:
     """What makes a request to the control page unsafe now (`web.server.route_warning`), or None.
     Raises RuntimeError when Tailscale's status can't be read."""
-    return web.route_warning(bind, port, SITE)
+    return web.route_warning(bind, port, site(command))
 
 
 def page() -> bytes:
@@ -77,13 +83,13 @@ def page() -> bytes:
 
 class ControlServer(web.PageServer):
     def __init__(self, bind: Bind, port: int, *, task: str,
-                 routes: Callable[[], str | None]) -> None:
+                 routes: Callable[[], str | None], command: str = "so101 serve") -> None:
         """Binds now, so a port in use fails before the arm and policy load. Set `controller` before
         `start`. `bind` is where to listen, from `resolve_bind`: the page's status shows its
         warnings. `routes()` is asked before the first request and every ROUTES_EVERY_S on a thread
         of its own, never the control loop's, what makes a request without a login unsafe
-        (`route_warning`)."""
-        super().__init__(bind, port, Handler, site=SITE, routes=routes)
+        (`route_warning`). `command` is the one that started it, which its messages name."""
+        super().__init__(bind, port, Handler, site=site(command), routes=routes)
         self.controller = None
         self.task = task
         self.id = secrets.token_hex(8)  # tells the page a restarted server from the one it watched

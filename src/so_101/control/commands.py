@@ -164,7 +164,7 @@ def intake(controller, name: str, source: str, client: str | None, who: str | No
     earlier in this tick that exited refuses everything after it, unread."""
     via: dict = {}
     if controller.done:
-        result = Result(name, False, "serve is exiting.")
+        result = Result(name, False, f"{controller.command} is exiting.")
         options = {}
     elif unknown := set(options) - set(COMMANDS.get(name, ())):
         result = Result(name, False, f"{name.capitalize()} takes no {', '.join(sorted(map(str, unknown)))}.")
