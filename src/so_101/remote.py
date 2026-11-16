@@ -25,6 +25,7 @@ SERVER_IMAGE = "huggingface/lerobot-gpu@sha256:aed1a4990fedee463b545050f33a38afc
 PORT = 7447
 DEPLOYMENT = "so101"
 SEMANTICS = "so101-degrees-gripper-percent-v1"
+SKILL_SEMANTICS = "so101-skill-one-hot-v1"  # the skill one-hot a skills model reads (`skill_features`)
 SERVER_LABEL = "policy-server"
 PIN_LABEL = "pin_unused_actions"
 # What the pi0.5 job prints the first time it pins the unused action columns, during warm-up.
@@ -158,11 +159,17 @@ main()
 
 
 def server_config(
-    repo: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int, fps: int
+    repo: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int, fps: int,
+    skills: tuple = (),
 ) -> dict:
     """The policy server's config, describing the model's inputs and outputs. `image_sizes` is each
     camera's (width, height), from `tasks.image_sizes`. With real-time chunking, `action_steps` is
-    the model's own and only bounds the steered horizon: LeRobot takes no execution slice then."""
+    the model's own and only bounds the steered horizon: LeRobot takes no execution slice then.
+
+    A skills model (`skills`, the task's `skills.Skill`s) has one more input, the skill one-hot
+    `observation.environment_state`. LeRobot's server serves a checkpoint only when the inputs its config
+    names equal the checkpoint's, so it's named here, as `skills.state_feature` describes it; the client
+    sends it each tick (`control.main.remote_context`)."""
     vector = {"dtype": "float32", "names": JOINTS, "semantics": SEMANTICS, "shape": [len(JOINTS)]}
     cameras = [
         {
@@ -182,9 +189,35 @@ def server_config(
         "zenoh": {"mode": "peer", "listen_endpoints": [f"tcp/127.0.0.1:{PORT}"]},
         "semantics": SEMANTICS,
         "robot_type": "so101_follower",
-        "features": [{"name": "observation.state", **vector}, *cameras],
+        "features": [{"name": "observation.state", **vector}, *cameras, *skill_features(skills)],
         "action_feature": {"name": "action", **vector},
     }
+
+
+def skill_features(skills: tuple) -> list[dict]:
+    """The skill one-hot as the server's config names it: none without skills."""
+    if not skills:
+        return []
+    from so_101.skills import STATE_KEY, state_feature
+
+    feature = state_feature(skills)
+    return [{"name": STATE_KEY, "dtype": feature["dtype"], "names": feature["names"], "semantics": SKILL_SEMANTICS,
+             "shape": list(feature["shape"])}]
+
+
+def skill_inputs(config: dict, skills: tuple, model: str) -> tuple:
+    """The skills whose one-hot the server must name for a skills model with this config.json: all of
+    them when the checkpoint reads the one-hot, none when it reads only the prompt. Exits before a job
+    starts, and bills, when the checkpoint's one-hot is another size than the task's skills."""
+    from so_101.skills import STATE_KEY
+
+    one_hot = config["input_features"].get(STATE_KEY)
+    if one_hot is None:
+        return ()
+    if list(one_hot["shape"]) != [len(skills)]:
+        sys.exit(f"{model} reads a one-hot of {one_hot['shape'][0]} skills, and the task lists {len(skills)} "
+                 f"({', '.join(k.name for k in skills)}). Train it again with --skills, or serve the model trained on them.")
+    return skills
 
 
 def execution_config(mode: str, action_steps: int, fps: int) -> dict:
@@ -292,8 +325,14 @@ def start_server(
     check_ssh_key()
     if server := active_server():
         sys.exit(f"A policy server is already running: {describe(server)}.\nStop it first: uv run so101 server stop")
+    skills = ()
+    if dataset == "skills":
+        from so_101 import tasks
+
+        found = tasks.load()[task]
+        skills = skill_inputs(found.policy_config(revision, policy_type, True), found.require_skills(), repo)
     setup, serve = setup_script(
-        policy_type, server_config(repo, policy_type, revision, image_sizes, action_steps, fps), pin_unused_actions
+        policy_type, server_config(repo, policy_type, revision, image_sizes, action_steps, fps, skills), pin_unused_actions
     )
     api = HfApi()
     job = api.run_job(
@@ -312,13 +351,17 @@ def start_server(
         wait_until_ready(job.id, policy_type, pin_unused_actions)
     except KeyboardInterrupt:
         sys.exit("\nStopped watching. The job is still running and billing: uv run so101 server stop")
-    steps = steps_flag(policy_type, action_steps)
-    skills = " --skills" if dataset == "skills" else ""
-    run = "" if skills else f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision}{steps}\n"
-    print(
+    print(ready_lines(task, policy_type, revision, action_steps, dataset))
+
+
+def ready_lines(task: str, policy_type: str, revision: str, action_steps: int, dataset: str = "whole") -> str:
+    """What `server start` prints once the server is ready: the commands that use it, and the one that stops it."""
+    flags = f"--policy {policy_type} --remote --revision {revision}{steps_flag(policy_type, action_steps)}"
+    flags += " --skills" if dataset == "skills" else ""
+    return (
         "\nThe policy server is ready. Next:\n"
-        f"{run}"
-        f"  uv run so101 serve {task} --policy {policy_type} --remote --revision {revision}{steps}{skills}\n"
+        f"  uv run so101 run {task} {flags}\n"
+        f"  uv run so101 serve {task} {flags}\n"
         "  uv run so101 server stop"
     )
 

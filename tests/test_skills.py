@@ -43,6 +43,8 @@ TABLE = {
               "handover": "carry"},
 }
 SKILLS = skills.parse(TABLE, "test")
+RETURN = {"prompt": "Return to the rest pose", "from": "release", "to": "end", "handover": "release"}
+THREE = skills.parse({**TABLE, "return": RETURN}, "test")
 TASK = Task(name="test", prompt="test", cameras=("top", "wrist"), fps=FPS, episodes=1, episode_time_s=20,
             reset_time_s=5, props=[], setup=[], skills=SKILLS)
 
@@ -94,10 +96,22 @@ class DefinitionTest(unittest.TestCase):
             "two skills with one prompt": ({**TABLE, "place": {**TABLE["place"], "prompt": TABLE["pick"]["prompt"]}},
                                            "its own prompt"),
             "an unknown key": ({**TABLE, "pick": {**TABLE["pick"], "until": "end"}}, "unknown keys"),
+            # At runtime a close that misses reopens, and a switch on it would already have told the model to place.
+            "a handover on the close": ({**TABLE, "place": {**TABLE["place"], "handover": "close"}},
+                                        "can't hand over on the close"),
         }
         for case, (table, message) in cases.items():
             with self.subTest(case), self.assertRaisesRegex(SkillError, message):
                 skills.parse(table, "test")
+
+
+    def test_block_container_returns_to_rest_as_its_third_skill_switched_to_at_the_release(self) -> None:
+        from so_101 import tasks
+
+        found = tasks.load()["block-container"].skills
+        self.assertEqual([skill.name for skill in found], ["pick", "place", "return"])
+        self.assertEqual((found[2].start, found[2].stop, found[2].handover), (Point("release"), Point("end"), "release"))
+        self.assertEqual(found[2].prompt, "Return to the rest pose")
 
 
 class CutTest(unittest.TestCase):
@@ -115,6 +129,13 @@ class CutTest(unittest.TestCase):
         self.assertEqual(spans["place"], (at["lift"], at["widest"] + round(0.2 * FPS) + 1))
         self.assertTrue(spans["place"][0] <= at["carry"] < spans["pick"][1], "the handover is inside both")
 
+    def test_the_return_runs_from_the_release_to_the_end_overlapping_place(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        spans = skills.spans(THREE, at, FPS, len(state))
+        self.assertEqual(spans["return"], (at["release"], len(state)))
+        self.assertTrue(spans["place"][0] <= at["release"] < spans["place"][1], "place runs on past the release")
+
     def test_a_demo_that_never_holds_the_block_is_refused(self) -> None:
         with self.assertRaisesRegex(SkillError, "no carry"):
             skills.events(trace(grasp=False), NAMES, FPS, GRASP)
@@ -127,6 +148,127 @@ class CutTest(unittest.TestCase):
         short = skills.parse({**TABLE, "place": {**TABLE["place"], "to": "lift + 0.1"}}, "test")
         with self.assertRaisesRegex(SkillError, "under 0.5 s"):
             skills.spans(short, at, FPS, len(trace()))
+
+
+class StalenessTest(unittest.TestCase):
+    """A skills build is current only while what cuts it is unchanged, by content, never by path."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory(prefix="so101-stale-")
+        self.addCleanup(temp.cleanup)
+        self.folder = Path(temp.name)
+        self.s = dataclasses.replace(settings.load(), data_dir=self.folder / "data")
+        root = data.dataset_root(self.s, TASK, data.SKILLS)
+        (root / "meta").mkdir(parents=True)
+        (root / "meta" / "info.json").write_text("{}")
+        self.inputs = data.build_inputs(self.s, TASK, kind=data.SKILLS)
+        data.build_manifest_path(self.s, TASK, data.SKILLS).write_text(json.dumps({"inputs": self.inputs}))
+
+    def thresholds(self, old: str, new: str) -> settings.Settings:
+        """Settings whose [perception] thresholds file is the package's with `old` replaced by `new`."""
+        text = thresholds.DEFAULT.read_text()
+        self.assertIn(old, text)
+        path = self.folder / f"grasp-{len(list(self.folder.glob('grasp-*')))}.toml"
+        path.write_text(text.replace(old, new, 1))
+        return dataclasses.replace(self.s, perception=dataclasses.replace(self.s.perception, thresholds=path))
+
+    def test_the_record_holds_no_path(self) -> None:
+        text = json.dumps(self.inputs)
+        self.assertNotIn(str(self.folder), text)
+        self.assertNotIn(str(thresholds.DEFAULT.parent), text)
+        self.assertEqual(self.inputs["gripper_sha256"], skills.gripper_hash(GRASP.gripper))
+        self.assertEqual(self.inputs["cut_rules"], skills.CUT_RULES_VERSION)
+
+    def test_each_input_that_changes_a_cut_makes_the_build_stale(self) -> None:
+        self.assertTrue(data.build_is_current(self.s, TASK, kind=data.SKILLS))
+        renamed = {"grab" if k == "pick" else k: v for k, v in TABLE.items()}
+        changes = {
+            "a gripper threshold": (self.thresholds("hold_s = 1.5", "hold_s = 1.6"), TASK),
+            "the gripper table's version": (self.thresholds("[gripper]\nversion = 1", "[gripper]\nversion = 2"), TASK),
+            "a skill's name": (self.s, dataclasses.replace(TASK, skills=skills.parse(renamed, "test"))),
+            "a skill's prompt": (self.s, dataclasses.replace(TASK, skills=skills.parse(
+                {**TABLE, "pick": {**TABLE["pick"], "prompt": "Grab the red block"}}, "test"))),
+            "a skill's bound": (self.s, dataclasses.replace(TASK, skills=skills.parse(
+                {**TABLE, "place": {**TABLE["place"], "to": "widest + 0.3"}}, "test"))),
+            "a skill's handover": (self.s, dataclasses.replace(TASK, skills=skills.parse(
+                {**TABLE, "place": {**TABLE["place"], "handover": "release", "from": "carry"}}, "test"))),
+            "the skills' order": (self.s, dataclasses.replace(TASK, skills=THREE)),
+        }
+        for change, (s, task) in changes.items():
+            with self.subTest(change):
+                self.assertFalse(data.build_is_current(s, task, kind=data.SKILLS))
+        with self.subTest("the cut rules"), mock.patch.object(skills, "CUT_RULES_VERSION", skills.CUT_RULES_VERSION + 1):
+            self.assertFalse(data.build_is_current(self.s, TASK, kind=data.SKILLS))
+
+    def test_the_stuck_rules_and_where_the_thresholds_live_change_no_build(self) -> None:
+        for change, s in {"a stuck rule": self.thresholds("seconds = 14.0", "seconds = 20.0"),
+                          "the same thresholds in another file": self.thresholds("hold_s = 1.5", "hold_s = 1.5")}.items():
+            with self.subTest(change):
+                self.assertTrue(data.build_is_current(s, TASK, kind=data.SKILLS))
+
+
+class RunLabelTest(unittest.TestCase):
+    """Each frame of a run's attempt labelled by what happened (`skills.label_run`), as a demo is cut."""
+
+    def label(self, state, skills_=SKILLS, scripted=None, told=None) -> np.ndarray:
+        scripted = np.zeros(len(state), dtype=bool) if scripted is None else scripted
+        return skills.label_run(skills_, state, NAMES, FPS, GRASP, scripted, told)
+
+    def test_a_person_alone_is_labelled_by_the_events_of_what_they_did(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        labels = self.label(state, THREE)
+        np.testing.assert_array_equal(labels[: at["carry"]], 0)
+        np.testing.assert_array_equal(labels[at["carry"]: at["release"]], 1)
+        np.testing.assert_array_equal(labels[at["release"]:], 2)
+
+    def test_without_a_return_skill_the_way_back_after_place_is_in_none(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        labels = self.label(state)
+        bound = at["widest"] + round(0.2 * FPS)
+        np.testing.assert_array_equal(labels[at["carry"]: bound + 1], 1)
+        np.testing.assert_array_equal(labels[bound + 1:], -1)
+
+    def test_a_correction_that_starts_in_pick_is_place_from_the_carry_whatever_the_model_was_told(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        # The model drove the reach under pick; a person took over before the close and carried the block.
+        takeover = at["close"] - 10
+        told = np.full(len(state), -1, dtype=np.int8)
+        told[:takeover] = 0
+        labels = self.label(state, THREE, told=told)
+        np.testing.assert_array_equal(labels[: at["carry"]], 0)
+        np.testing.assert_array_equal(labels[at["carry"]: at["release"]], 1)
+        np.testing.assert_array_equal(labels[at["release"]:], 2)
+
+    def test_the_frames_the_model_drove_keep_the_skill_it_was_told(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        told = np.zeros(len(state), dtype=np.int8)  # it was never switched: told pick throughout
+        labels = self.label(state, THREE, told=told)
+        bound = at["carry"] + round(0.5 * FPS)
+        np.testing.assert_array_equal(labels[: bound + 1], 0)
+        np.testing.assert_array_equal(labels[bound + 1:], -1, "pick past its bound is in no skill, as in a demo")
+
+    def test_a_rewind_that_opens_the_jaws_starts_again_on_pick(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        # After the carry a Rewind plays the arm back to before the close, then a person grasps again.
+        held = state[: at["carry"] + 15]
+        back = state[at["close"] - 20: at["carry"] + 15][::-1][:40]
+        again = state[at["close"] - 20:]
+        joined = np.concatenate([held, back, again])
+        scripted = np.zeros(len(joined), dtype=bool)
+        scripted[len(held): len(held) + len(back)] = True
+        labels = self.label(joined, THREE, scripted=scripted)
+        restart = len(held) + len(back)
+        self.assertEqual(labels[restart], 0, "the jaws read open after the rewind: back on pick")
+        second = restart + int(np.flatnonzero(labels[restart:] == 1)[0])
+        np.testing.assert_array_equal(labels[restart: second], 0)
+        self.assertLessEqual(abs(second - (restart + at["carry"] - (at["close"] - 20))), 1,
+                             "the second carry switches to place again")
+        self.assertEqual(labels[-1], 2)
 
 
 def grey(self, *args, **kwargs) -> np.ndarray:
@@ -203,6 +345,15 @@ class BuildTest(unittest.TestCase):
         self.assertFalse(data.build_is_current(self.s, TASK), "the whole dataset is its own build")
         moved = dataclasses.replace(TASK, skills=skills.parse({**TABLE, "pick": {**TABLE["pick"], "to": "carry + 1"}}, "test"))
         self.assertFalse(data.build_is_current(self.s, moved, kind=data.SKILLS), "a changed skill rebuilds")
+
+    def test_when_no_demo_can_be_cut_the_build_says_so_rather_than_to_record_demos(self) -> None:
+        missed = dataclasses.replace(TASK, name="missed")
+        make_session(data.task_dir(self.s, missed) / "sessions" / "20260101-100000" / "dataset", [trace(grasp=False)])
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(settings.ConfigError) as error:
+            build(self.s, missed, kind=data.SKILLS)
+        self.assertIn("none of its 1 kept demos could be cut into skills", str(error.exception))
+        self.assertNotIn("record some demos", str(error.exception))
+        self.assertIn("no carry", out.getvalue())
 
     def record_run(self, name: str, with_skills: bool) -> Path:
         """A serve run on the fake arm that closes on the block, holds it past the carry and succeeds:
@@ -284,12 +435,12 @@ class FakeLeaf:
 class Stack:
     """Perception and the skill sequencer over a FakeLeaf, stepped by hand as serve steps the stack."""
 
-    def __init__(self) -> None:
+    def __init__(self, skills_: tuple = SKILLS) -> None:
         self.events: list[dict] = []
         self.now, self.frame = 0.0, -1
         self.leaf = FakeLeaf()
         ctx = LayerContext(lambda type_, **fields: self.events.append({"type": type_, **fields}), lambda: self.now, GRASP, PROGRAM)
-        self.top = stack.build(self.leaf, ctx, skills=SKILLS)
+        self.top = stack.build(self.leaf, ctx, skills=skills_)
         self.top.begin_episode(1)
         self.top.run(Handback(START))
         self.outputs: list[Output] = []
@@ -348,9 +499,53 @@ class SequencerTest(unittest.TestCase):
         h.feed(state[at["carry"] + 10: at["carry"] + 15])  # still holding at 18.4
         self.assertEqual(h.switches(), [("pick", "start"), ("place", "carry")])
 
+    def test_the_release_switches_to_the_return_and_a_handback_with_the_jaws_open_keeps_it(self) -> None:
+        h = Stack(THREE)
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        h.feed(state[: at["release"] + 5])
+        self.assertEqual(h.switches(), [("pick", "start"), ("place", "carry"), ("return", "release")])
+        self.assertEqual(h.leaf.conditions[-1].prompt, "Return to the rest pose")
+        self.assertEqual(h.leaf.conditions[-1].values(), {"skill.pick": 0.0, "skill.place": 0.0, "skill.return": 1.0})
+        h.top.pause()
+        h.top.run(Handback(PERSON, moved=True))  # the jaws are open after a release: nothing was undone
+        h.feed(state[at["release"] + 5:])
+        self.assertEqual(h.switches()[-1], ("return", "release"))
+        self.assertEqual(h.outputs[-1].skill, 2)
+
+    def test_an_error_conditioning_the_model_is_the_models_and_reaches_the_loop(self) -> None:
+        h = Stack()
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        h.feed(state[: at["carry"]])
+
+        def refuse(conditioning: Conditioning) -> None:
+            raise RuntimeError("the engine refused the task")
+
+        h.leaf.condition = refuse
+        with self.assertRaisesRegex(RuntimeError, "refused the task"):
+            h.feed(state[at["carry"]: at["carry"] + 5])
+        self.assertIsNone(h.top.broken, "the sequencer's own logic didn't fail")
+        self.assertEqual([e for e in h.events if e["type"] == "skills"], [])
+
+    def test_after_the_jaws_reopen_a_second_grasp_reaches_place_again(self) -> None:
+        h = Stack()
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        h.feed(state[: at["carry"] + 10])
+        h.top.pause()
+        h.top.run(Handback(LAYER, moved=True))  # a playback undid the grasp: the jaws are open again
+        h.feed(state[at["close"] - 30:])  # the reach again, then a second close, lift and carry
+        self.assertEqual(h.switches(), [("pick", "start"), ("place", "carry"), ("pick", "reopened"), ("place", "carry")])
+        self.assertEqual(h.leaf.conditions[-1].prompt, SKILLS[1].prompt)
+
     def test_a_playback_that_undoes_the_grasp_sends_the_skill_back_to_pick(self) -> None:
+        self.playback_undoes_the_grasp()
+
+    def playback_undoes_the_grasp(self):
         """The gap the uniform design closes: the carry switches to place, then the after-close check, asked
-        after the carry, finds the jaws empty, and the supervisor plays back to before the close."""
+        after the carry, finds the jaws empty, and the supervisor plays back to before the close. Returns
+        the stack and what the next ticks need."""
         from test_supervisor import FakeModel, FakeEscalation, Pool
 
         events, now = [], [0.0]
@@ -390,6 +585,18 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual([(e["skill"], e["cause"]) for e in events if e["type"] == "skill"],
                          [("pick", "start"), ("place", "carry"), ("pick", "reopened")])
         self.assertEqual(leaf.conditions[-1].prompt, SKILLS[0].prompt)
+        return top, events, leaf, robot, state, at, frame, now, n
+
+    def test_after_a_playback_a_second_grasp_reaches_place_again(self) -> None:
+        top, events, leaf, robot, state, at, frame, now, n = self.playback_undoes_the_grasp()
+        for row in state[at["close"] - 30:]:  # the model reaches again and grasps; no verdict comes back
+            now[0] += 1 / FPS
+            n += 1
+            pose = dict(zip(NAMES, map(float, row), strict=True))
+            top.step(robot, Tick(now[0], n, {**pose, "top": frame, "wrist": frame}, pose))
+        self.assertEqual([(e["skill"], e["cause"]) for e in events if e["type"] == "skill"],
+                         [("pick", "start"), ("place", "carry"), ("pick", "reopened"), ("place", "carry")])
+        self.assertEqual(leaf.conditions[-1].prompt, SKILLS[1].prompt)
 
 
 class EngineConditioningTest(unittest.TestCase):
@@ -445,7 +652,92 @@ class InServeTest(unittest.TestCase):
             self.assertTrue((skill[: switch - 1] <= 0).all())
 
 
+class ModelTest(unittest.TestCase):
+    """A skills model runs only with the skills and gripper thresholds its dataset was cut with
+    (`commands.policy.check_skills_model`), found through its train_config.json and the dataset's build.json."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory(prefix="so101-model-")
+        self.addCleanup(temp.cleanup)
+        self.folder = Path(temp.name)
+        self.build = {"inputs": {"dataset": data.SKILLS, "skills": [skill.record() for skill in SKILLS],
+                                 "gripper_sha256": skills.gripper_hash(GRASP.gripper)}}
+        self.s = settings.load()
+
+    def check(self, build: dict | None = None, task: Task = TASK, one_hot: int | None = 2, with_skills: bool = True,
+              policy: str = "act") -> None:
+        from so_101.commands.policy import check_skills_model
+
+        root = self.folder / "dataset"
+        root.mkdir(exist_ok=True)
+        (root / "build.json").write_text(json.dumps(self.build if build is None else build))
+        model = self.folder / "model"
+        model.mkdir(exist_ok=True)
+        (model / "train_config.json").write_text(json.dumps({"dataset": {"repo_id": "local/so101_test_skills",
+                                                                         "root": str(root)}}))
+        inputs = {} if one_hot is None else {skills.STATE_KEY: {"type": "ENV", "shape": [one_hot]}}
+        ns = types.SimpleNamespace(policy=policy, revision=None)
+        check_skills_model(self.s, ns, task, {"input_features": inputs}, model, with_skills)
+
+    def refused(self, message: str, **kwargs) -> None:
+        with self.assertRaises(SystemExit) as stop:
+            self.check(**kwargs)
+        self.assertIn(message, str(stop.exception.code))
+
+    def test_a_model_trained_on_the_tasks_skills_runs(self) -> None:
+        self.check()
+        self.check(one_hot=None, policy="pi05")  # pi0.5 may read the prompt alone
+
+    def test_a_model_is_refused_when_its_skills_differ_from_the_tasks(self) -> None:
+        inputs = self.build["inputs"]
+        renamed = [{**r, "name": "grab"} if r["name"] == "pick" else r for r in inputs["skills"]]
+        reworded = [{**r, "prompt": "Grab it"} if r["name"] == "pick" else r for r in inputs["skills"]]
+        for case, changed in {"a name": renamed, "a prompt": reworded, "the order": inputs["skills"][::-1]}.items():
+            with self.subTest(case):
+                self.refused("doesn't match this task's skills: its skills were",
+                             build={"inputs": {**inputs, "skills": changed}})
+
+    def test_a_model_is_refused_when_its_demos_were_cut_with_other_gripper_thresholds(self) -> None:
+        inputs = self.build["inputs"]
+        other = skills.gripper_hash(dataclasses.replace(GRASP.gripper, hold_s=1.6))
+        self.refused("other [gripper] thresholds", build={"inputs": {**inputs, "gripper_sha256": other}})
+        self.refused("recorded no [gripper] thresholds",
+                     build={"inputs": {k: v for k, v in inputs.items() if k != "gripper_sha256"}})
+
+    def test_the_one_hot_must_fit_the_tasks_skills_and_needs_skills(self) -> None:
+        self.refused("reads a one-hot of 2 skills, and [test.skills] in tasks.toml lists 3",
+                     task=dataclasses.replace(TASK, skills=THREE))
+        self.refused("it's a skills model. Run it with --skills", with_skills=False)
+        self.refused("can't be told which skill it's on", one_hot=None)
+        self.check(one_hot=None, with_skills=False)  # a whole-demo model, run as one
+
+    def test_a_hub_model_is_checked_against_the_build_uploaded_with_its_dataset(self) -> None:
+        from so_101.commands.policy import skills_build
+
+        (self.folder / "train_config.json").write_text(json.dumps({"dataset": {"repo_id": "me/so101_test_skills"}}))
+        (self.folder / "build.json").write_text(json.dumps(self.build))
+
+        def download(repo, name, **kwargs):
+            return str(self.folder / name)
+
+        with mock.patch("huggingface_hub.hf_hub_download", side_effect=download) as hub:
+            self.assertEqual(skills_build(None, "me/act_so101_test_skills", "v1"), self.build)
+        self.assertEqual(hub.call_args_list, [
+            mock.call("me/act_so101_test_skills", "train_config.json", revision="v1"),
+            mock.call("me/so101_test_skills", "build.json", repo_type="dataset", revision=None)])
+
+
 class CommandTest(unittest.TestCase):
+    def test_a_model_missing_from_the_hub_says_to_train_it_first(self) -> None:
+        from huggingface_hub.errors import RepositoryNotFoundError
+
+        with mock.patch("so_101.tasks.hf_user", return_value="me"), \
+                mock.patch("huggingface_hub.hf_hub_download", side_effect=RepositoryNotFoundError("404", response=mock.Mock(status_code=404))), \
+                self.assertRaises(settings.ConfigError) as error:
+            TASK.policy_config(None, "act", skills=True)
+        self.assertIn("There's no model me/act_so101_test_skills on the Hub", str(error.exception))
+        self.assertIn("Train it first: uv run so101 train test --policy act --skills", str(error.exception))
+
     def test_skills_models_and_datasets_have_their_own_hub_names(self) -> None:
         with mock.patch("so_101.tasks.hf_user", return_value="me"):
             self.assertEqual(TASK.policy_for("act"), "me/act_so101_test")

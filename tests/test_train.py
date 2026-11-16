@@ -82,6 +82,22 @@ class BaseTest(unittest.TestCase):
                     cli.check_base("gpahal/act_so101_block-container", None, "pi05")
         self.assertIn("is a model of type act, not pi05", str(stop.exception))
 
+    def test_a_skills_model_and_a_whole_demo_act_model_never_start_from_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            whole, skills = Path(tmp) / "whole.json", Path(tmp) / "skills.json"
+            whole.write_text(json.dumps({"type": "act", "input_features": {"observation.state": {}}}))
+            skills.write_text(json.dumps({"type": "act", "input_features": {"observation.environment_state": {}}}))
+            with mock.patch("huggingface_hub.hf_hub_download", return_value=str(whole)):
+                cli.check_base("me/act_so101_task", None, "act")
+                with self.assertRaises(SystemExit) as stop:
+                    cli.check_base("me/act_so101_task", None, "act", skills=True)
+                self.assertIn("was trained on the whole demos", str(stop.exception))
+            with mock.patch("huggingface_hub.hf_hub_download", return_value=str(skills)):
+                cli.check_base("me/act_so101_task_skills", None, "act", skills=True)
+                with self.assertRaises(SystemExit) as stop:
+                    cli.check_base("me/act_so101_task_skills", None, "act")
+                self.assertIn("was trained on the skills dataset", str(stop.exception))
+
 
 class LocalTest(unittest.TestCase):
     def test_training_on_this_mac_uploads_nothing_and_saves_where_it_says(self) -> None:

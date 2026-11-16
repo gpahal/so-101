@@ -243,27 +243,20 @@ def remote_context(cfg):
     """LeRobot's remote rollout context, and a function that connects a new remote engine to the
     same server after the first one fails, which LeRobot's own engine never does.
 
-    The new engine is admitted with the same observation and action contract as the first, which
-    LeRobot works out while building the context: it's taken from that first admission. And it must
-    find the same checkpoint: the first session's `artifact_identity` becomes `expected_artifact`,
-    so a server restarted on another checkpoint is refused."""
+    A skills run (`policy.skills` in run.json) adds the skill one-hot, observation.environment_state, to
+    the features LeRobot works out from the robot while it builds the context (`_skill_features`): the
+    server advertises it for a skills model (`remote.server_config`), so the admission, the first engine
+    and every reconnected engine carry it, and the engine sends it each tick. The new engine is admitted
+    with the server's own capabilities, which the first admission had to equal field for field. And it
+    must find the same checkpoint: the first session's `artifact_identity` becomes `expected_artifact`, so
+    a server restarted on another checkpoint is refused."""
     import dataclasses
 
     from lerobot.remote_inference import RemoteClient, RemoteInferenceEngine
     from lerobot.rollout import build_rollout_context
 
-    admission: dict = {}
-    admit = RemoteClient.admit
-
-    def remember(client, **contract):
-        admission.update(contract)
-        return admit(client, **contract)
-
-    RemoteClient.admit = remember
-    try:
+    with _skill_features(_run_skills()):
         ctx = build_rollout_context(cfg, threading.Event())
-    finally:
-        RemoteClient.admit = admit
     first = ctx.policy.inference
     pinned = dataclasses.replace(cfg.inference, expected_artifact=first.client.artifact_identity)
     print(f"Connected to the cloud GPU: checkpoint {first.client.artifact_identity}.", flush=True)
@@ -271,7 +264,7 @@ def remote_context(cfg):
     def reconnect():
         client = RemoteClient.connect(pinned)
         try:
-            client.admit(**admission)
+            admit(client, pinned, cfg.fps)
         except BaseException:
             client.close()
             raise
@@ -280,6 +273,45 @@ def remote_context(cfg):
                                      task=first.task, shutdown_event=threading.Event())
 
     return ctx, reconnect
+
+
+def admit(client, config, fps: float) -> None:
+    """Admit `client` with the observation and action contract its server advertises, as the first
+    session was: LeRobot's context admits the robot's features only when they equal those."""
+    caps = client.capabilities
+    client.admit(features=caps.features, action_feature=caps.action_feature, semantics=config.semantics,
+                 action_interval=1.0 / fps, mode=config.mode)
+
+
+def _run_skills() -> tuple[str, ...]:
+    """The names of a skills run's skills, in order, from run.json's policy.skills; empty otherwise."""
+    manifest = json.loads(os.environ.get(RUN_ENV) or "{}").get("manifest") or {}
+    return tuple(skill["name"] for skill in (manifest.get("policy") or {}).get("skills") or ())
+
+
+@contextlib.contextmanager
+def _skill_features(names: tuple[str, ...]):
+    """While LeRobot builds the rollout context, add the skill one-hot to the features it works out from
+    the robot's joints and cameras: its public processor hook would fold extra floats into
+    observation.state instead. Nothing changes without skills."""
+    if not names:
+        yield
+        return
+    from lerobot.rollout import context
+
+    from so_101.skills import STATE_KEY
+
+    aggregate = context._aggregate_rollout_features
+
+    def with_skill(*args, **kwargs):
+        one_hot = {"dtype": "float32", "shape": (len(names),), "names": [f"skill.{n}" for n in names]}
+        return {**aggregate(*args, **kwargs), STATE_KEY: one_hot}
+
+    context._aggregate_rollout_features = with_skill
+    try:
+        yield
+    finally:
+        context._aggregate_rollout_features = aggregate
 
 
 def control(cfg) -> None:

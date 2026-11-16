@@ -86,9 +86,7 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
         task.require_skills()
     local = local_checkpoint(ns.checkpoint, ns.policy) if ns.checkpoint else None
     config = json.loads((local / "config.json").read_text()) if local else task.policy_config(ns.revision, ns.policy, skills)
-    if skills and STATE_KEY not in config["input_features"] and ns.policy == "act":
-        sys.exit(f"{local or task.policy_for(ns.policy, skills)} has no {STATE_KEY} input, so it can't be told which "
-                 "skill it's on: train it with `so101 train --skills`.")
+    check_skills_model(s, ns, task, config, local, skills)
     if ns.remote:
         remote.refuse_action_steps(ns.policy, ns.action_steps)
     action_steps = resolve_action_steps(ns.action_steps, config)
@@ -133,6 +131,87 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
         *([] if server else [f"--device={s.run.device}"]),
     ]
     return PolicySetup(task, action_steps, server, sizes, arms, found, report, checkpoint, args)
+
+
+def check_skills_model(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task, config: dict,
+                       local: Path | None, skills: bool) -> None:
+    """Exit unless the model fits how it's run: a model that reads the skill one-hot only with --skills,
+    an ACT skills model only with it, with one value per skill in tasks.toml, and a skills model only
+    with the skills and gripper thresholds its dataset was cut with (`require_skills_contract`)."""
+    def model() -> str:
+        return str(local or task.policy_for(ns.policy, skills))
+
+    one_hot = (config.get("input_features") or {}).get(STATE_KEY)
+    if one_hot and not skills:
+        sys.exit(f"{model()} reads a skill one-hot ({STATE_KEY}): it's a skills model. Run it with --skills.")
+    if not skills:
+        return
+    if not one_hot and ns.policy == "act":
+        sys.exit(f"{model()} has no {STATE_KEY} input, so it can't be told which skill it's on: train it with "
+                 "`so101 train --skills`.")
+    if one_hot and list(one_hot["shape"]) != [len(task.skills)]:
+        sys.exit(f"{model()} reads a one-hot of {one_hot['shape'][0]} skills, and [{task.name}.skills] in tasks.toml "
+                 f"lists {len(task.skills)} ({', '.join(k.name for k in task.skills)}). Train it again with --skills, "
+                 "or run it with the skills it was trained on.")
+    from so_101.grasp import thresholds
+
+    build = skills_build(local, None if local else task.policy_for(ns.policy, skills), ns.revision)
+    require_skills_contract(model(), task, thresholds.load(s.perception.thresholds).gripper, build)
+
+
+def skills_build(local: Path | None, repo: str | None, revision: str | None) -> dict:
+    """The build.json of the skills dataset a model was trained on, which its train_config.json names:
+    beside a local checkpoint's dataset (`dataset.root`), or else in the Hub dataset it was trained from,
+    where `train` uploads it with the dataset. Exits when there's none to read."""
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
+
+    model = str(local or repo)
+    try:
+        path = local / "train_config.json" if local else Path(hf_hub_download(repo, "train_config.json", revision=revision))
+        train = json.loads(path.read_text())
+    except (OSError, EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError, json.JSONDecodeError) as error:
+        sys.exit(f"{model} has no readable train_config.json ({type(error).__name__}), so which skills it was "
+                 "trained on is unknown. Train it again with `so101 train --skills`.")
+    dataset = train.get("dataset") or {}
+    root = dataset.get("root")
+    if root and (Path(root) / "build.json").is_file():
+        return json.loads((Path(root) / "build.json").read_text())
+    source = dataset.get("repo_id")
+    try:
+        if not source or source.startswith("local/"):
+            raise FileNotFoundError(source)
+        return json.loads(Path(hf_hub_download(source, "build.json", repo_type="dataset",
+                                               revision=dataset.get("revision"))).read_text())
+    except (OSError, EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError, json.JSONDecodeError) as error:
+        sys.exit(f"{model} was trained on {source or 'a dataset'}, whose build.json can't be read "
+                 f"({type(error).__name__}), so which skills it was trained on is unknown. Train it again with "
+                 "`so101 train --skills`, which uploads it with the dataset.")
+
+
+def require_skills_contract(model: str, task: tasks.Task, gripper, build: dict) -> None:
+    """Exit unless the skills dataset's `build` (its build.json) has the task's skills, by name and prompt in
+    the same order, cut with the same `[gripper]` thresholds: the model switches skills on those events
+    and is told those prompts, so a model trained on other skills or other cuts would be told the wrong
+    skill at the wrong time."""
+    from so_101 import skills
+
+    inputs = build.get("inputs") or {}
+    trained = {"skills": [{"name": r.get("name"), "prompt": r.get("prompt")} for r in inputs.get("skills") or ()],
+               "gripper_sha256": inputs.get("gripper_sha256")}
+    want = skills.contract(task.skills, gripper)
+    differ = []
+    if trained["skills"] != want["skills"]:
+        differ.append("its skills were " + ", ".join(f"{r['name']} ({r['prompt']!r})" for r in trained["skills"])
+                      + f", and [{task.name}.skills] in tasks.toml has "
+                      + ", ".join(f"{r['name']} ({r['prompt']!r})" for r in want["skills"]))
+    if trained["gripper_sha256"] != want["gripper_sha256"]:
+        differ.append("its demos were cut with other [gripper] thresholds than the ones this run switches skills with"
+                      if trained["gripper_sha256"] else
+                      "its build recorded no [gripper] thresholds, as builds from before they were recorded")
+    if differ:
+        sys.exit(f"{model} doesn't match this task's skills: {'; '.join(differ)}. Train it again with "
+                 "`so101 train --skills`, or put the skills or thresholds it was trained on back.")
 
 
 def local_checkpoint(text: str, policy: str) -> Path:

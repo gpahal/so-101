@@ -546,8 +546,9 @@ def policy_flags(policy: str, base: tuple[str, str | None] | None) -> list[str]:
     return [f"--policy.pretrained_path={repo}", *([f"--policy.pretrained_revision={revision}"] if revision else []), *rest, *TRAIN_FLAGS]
 
 
-def check_base(repo: str, revision: str | None, policy: str) -> None:
-    """Stop before building, uploading or paying if the job couldn't start from this base model."""
+def check_base(repo: str, revision: str | None, policy: str, skills: bool = False) -> None:
+    """Stop before building, uploading or paying if the job couldn't start from this base model. With
+    `skills`, for `train --skills`: an ACT base must read the skill one-hot, and without it must not."""
     from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import (
         EntryNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,
@@ -569,6 +570,13 @@ def check_base(repo: str, revision: str | None, policy: str) -> None:
         )
     if config.get("type") != policy:
         sys.exit(f"--base {name} is a model of type {config.get('type')}, not {policy}: train it with --policy {config.get('type')}.")
+    from so_101.skills import STATE_KEY
+
+    if policy == "act" and (STATE_KEY in config.get("input_features", {})) != skills:
+        sys.exit(f"--base {name} was trained on the skills dataset, so it reads a skill one-hot ({STATE_KEY}) the whole "
+                 "dataset doesn't have: train it with --skills, or start from a whole-demo model." if not skills else
+                 f"--base {name} was trained on the whole demos, so it has no input for the skill one-hot ({STATE_KEY}) "
+                 "a skills model reads: start from a skills model (its repo ends in _skills), or leave out --base.")
 
 
 def check_pi05_access() -> None:
@@ -614,12 +622,14 @@ def build_sources(ns: argparse.Namespace) -> tuple[str, ...]:
 
 def cmd_build(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
     task = get_task(ns.task)
+    if hint := data.old_build_hint(s, task):
+        print(hint)
     kind = dataset_kind(ns, task)
     sources = build_sources(ns)
     if data.build_is_current(s, task, sources, ns.keep_labels, kind) and not ns.force:
         inputs = "sessions, edits and runs" if sources else "sessions and edits"
         if kind == data.SKILLS:
-            inputs += ", skills and program"
+            inputs += ", skills and gripper thresholds"
         print(f"{data.dataset_root(s, task, kind)} is up to date with the {inputs}. --force rebuilds it.")
         return
     run_build(s, task, sources, ns.keep_labels, kind)
@@ -643,10 +653,12 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
             sys.exit("pi0.5 can't train locally: it needs an NVIDIA GPU with the `lerobot[pi]` extra.")
         check_pi05_access()
     base = parse_base(ns.base) if ns.base else None
-    if base:
-        check_base(*base, ns.policy)
     kind = dataset_kind(ns, task)
     skills = kind == data.SKILLS
+    if base:
+        check_base(*base, ns.policy, skills)
+    if hint := data.old_build_hint(s, task):
+        print(hint)
     sources = build_sources(ns)
     policy = task.policy_for(ns.policy, skills)  # needs a Hugging Face login; fail before building
     dataset_repo = task.dataset_repo(skills)
@@ -688,7 +700,7 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
             from huggingface_hub import HfApi
 
             refuse_public(HfApi(), forwarded(extra, "policy.repo_id") or policy, "model", "train")
-        run_with = f"serve {task.name} --skills" if skills else f"run {task.name}"
+        run_with = f"run {task.name}" + (" --skills" if skills else "")
         print(f"Training {ns.policy} on {kept} demos{also} for {steps:,} steps on this computer ({s.run.device}). "
               f"Nothing is uploaded: the model is saved in {output}.\n"
               f"To run it: uv run so101 {run_with} --checkpoint {output}")

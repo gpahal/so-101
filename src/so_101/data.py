@@ -392,7 +392,9 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
 
     `sources` are the run sources besides the demos (`so101 build --with`). A demos-only build
     without labels depends on no run, so it records no runs and a new run doesn't make it stale. A
-    skills build also depends on the skill definitions and the grasp thresholds that find the events.
+    skills build also depends on the skill definitions (names, prompts, bounds and handovers), the
+    `[gripper]` thresholds that find the events, by the hash of their values, and the cut rules
+    (`skills.CUT_RULES_VERSION`). The stuck rules (`[rules]`) cut nothing, so retuning them changes no build.
     """
     inputs = {
         "prompt": task.prompt,
@@ -420,12 +422,24 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
 
         inputs["rules"] = RULES_VERSION  # how runs are cut and labelled: a build under other rules isn't current
     if kind == SKILLS:
+        from so_101 import skills
         from so_101.grasp import thresholds
 
-        found = thresholds.load(s.perception.thresholds)
+        gripper = thresholds.load(s.perception.thresholds).gripper
+        # By content, never by path: the same thresholds in another file cut the same skills, and
+        # build.json is uploaded with the dataset.
         inputs |= {"dataset": SKILLS, "skills": [skill.record() for skill in task.skills],
-                   "grasp": {"path": str(found.path), "gripper": found.gripper.version}}
+                   "gripper_sha256": skills.gripper_hash(gripper), "cut_rules": skills.CUT_RULES_VERSION}
     return inputs
+
+
+def old_build_hint(s: Settings, task: "Task") -> str | None:
+    """A line about a build left in the layout from before `datasets/`, which nothing reads now, or None."""
+    old = task_dir(s, task) / "train"
+    if not (old / "meta" / "info.json").is_file():
+        return None
+    return (f"{old} is a build from before datasets/whole/, and nothing reads it now: delete it, and "
+            f"{task_dir(s, task) / 'build.json'} beside it, to free the space.")
 
 
 def build_is_current(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_labels: bool = False,

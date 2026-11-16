@@ -76,8 +76,12 @@ class EngineDriver:
         self.raised: str | None = None  # the traceback of an exception a step raised from the policy's side
         self.running = False  # between `run` and `pause`
         # The skill one-hot a skills model reads as observation.environment_state (`condition`), added
-        # to each processed observation; the frame it's built into names it in `dataset_features`.
-        self._skill_values: dict[str, float] = {}
+        # to each processed observation; the frame it's built into names it in `dataset_features`. A
+        # remote skills run's features already have it (`control.main.remote_context`): it starts on
+        # the first skill, so no frame is ever built without it.
+        names = self.dataset_features.get(STATE_KEY, {}).get("names") or []
+        self._skill_values: dict[str, float] = {name: float(n == 0) for n, name in enumerate(names)}
+        self._conditioning: Conditioning | None = None  # the last one, for an engine swapped in
 
     @classmethod
     def from_context(cls, ctx, reconnect: Callable[[], Any] | None = None) -> "EngineDriver":
@@ -121,6 +125,8 @@ class EngineDriver:
             self.raised = None
             self._clear()
             threading.Thread(target=self._stop_quietly, args=(old,), daemon=True).start()
+            if self._conditioning is not None and (set_task := getattr(engine, "set_task", None)) is not None:
+                set_task(self._conditioning.prompt)  # it was made with the run's first prompt
             self.engine.start()
             self.retrying = None
             return "Reconnected to the cloud GPU's policy server: Resume works again."
@@ -183,7 +189,9 @@ class EngineDriver:
     def condition(self, conditioning: Conditioning) -> None:
         """Tell the model what to do: the prompt as the engine's task, and a skills model's one-hot as
         observation.environment_state in the frame it builds. While the model drives, a change clears
-        its queued actions, so none meant for the old skill reaches the arm."""
+        its queued actions, so none meant for the old skill reaches the arm. An engine reconnected
+        later is told the last prompt before it starts."""
+        self._conditioning = conditioning
         set_task = getattr(self.engine, "set_task", None)
         changed = bool(set_task(conditioning.prompt)) if set_task is not None else False
         values = conditioning.values()

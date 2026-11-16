@@ -16,9 +16,10 @@ with the grasp thresholds (`grasp.thresholds`), plus two found here:
 - widest: the gripper's widest opening within WIDEST_WITHIN_S after the release.
 
 A skill's span is inclusive of its `to` frame. Every skill after the first names its `handover`: the
-event that switches to it at runtime, one the detector sees live (LIVE). It must fall inside both its
-own span and the previous skill's, on every demo (`spans`), so the model has seen every state on both
-sides of the switch.
+event that switches to it at runtime, a carry or a release (HANDOVERS), which the detector sees live. A
+close isn't one: at runtime a close that misses the block reopens, and a switch on it would already have
+told the model to place. The handover must fall inside both its own span and the previous skill's, on
+every demo (`spans`), so the model has seen every state on both sides of the switch.
 
 `so101 build --skills` writes each kept demo's skills as episodes, in order, each frame with its skill's
 prompt as LeRobot's `task` (for policies that read text, such as pi0.5) and the skill as a one-hot
@@ -35,7 +36,10 @@ from dataclasses import dataclass
 import numpy as np
 
 EVENTS = ("start", "close", "lift", "carry", "release", "widest", "end")
-LIVE = ("close", "carry", "release")  # what the detector sees as the policy drives: the possible handovers
+HANDOVERS = ("carry", "release")  # what the detector sees as the policy drives and can switch skills on
+# Raise with any change to LIFT_DEG, WIDEST_WITHIN_S, MIN_SPAN_S or how `events` and `spans` cut a demo, or
+# `label_run` a run: a skills build records it (`data.build_inputs`), so one made under other rules is stale.
+CUT_RULES_VERSION = 2
 LIFT_DEG = 4.0  # shoulder_lift travel after the close that counts as the block leaving the mat
 WIDEST_WITHIN_S = 2.0  # the widest opening is looked for this long after the release
 MIN_SPAN_S = 0.5  # a skill's shortest span in any demo
@@ -101,14 +105,35 @@ def parse(table, task: str) -> tuple[Skill, ...]:
         handover = entry.get("handover")
         if n == 0 and handover is not None:
             raise SkillError(f"{where} is the first skill, which every attempt starts with: it takes no handover.")
-        if n > 0 and handover not in LIVE:
+        if n > 0 and handover == "close":
+            raise SkillError(f"{where} can't hand over on the close: as the policy runs, a close that misses the "
+                             f"block reopens, and the switch would already have happened. Use {' or '.join(HANDOVERS)}.")
+        if n > 0 and handover not in HANDOVERS:
             raise SkillError(f"{where} needs a handover, the event that switches to it as the policy runs: one of "
-                             f"{', '.join(LIVE)} (got {handover!r}).")
+                             f"{', '.join(HANDOVERS)} (got {handover!r}).")
         skills.append(Skill(name, prompt.strip(), Point.parse(entry.get("from"), f"{where} from"),
                             Point.parse(entry.get("to"), f"{where} to"), handover))
     if len({s.prompt for s in skills}) != len(skills):
         raise SkillError(f"[{task}.skills]: each skill needs its own prompt, or a model can't tell them apart.")
     return tuple(skills)
+
+
+def gripper_hash(gripper) -> str:
+    """The sha256 of the grasp thresholds' `[gripper]` table (`grasp.thresholds.Gripper`), whose events
+    cut the demos and switch skills at runtime. A skills build records it, and a skills model is run
+    only with the thresholds its dataset was cut with."""
+    import dataclasses
+    import hashlib
+    import json
+
+    fields = json.dumps(dataclasses.asdict(gripper), sort_keys=True)
+    return hashlib.sha256(fields.encode()).hexdigest()
+
+
+def contract(skills: tuple[Skill, ...], gripper) -> dict:
+    """What a skills model is tied to at runtime: each skill's name and prompt, in order, and the
+    `[gripper]` thresholds whose events switch them. A skills build records it in build.json."""
+    return {"skills": [{"name": s.name, "prompt": s.prompt} for s in skills], "gripper_sha256": gripper_hash(gripper)}
 
 
 def state_feature(skills: tuple[Skill, ...]) -> dict:
@@ -125,9 +150,8 @@ def one_hot(skills: tuple[Skill, ...], index: int) -> np.ndarray:
 # --- Cutting demos ---------------------------------------------------------------------------------
 
 
-def events(state: np.ndarray, names: list[str], fps: float, thresholds) -> dict[str, int]:
-    """Each event's frame in one demo's joint readings (frames x joints, named `names`). Raises
-    SkillError when the demo has no carry or release, or the block never leaves the mat."""
+def _replay(state: np.ndarray, names: list[str], fps: float, thresholds) -> tuple[list[int], dict[str, int]]:
+    """Every close's frame, and the first carry's and release's, as the detector sees `state` frame by frame."""
     from so_101.grasp.detector import Detector
 
     detector = Detector(thresholds)
@@ -138,19 +162,39 @@ def events(state: np.ndarray, names: list[str], fps: float, thresholds) -> dict[
                 closes.append(i)
             elif signal.kind in ("carry", "release") and signal.kind not in found:
                 found[signal.kind] = i
+    return closes, found
+
+
+def _derive(state: np.ndarray, names: list[str], fps: float, closes: list[int], found: dict[str, int]) -> dict:
+    """Each event's frame from what the detector found, or None for one that didn't happen. The close
+    is the one that led to the carry, or the last one without a carry."""
+    carry, release = found.get("carry"), found.get("release")
+    before = [c for c in closes if carry is None or c <= carry]
+    close = max(before) if before else None
+    lift = widest = None
+    if close is not None:
+        column = state[:, names.index(SHOULDER_LIFT)]
+        moved = np.where(np.abs(column[close:] - column[close]) > LIFT_DEG)[0]
+        lift = close + int(moved[0]) if len(moved) else None
+    if release is not None:
+        gripper = state[release: release + round(WIDEST_WITHIN_S * fps), names.index(GRIPPER)]
+        widest = release + int(np.argmax(gripper))
+    return {"start": 0, "close": close, "lift": lift, "carry": carry, "release": release, "widest": widest,
+            "end": len(state) - 1}
+
+
+def events(state: np.ndarray, names: list[str], fps: float, thresholds) -> dict[str, int]:
+    """Each event's frame in one demo's joint readings (frames x joints, named `names`). Raises
+    SkillError when the demo has no carry or release, or the block never leaves the mat."""
+    closes, found = _replay(state, names, fps, thresholds)
     if "carry" not in found:
         raise SkillError(f"no carry: {len(closes)} close{'' if len(closes) == 1 else 's'}, and the block was never held")
     if "release" not in found:
         raise SkillError("no release: the block was never let go")
-    close = max(c for c in closes if c <= found["carry"])
-    lift = state[:, names.index(SHOULDER_LIFT)]
-    moved = np.where(np.abs(lift[close:] - lift[close]) > LIFT_DEG)[0]
-    if not len(moved):
+    at = _derive(state, names, fps, closes, found)
+    if at["lift"] is None:
         raise SkillError(f"no lift: shoulder_lift never moved {LIFT_DEG:g} deg after the close")
-    release = found["release"]
-    gripper = state[release: release + round(WIDEST_WITHIN_S * fps), names.index(GRIPPER)]
-    return {"start": 0, "close": close, "lift": close + int(moved[0]), "carry": found["carry"],
-            "release": release, "widest": release + int(np.argmax(gripper)), "end": len(state) - 1}
+    return at
 
 
 def frame_of(point: Point, at: dict[str, int], fps: float) -> int:
@@ -175,6 +219,65 @@ def spans(skills: tuple[Skill, ...], at: dict[str, int], fps: float, length: int
                                  f"(frames {start}-{stop - 1})")
         out[skill.name] = (start, stop)
     return out
+
+
+def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fps: float, thresholds,
+              scripted: np.ndarray, told: np.ndarray | None = None) -> np.ndarray:
+    """Each frame's skill, as an index in `skills`, for one attempt of a run, or -1 for a frame in none:
+    what happened, found as in a demo.
+
+    The attempt's joint readings (`state`, frames x joints named `names`) go through the detector frame
+    by frame, as `events` replays a demo, whoever drove: the policy, a person in Teleop, or both. Each
+    attempt starts on the first skill and moves to the next at its handover event. A frame a script
+    moved (`scripted`: the move to the start pose, a Rewind, a layer's playback, the return to rest) isn't
+    fed to the detector. When the frames after one show the jaws open while the skill expects the block
+    held (its handover is a carry), what was held was let go or undone: the replay starts again on the
+    first skill, with a new detector, as `policy.skills.SkillSequencer` does at runtime.
+
+    `told` is, per frame, the skill a skills model was told to do (control.skill, mapped onto `skills`),
+    -1 where it wasn't driving: it labels those frames, and the replay labels the rest. Last, each skill's
+    `to` bound applies, from the events of the replay its frame belongs to: a frame past it is in no skill,
+    as in a demo, where the return to rest after a place that ends at the widest opening is in none. A
+    bound whose event didn't happen doesn't apply."""
+    from so_101.grasp.detector import Detector
+
+    gripper, closed_below = names.index(GRIPPER), thresholds.gripper.closed_below
+    labels = np.zeros(len(state), dtype=np.int8)
+    replays = []  # (first frame, one past the last, closes, first carry and release) of each replay
+    current, start, moved = 0, 0, False
+    detector, closes, found = Detector(thresholds), [], {}
+    for i, row in enumerate(state):
+        if scripted[i]:
+            moved = True
+            labels[i] = current
+            continue
+        if moved:
+            moved = False
+            if current and skills[current].handover == "carry" and row[gripper] >= closed_below:
+                replays.append((start, i, closes, found))
+                current, start = 0, i
+                detector, closes, found = Detector(thresholds), [], {}
+        pose = dict(zip(names, map(float, row), strict=True))
+        for signal in detector.step((i - start) / fps, pose, True):
+            if signal.kind == "close":
+                closes.append(i - start)
+            elif signal.kind in ("carry", "release") and signal.kind not in found:
+                found[signal.kind] = i - start
+            if current + 1 < len(skills) and signal.kind == skills[current + 1].handover:
+                current += 1
+        labels[i] = current
+    replays.append((start, len(state), closes, found))
+    if told is not None:
+        labels = np.where((told >= 0) & ~scripted, told, labels).astype(np.int8)
+    for a, b, closes, found in replays:
+        at = _derive(state[a:b], names, fps, closes, found)
+        for n, skill in enumerate(skills):
+            if at[skill.stop.event] is None:
+                continue
+            bound = a + frame_of(skill.stop, at, fps)
+            piece = labels[a:b]
+            piece[(piece == n) & (np.arange(a, b) > bound)] = -1
+    return labels
 
 
 @dataclass(frozen=True)

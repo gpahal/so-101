@@ -104,11 +104,16 @@ class Task:
     def policy_config(self, revision: str | None, policy_type: str, skills: bool = False) -> dict:
         """The checkpoint's config.json."""
         from huggingface_hub import hf_hub_download
-        from huggingface_hub.errors import EntryNotFoundError, RevisionNotFoundError
+        from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
 
         repo = self.policy_for(policy_type, skills)
         try:
             config_file = hf_hub_download(repo, "config.json", revision=revision)
+        except RepositoryNotFoundError as e:
+            raise ConfigError(
+                f"There's no model {repo} on the Hub, or your login can't see it. Train it first: "
+                f"uv run so101 train {self.name} --policy {policy_type}{' --skills' if skills else ''}"
+            ) from e
         except RevisionNotFoundError as e:
             raise ConfigError(f"{repo} has no revision {revision!r}.") from e
         except EntryNotFoundError as e:

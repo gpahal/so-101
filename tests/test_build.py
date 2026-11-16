@@ -325,5 +325,74 @@ class BuildTest(unittest.TestCase):
                     shutil.rmtree(run)
 
 
+class SwapTest(unittest.TestCase):
+    """A new build takes the old one's place without a moment where neither is whole (`build.swap`)."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory(prefix="so101-swap-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name) / "whole"
+        self.new = Path(temp.name) / "whole.tmp"
+        self.old = Path(temp.name) / "whole.old"
+        for folder, name in ((self.root, "old"), (self.new, "new")):
+            folder.mkdir()
+            (folder / "build.json").write_text(name)
+
+    def test_the_old_build_is_deleted_only_once_the_new_one_is_in_place(self) -> None:
+        from so_101.build import swap
+
+        seen = []
+        rmtree = shutil.rmtree
+
+        def watch(path, *args, **kwargs):
+            seen.append((Path(path).name, (self.root / "build.json").read_text() if self.root.exists() else None))
+            return rmtree(path, *args, **kwargs)
+
+        with mock.patch.object(shutil, "rmtree", side_effect=watch):
+            swap(self.new, self.root)
+        self.assertEqual(seen, [("whole.old", "new")])
+        self.assertEqual((self.root / "build.json").read_text(), "new")
+        self.assertFalse(self.new.exists() or self.old.exists())
+
+    def test_a_failed_rename_puts_the_old_build_back(self) -> None:
+        from so_101.build import swap
+
+        shutil.rmtree(self.new)
+        with self.assertRaises(OSError):
+            swap(self.new, self.root)
+        self.assertEqual((self.root / "build.json").read_text(), "old")
+
+    def test_an_old_build_a_killed_swap_set_aside_is_deleted_first(self) -> None:
+        from so_101.build import swap
+
+        self.old.mkdir()
+        (self.old / "build.json").write_text("older")
+        swap(self.new, self.root)
+        self.assertEqual((self.root / "build.json").read_text(), "new")
+        self.assertFalse(self.old.exists())
+
+
+class RecordTest(unittest.TestCase):
+    def test_build_json_quotes_no_folder_of_this_computer(self) -> None:
+        from so_101.build import path_free
+
+        s = dataclasses.replace(settings.load(), data_dir=Path.home() / "robot" / "data")
+        note = f"session 1: no usable dataset (OSError('{s.data_dir}/test/sessions/1/dataset/meta/info.json'))"
+        self.assertEqual(path_free(note, s), "session 1: no usable dataset (OSError('<data_dir>/test/sessions/1/dataset/"
+                                             "meta/info.json'))")
+        self.assertEqual(path_free(f"{Path.home()}/elsewhere", s), "~/elsewhere")
+
+    def test_a_build_left_in_the_layout_from_before_datasets_gets_a_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            s = dataclasses.replace(settings.load(), data_dir=Path(folder))
+            self.assertIsNone(data.old_build_hint(s, TASK))
+            old = data.task_dir(s, TASK) / "train" / "meta"
+            old.mkdir(parents=True)
+            (old / "info.json").write_text("{}")
+            hint = data.old_build_hint(s, TASK)
+        self.assertIn("is a build from before datasets/whole/", hint)
+        self.assertEqual(len(hint.splitlines()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

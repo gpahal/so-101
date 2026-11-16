@@ -48,7 +48,8 @@ def inspect(s, task, sheets: bool = True) -> None:
         after = [(c.spans[prev.name][1] - 1 - c.events[nxt.handover]) / fps for c in good]
         print(f"  {(nxt.name + " starts before its handover"):34s} {_quantiles(before)}")
         print(f"  {(prev.name + " runs on after the handover"):34s} {_quantiles(after)}")
-    for a, b in (("start", "close"), ("close", "lift"), ("close", "carry"), ("carry", "release"), ("release", "widest")):
+    for a, b in (("start", "close"), ("close", "lift"), ("close", "carry"), ("carry", "release"), ("release", "widest"),
+                 ("widest", "end")):
         print(f"  {a + ' to ' + b:34s} {_quantiles([(c.events[b] - c.events[a]) / fps for c in good])}")
     if sheets:
         draw_sheets(s, task, good)
