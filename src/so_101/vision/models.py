@@ -11,7 +11,7 @@ longer buys.
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Providers and the variable holding each one's key.
 OPENROUTER = "openrouter"
@@ -33,7 +33,6 @@ class Model:
     group: str  # claude, gpt, gemini, robotics, decision
     effort: str | None = None
     estimate: float = 0.01
-    options: dict = field(default_factory=dict, hash=False, compare=False)
 
     @property
     def env(self) -> str:
@@ -50,9 +49,8 @@ class Model:
         return ((tokens_in or 0) * self.price_in + (tokens_out or 0) * self.price_out) / 1e6
 
 
-def _chat(key, model_id, pin, pout, group, effort="low", out_tokens=700, in_tokens=1800, **options):
-    return Model(key, OPENROUTER, model_id, pin, pout, group, effort,
-                 estimate=(in_tokens * pin + out_tokens * pout) / 1e6, options=options)
+def _chat(key, model_id, pin, pout, group, effort="low", out_tokens=700, in_tokens=1800):
+    return Model(key, OPENROUTER, model_id, pin, pout, group, effort, estimate=(in_tokens * pin + out_tokens * pout) / 1e6)
 
 
 _LIST = [

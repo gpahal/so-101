@@ -1,9 +1,11 @@
 """One adapter per provider. Each turns frames and a moment into a prediction dict:
 
     {"wrong": bool | None, "p_wrong": float | None, "category": str | None, "observation": str | None,
-     "tokens_in": int | None, "tokens_out": int | None, "cost_usd": float, "latency_s": float, "raw": str}
+     "tokens_in": int | None, "tokens_out": int | None, "cost_usd": float | None, "latency_s": float, "raw": str}
 
-and raises `ProviderError` (retryable or not) when there's no answer. SDKs are imported here,
+and raises `ProviderError` (retryable or not) when there's no answer. `cost_usd` is None when the provider
+reported no usage, so a caller keeping to a budget charges its own estimate instead of nothing. Each
+request starts with `prompt.describe(images)` and labels each image with `prompt.label`. SDKs are imported here,
 lazily, so every other module and the tests run without the `failbench` dependency group.
 
 - OpenRouter (Claude, GPT, Gemini): the `openai` SDK pointed at OpenRouter's OpenAI-compatible endpoint,
@@ -30,6 +32,9 @@ from so_101.vision.models import (GEMINI, GEMINI_DECISIONS, OPENAI_DECISIONS, OP
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 TIMEOUT_S = 180
+# Preview models such as Robotics-ER 2 are only on v1beta (the SDK's default, v1, answers 404), and
+# google-genai takes its timeout in milliseconds; without one a request can wait forever.
+_GEMINI_HTTP = {"api_version": "v1beta", "timeout": TIMEOUT_S * 1000}
 _RETRYABLE = ("RateLimit", "Timeout", "Connection", "InternalServer", "Overloaded", "ServiceUnavailable", "ServerError")
 
 
@@ -50,6 +55,11 @@ def _error(e: Exception) -> ProviderError:
     return ProviderError(f"{name}: {e}"[:400], retryable=retry)
 
 
+def _cost(m: Model, tokens_in: int | None, tokens_out: int | None) -> float | None:
+    """The call's cost from its token counts at the model's prices, or None when there were none."""
+    return None if tokens_in is None and tokens_out is None else m.cost(tokens_in, tokens_out)
+
+
 def parse_answer(text: str) -> dict:
     """The JSON answer from a chat model; tolerates code fences or text around the object."""
     try:
@@ -62,6 +72,8 @@ def parse_answer(text: str) -> dict:
             data = json.loads(m.group(0))
         except json.JSONDecodeError as e:
             raise ProviderError(f"unparseable answer: {e}: {(text or '')[:200]!r}")
+    if not isinstance(data, dict):
+        raise ProviderError(f"the answer isn't a JSON object: {(text or '')[:200]!r}")
     wrong = data.get("wrong")
     if isinstance(wrong, str):
         wrong = wrong.strip().lower() in ("true", "yes", "1")
@@ -85,9 +97,9 @@ class OpenRouterChat:
                              max_retries=0, default_headers={"X-Title": "so101-failbench"})
 
     def predict(self, images: list[tuple[str, bytes]], moment: str | None) -> dict:
-        content = []
+        content = [{"type": "text", "text": prompt.describe(images)}]
         for cam, data in images:
-            content.append({"type": "text", "text": f"{cam.upper()} camera:"})
+            content.append({"type": "text", "text": f"{prompt.label(cam)}:"})
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64(data)}"}})
         content.append({"type": "text", "text": prompt.question(moment)})
         extra = {"usage": {"include": True}, "provider": {"require_parameters": True}}
@@ -118,7 +130,7 @@ class OpenRouterChat:
         if cost is None and u is not None and getattr(u, "model_extra", None):
             cost = u.model_extra.get("cost")
         base = {"tokens_in": tokens_in, "tokens_out": tokens_out, "latency_s": round(latency, 3),
-                "cost_usd": float(cost) if cost is not None else self.m.cost(tokens_in, tokens_out),
+                "cost_usd": float(cost) if cost is not None else _cost(self.m, tokens_in, tokens_out),
                 "finish_reason": choice.finish_reason, "served_by": getattr(r, "provider", None) or (r.model_extra or {}).get("provider")}
         if refusal or choice.finish_reason in ("content_filter", "refusal"):
             return {**base, "wrong": None, "error": f"refused: {refusal or choice.finish_reason}", "raw": text[:500]}
@@ -135,14 +147,13 @@ class GeminiChat:
     def __init__(self, m: Model):
         from google import genai
         self.m = m
-        # Preview models such as Robotics-ER 2 are only on v1beta; the SDK's default here was v1 (a 404).
-        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"api_version": "v1beta"})
+        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options=_GEMINI_HTTP)
 
     def predict(self, images, moment):
         from google.genai import types
-        contents = []
+        contents = [prompt.describe(images)]
         for cam, data in images:
-            contents += [f"{cam.upper()} camera:", types.Part.from_bytes(data=data, mime_type="image/jpeg")]
+            contents += [f"{prompt.label(cam)}:", types.Part.from_bytes(data=data, mime_type="image/jpeg")]
         contents.append(prompt.question(moment))
         config = types.GenerateContentConfig(
             system_instruction=prompt.SYSTEM, response_mime_type="application/json",
@@ -156,9 +167,10 @@ class GeminiChat:
         latency = time.monotonic() - started
         um = r.usage_metadata
         tokens_in = getattr(um, "prompt_token_count", None)
-        tokens_out = (getattr(um, "candidates_token_count", None) or 0) + (getattr(um, "thoughts_token_count", None) or 0)
+        tokens_out = None if um is None else \
+            (getattr(um, "candidates_token_count", None) or 0) + (getattr(um, "thoughts_token_count", None) or 0)
         base = {"tokens_in": tokens_in, "tokens_out": tokens_out, "latency_s": round(latency, 3),
-                "cost_usd": self.m.cost(tokens_in, tokens_out)}
+                "cost_usd": _cost(self.m, tokens_in, tokens_out)}
         finish = str(r.candidates[0].finish_reason) if r.candidates else "none"
         if not r.candidates or getattr(r.prompt_feedback, "block_reason", None):
             return {**base, "wrong": None, "error": f"blocked: {r.prompt_feedback}", "raw": ""}
@@ -178,12 +190,12 @@ class GeminiDecisions:
     def __init__(self, m: Model):
         from google import genai
         self.m = m
-        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"api_version": "v1beta"})
+        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options=_GEMINI_HTTP)
 
     def predict(self, images, moment):
-        inputs = [{"type": "text", "text": prompt.decision_context(moment) + "\n"}]
+        inputs = [{"type": "text", "text": prompt.decision_context(moment, images) + "\n"}]
         for cam, data in images:
-            inputs.append({"type": "text", "text": f"{cam.upper()} camera:"})
+            inputs.append({"type": "text", "text": f"{prompt.label(cam)}:"})
             inputs.append({"type": "image", "data": b64(data), "mime_type": "image/jpeg", "resolution": "high"})
         started = time.monotonic()
         try:
@@ -199,7 +211,7 @@ class GeminiDecisions:
         cat = r.answers["category"]
         return {"wrong": p >= 0.5, "p_wrong": p, "category": cat.choice, "category_confidence": getattr(cat, "confidence", None),
                 "tokens_in": tokens_in, "tokens_out": 0, "latency_s": round(latency, 3),
-                "cost_usd": self.m.cost(tokens_in, 0), "raw": ""}
+                "cost_usd": _cost(self.m, tokens_in, None), "raw": ""}
 
 
 class OpenAIDecisions:
@@ -209,9 +221,9 @@ class OpenAIDecisions:
         self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=TIMEOUT_S, max_retries=0)
 
     def predict(self, images, moment):
-        content = [{"type": "input_text", "text": prompt.decision_context(moment)}]
+        content = [{"type": "input_text", "text": prompt.decision_context(moment, images)}]
         for cam, data in images:
-            content.append({"type": "input_text", "text": f"{cam.upper()} camera:"})
+            content.append({"type": "input_text", "text": f"{prompt.label(cam)}:"})
             content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64(data)}", "detail": "high"})
         started = time.monotonic()
         try:
@@ -224,7 +236,7 @@ class OpenAIDecisions:
             raise _error(e)
         latency = time.monotonic() - started
         tokens_in = getattr(r.usage, "input_tokens", None) if getattr(r, "usage", None) else None
-        base = {"tokens_in": tokens_in, "tokens_out": 0, "latency_s": round(latency, 3), "cost_usd": self.m.cost(tokens_in, 0)}
+        base = {"tokens_in": tokens_in, "tokens_out": 0, "latency_s": round(latency, 3), "cost_usd": _cost(self.m, tokens_in, None)}
         p = category = None
         for a in r.answers:
             if a.type == "refusal":
@@ -246,7 +258,7 @@ class TypeSafeJev:
 
     def predict(self, images, moment):
         from typesafe_sdk import Choice, Image, Noul
-        state = {"context": prompt.decision_context(moment)}
+        state = {"context": prompt.decision_context(moment, images)}
         for cam, data in images:
             state[cam] = Image(data)
         refs = " and ".join(f"`{cam}`" for cam, _ in images)
@@ -263,7 +275,7 @@ class TypeSafeJev:
         tokens_in = getattr(r.usage, "input_tokens", None) if getattr(r, "usage", None) else None
         p = float(r.nouls["wrong"].noul)
         return {"wrong": p >= 0.5, "p_wrong": p, "category": r.choices["category"].choice, "tokens_in": tokens_in,
-                "tokens_out": 0, "latency_s": round(latency, 3), "cost_usd": self.m.cost(tokens_in, 0),
+                "tokens_out": 0, "latency_s": round(latency, 3), "cost_usd": _cost(self.m, tokens_in, None),
                 "served_by": getattr(r, "model", None), "raw": ""}
 
 
@@ -274,13 +286,17 @@ _lock = threading.Lock()
 
 
 def adapter_for(m: Model):
+    """`m`'s adapter, made once and kept. A failure to make it is a non-retryable `ProviderError`, and
+    isn't kept: the next call tries again."""
     with _lock:
         if m.key not in _cache:
             try:
                 _cache[m.key] = _ADAPTERS[m.provider](m)
             except ImportError as e:
                 raise ProviderError(f"{e}. The provider SDKs are in the failbench group: "
-                                    "`uv run --group failbench so101-failbench ...`")
+                                    "`uv run --group failbench so101-failbench ...`") from e
+            except Exception as e:  # a missing key (KeyError) or a client that refused its settings
+                raise ProviderError(f"{m.key}'s client couldn't be made: {type(e).__name__}: {e}"[:400]) from e
         return _cache[m.key]
 
 

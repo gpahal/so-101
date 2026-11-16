@@ -336,6 +336,25 @@ class JudgesTest(unittest.TestCase):
         self.assertEqual([a.error is None for a in answers], [True, True, True, False])
         self.assertIn("max_cost_usd", answers[-1].error)
 
+    def test_a_call_with_no_cost_reported_or_an_error_is_charged_the_models_estimate(self) -> None:
+        from so_101.vision.models import MODELS
+
+        estimate = MODELS["jev"].estimate
+        program = dataclasses.replace(PROGRAM, judges=dataclasses.replace(PROGRAM.judges, max_cost_usd=2.5 * estimate))
+        j = judges({}, program=program)
+        j._adapters["jev"].cost = None  # the provider reported no usage
+        answers = [j.ask("jev", [("top", b"x")], "end") for _ in range(4)]
+        self.assertEqual([a.error is None for a in answers], [True, True, True, False])
+        self.assertAlmostEqual(j.spent, 3 * estimate)
+
+        class Failing:
+            def predict(self, images, moment):
+                raise RuntimeError("timed out")
+
+        j = J.Judges(program, adapters={"jev": Failing()}, pool=Pool())
+        j.ask("jev", [("top", b"x")], "end")
+        self.assertAlmostEqual(j.spent, estimate, msg="a failed call may still have been billed")
+
     def test_a_missing_judge_answers_with_an_error_not_an_exception(self) -> None:
         j = J.Judges(PROGRAM, adapters={}, pool=Pool())
         self.assertEqual(j.ask("jev", [], "end").error, "not available")

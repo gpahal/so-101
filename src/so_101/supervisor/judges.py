@@ -263,11 +263,16 @@ class Judges:
         if reason := self._budget():
             return Verdict(key, error=reason)
         started = time.monotonic()
+        # A call that reports no cost, or fails, may still have been billed: it's charged the model's
+        # estimate, as `so101-failbench run` charges it, so the cap holds.
+        estimate = self.models[key].estimate if key in self.models else 0.0
         try:
             answer = self._adapters[key].predict(images, moment)
         except Exception as error:
+            self._charge(estimate)
             return Verdict(key, latency_s=time.monotonic() - started, error=f"{type(error).__name__}: {error}"[:300])
-        cost = float(answer.get("cost_usd") or 0.0)
+        reported = answer.get("cost_usd")
+        cost = float(reported) if reported is not None else estimate
         self._charge(cost)
         return Verdict(key, p_wrong=answer.get("p_wrong"), category=answer.get("category"),
                        latency_s=answer.get("latency_s", time.monotonic() - started), cost_usd=cost,

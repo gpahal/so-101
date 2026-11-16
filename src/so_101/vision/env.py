@@ -1,12 +1,12 @@
-"""API keys for the vision judges, from a KEY=value file such as `.scratch/bench.env`."""
+"""API keys for the vision judges, from a KEY=value file such as `.scratch/bench.env` beside so101.toml."""
 
 import os
 from pathlib import Path
 
 
 def load_env(path: Path) -> list[str]:
-    """Read KEY=value lines into the environment, without overriding variables already set.
-    Returns the names it set (never the values)."""
+    """Read KEY=value lines, or `export KEY=value` as a shell would source them, into the environment,
+    without overriding variables already set. Returns the names it set (never the values)."""
     if not path.exists():
         return []
     names = []
@@ -15,6 +15,7 @@ def load_env(path: Path) -> list[str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         name, value = line.split("=", 1)
+        name = name.strip().removeprefix("export ")
         name, value = name.strip(), value.strip().strip('"').strip("'")
         if value and not os.environ.get(name):
             os.environ[name] = value
