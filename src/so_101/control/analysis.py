@@ -39,7 +39,9 @@ the `rewind` event's.
 - **Suspect frames:** the frames that led to an interruption, never used as training targets. When
   the operator rewound right after it (only pauses in between), they are the range the rewinds
   undid. Otherwise they are the last `blame_s` seconds of policy frames before it, counting back
-  through pauses and waiting frames but not through anything else. The frames any other rewind
+  through pauses and waiting frames but not through anything else. An ask that isn't `stuck` (the
+  task looks done, or a layer stopped) blames nothing: it isn't a judgement that the policy went
+  wrong. An ask from a run recorded before the `state` event named its kind blames as `stuck` does. The frames any other rewind
   undid, such as one from Teleop or after a lost link, are suspect too, and so are the frames each of
   any layer's playbacks undid (`playback` events, from the policy stack). The playback's own
   frames are waiting frames: `control.driver` says a layer drove, not the model.
@@ -79,7 +81,8 @@ from pathlib import Path
 import numpy as np
 
 from so_101.control.recorder import OUTCOMES, Phase
-from so_101.control.states import STEP_INS, Event
+from so_101.control.states import ASKED_OR_STEPPED_IN
+from so_101.policy.base import STUCK
 from so_101.policy.base import HOLD, PLAYBACK, WAITING
 from so_101.data import LABELS_FILE, Run, whole
 from so_101.settings import ConfigError, replace_file
@@ -108,9 +111,9 @@ SOURCES = (CORRECTIONS, HUMAN_ATTEMPTS, POLICY_SUCCESSES)
 # The version of the rules that cut and label a run's frames, which build.json records. Raise it when
 # `training_cuts`, `intervention_mask` or `frame_labels` change what a build holds, so a build made
 # under other rules isn't current.
-RULES_VERSION = 7  # 7: the supervisor's playbacks undo frames, and its pauses interrupt
+RULES_VERSION = 8  # 8: only a stuck ask blames the frames before it
 # What stops the policy for a judgement of it: an operator's step-in, or the policy asking for a person.
-STOPS = STEP_INS | {Event.POLICY_ASKED}
+STOPS = ASKED_OR_STEPPED_IN
 
 Range = tuple[int, int]
 
@@ -588,6 +591,8 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
     found: list[tuple[Segment, tuple[Segment, ...], str]] = []
     stepped_in = sorted((e["frame"], e["cause"]) for e in states
                         if isinstance(e.get("frame"), int) and e.get("cause") in STOPS)
+    # The frames where the policy stack asked for a person with a kind that blames nothing (`_blames`).
+    unblamed = {e["frame"] for e in states if e.get("cause") == "policy_asked" and e.get("ask", STUCK) != STUCK}
     for i, segment in enumerate(segments):
         if segment.phase is not Phase.AUTONOMOUS:
             continue
@@ -621,6 +626,8 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
         rewound = (min(a for a, _ in undone), max(b for _, b in undone)) if undone else None
         if next_ == "rewind" and rewound:
             suspect, source = rewound, "rewind"
+        elif command == "policy_asked" and segment.stop in unblamed:
+            suspect, source = None, "blame"
         else:
             suspect, source = _blame(phases, frames.waiting, segment, round(blame_s * fps)), "blame"
         key = (number, segment.stop)

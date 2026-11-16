@@ -26,8 +26,8 @@ Besides the robot's columns, each frame has `intervention`, `control.phase`, `co
 OTHER in every other phase, where `control.phase` already says).
 
     attempt_start  attempt
-    command        command, accepted, reason (None when accepted), its options (outcome, label, for_attempt),
-                   source (terminal, page or signal), who (a page's caller, for page commands
+    command        command, accepted, reason (None when accepted), its options (outcome, label, for_attempt,
+                   hold), source (terminal, page, signal or autopilot, `so101 run`'s), who (a page's caller, for page commands
                    only: its Tailscale login behind HTTPS, "this Mac", or its IP address), via
                    ("toggle" when the page's Space became this pause or resume) and operator
     state          state, previous, cause (the command or event that caused it), ended_by (when
@@ -125,12 +125,18 @@ class Phase(IntEnum):
 
 OUTCOMES = ("succeeded", "failed", "ignored")
 KEEP_EVENTS = 500  # recent events kept in memory for the control page
+# Frames LeRobot's streaming encoder queues per camera before it drops one (after 0.1 s of a full
+# queue). LeRobot's default of 30 is 1 s at 30 fps: a stall of an encoder thread for longer, as when a
+# save and another app load the Mac at once, dropped frames, and the build then leaves that attempt
+# out. 90 frames is 3 s, about 80 MB per 640x480 camera at most, held only while the encoder is behind.
+ENCODER_QUEUE_FRAMES = 90
 
 
 def jsonable(record: dict) -> dict:
-    """`record` as JSON would give it back: a value JSON can't hold becomes its `str`, so the event
-    log and the page's /events can always write it."""
-    return json.loads(json.dumps(record, default=str))
+    """`record` as JSON would give it back: a value JSON can't hold becomes its `str`, and NaN and the
+    infinities, which strict JSON has no word for, become null, so the event log and the page's /events
+    (strict, `web.server`) can always write it."""
+    return json.loads(json.dumps(record, default=str), parse_constant=lambda constant: None)
 
 
 def warn(message: str) -> None:
@@ -210,6 +216,7 @@ class Recorder:
             "streaming_encoding": True,
             "encoder_threads": 2,
             "rgb_encoder": RGBEncoderConfig(preset=10),  # SVT-AV1 has no preset above 10; the default of 12 warns
+            "encoder_queue_maxsize": ENCODER_QUEUE_FRAMES,
         }
         self.dataset = LeRobotDataset.create(
             folder.repo_id, fps, features(robot), root=folder.dataset_root, robot_type=robot.robot_type,

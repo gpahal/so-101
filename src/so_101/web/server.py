@@ -563,7 +563,9 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _json(self, status: HTTPStatus, body: dict) -> None:
-        self._send(status, json.dumps(body).encode(), "application/json")
+        # Strict JSON: Python writes NaN and infinities as bare words no browser's JSON.parse reads, so a
+        # page would show a dead link rather than a value it can't parse. Raises on one instead.
+        self._send(status, json.dumps(body, allow_nan=False).encode(), "application/json")
 
     def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
         """Send one response. One with an error status closes the connection, whatever refused the

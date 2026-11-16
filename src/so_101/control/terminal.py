@@ -150,12 +150,14 @@ class KeyReader:
                 if outcome := OUTCOME_KEYS.get(key):
                     self._send("reset", outcome=outcome, for_attempt=attempt)
                     return
+                self._tell_answering(attempt, False)
                 if key not in ENDING_KEYS:
                     print("Not ended: the attempt goes on.", flush=True)
         if key == "right" and not status["attempt_open"]:
             self._send("reset")  # in Fault the attempt was saved there; at rest none is open: nothing to ask
         elif key == "right":
             self.asking = status["attempt"]
+            self._tell_answering(self.asking, True)  # `so101 run`'s autopilot leaves the attempt to the answer
             print(ASK, flush=True)
         elif key == "left":
             self._send("reset", outcome="ignored")
@@ -167,6 +169,11 @@ class KeyReader:
             self._send(KEYS[key], note=SPACE_REFUSED.get(status["state"]))
         elif command := KEYS.get(key):
             self._send(command)
+
+    def _tell_answering(self, attempt: int, still: bool) -> None:
+        """Say that a person is answering how `attempt` went, or no longer is. A refusal (the attempt
+        ended meanwhile) needs no word: the question is dropped with it."""
+        self.submit("answering", source="terminal", for_attempt=attempt, open=still)
 
     def _send(self, command: str, note: str | None = None, **options) -> None:
         self.submit(command, source="terminal", **options).add_done_callback(partial(report, note=note))

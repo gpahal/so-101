@@ -4,6 +4,8 @@ Other threads (the terminal reader and the control page's web server) only
 `submit` commands, report page polls with `heartbeat`, and read `status`. Each `tick` first applies
 the commands waiting since the last tick, then reads the arm and sends exactly one goal: the
 policy's action, the leader's pose in Teleop, the next step of a scripted move, or the hold target.
+In `so101 run`, the tick then steps the `autopilot` with the tick's facts, after the status is
+published; it submits its commands like any operator, for the next tick.
 
 The controller keeps the loop, the commands and how the state machine's transitions are carried
 out. Its public attributes without a leading underscore, such as `state`, `open_attempt`, `follower`
@@ -22,6 +24,7 @@ sit beside it, and are used only through it:
 - `tools`: Run checks and Check pose.
 - `status`: the status the page and the terminal read, built from the controller's state.
 - `wording`: what the operator is told as the arm moves between states.
+- `autopilot`: `so101 run`'s operator that starts and ends attempts, when one is set.
 
 The follower, the policy driver and the clock are passed in, so tests run the controller on
 LeRobot's motor code over a fake bus, with a scripted engine. The recorder is passed in too, so
@@ -42,24 +45,26 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import NamedTuple
 
+from lerobot.utils.robot_utils import precise_sleep
+
 from so_101 import rollout
 from so_101.check import DISK_FAIL_GB, DISK_WARN_GB
 from so_101.report import Report
 from so_101.settings import Control
-from so_101.control import rewind, status, wording
+from so_101.control import autopilot, rewind, status, wording
 from so_101.control.attempt import COUNTS, LIMITED, Attempt
-from so_101.control.commands import LABELS, Result, Toggle, intake, stale_prompt
+from so_101.control.commands import ANSWER_S, LABELS, Result, Toggle, intake, stale_prompt
 from so_101.control.follower import Failure, Follower
 from so_101.control.leader import Handover, Leader, LeaderLost
 from so_101.control.link import Link
 from so_101.control.previews import Previews
 from so_101.control.recorder import OUTCOMES, Phase, Recorder
 from so_101.control.rewind import DRIVEN, Rewind
-from so_101.policy.base import OTHER, PERSON, POLICY, START, Handback, Output, Tick
+from so_101.policy.base import HOLD, OTHER, PERSON, PLAYBACK, POLICY, START, Handback, Output, Tick
 from so_101.control.shedding import Pace
 from so_101.control.states import (
+    ASKED_OR_STEPPED_IN,
     CONFIRM_S,
-    STEP_INS,
     Action,
     Command,
     Event,
@@ -91,6 +96,14 @@ def _move_event(arrived: bool | None) -> Event | None:
     if arrived is None:
         return None
     return Event.ARRIVED if arrived else Event.STOPPED_SHORT
+
+
+def _paused_by(given: Command | Event, before: State) -> str:
+    """Why the arm just paused, for the autopilot: the event, or "person" for an operator's command or
+    the end of a move one started (a Rewind, a Handover, Teleop's leader)."""
+    if isinstance(given, Command) or given is Event.LEADER_LOST or before in (State.REWINDING, State.HANDOVER):
+        return "person"
+    return given.value
 
 
 def _last_line(failure: str) -> str:
@@ -188,6 +201,12 @@ class Controller:
         # that Reset labels it.
         self._faulted = False
         self._ask = None  # the last `policy.base.Ask` the stack made, whose kind its `state` event logs
+        # Why the arm is paused, for the autopilot (`autopilot.Facts.paused_by`): set as it enters Paused.
+        self.paused_by: str | None = None
+        # The attempt a person is saying how it went for, and until when (`answering`), or None.
+        self._answering: tuple[int, float] | None = None
+        self.autopilot: autopilot.Autopilot | None = None  # `so101 run`'s, stepped every tick after the status
+        self.people: list[str] = []  # the commands a person gave this tick that were accepted
         self._checks = checks
         # The follower's step cap, which caps the leader's goals too.
         self.leader = Leader(leader, clock, self._say, inner.config.max_relative_target, log=self.recorder.event)
@@ -206,9 +225,9 @@ class Controller:
     def submit(self, command: str, source: str, *, client: str | None = None,
                who: str | None = None, **options) -> Future:
         """Queue a command for the next tick. The future resolves to its Result once applied.
-        `source` (terminal, page or signal) is recorded with it. A page's command needs `client`, the
-        id the page made for itself, and `who`, how the status and events name its caller (a
-        Tailscale login, "this Mac" or an IP address). The commands, their options, page control and
+        `source` (terminal, page, signal or autopilot, `so101 run`'s) is recorded with it. A page's
+        command needs `client`, the id the page made for itself, and `who`, how the status and events
+        name its caller (a Tailscale login, "this Mac" or an IP address). The commands, their options, page control and
         `toggle` are in `commands`; when a Reset's outcome is refused is `states._reset`'s.
         """
         future: Future = Future()
@@ -231,13 +250,15 @@ class Controller:
         built, controller = self._status
         return status.seen_by(built, controller, client)
 
-    def run(self, sleep: Callable[[float], None] = time.sleep) -> None:
+    def run(self, sleep: Callable[[float], None] | None = None) -> None:
         """Tick at `fps` until a quit finishes.
 
-        Ticks are due on fixed deadlines, so a sleep that overshoots (about 7 ms on macOS) is taken
-        out of the next wait instead of slowing every tick: sleeping for the period minus the tick's
-        own time would run the loop at about 24 Hz instead of 30. A loop more than one period behind (a
-        slow tick, or Run checks) starts counting again from now rather than ticking in a burst."""
+        It waits with LeRobot's `precise_sleep` (`sleep` replaces it), which on macOS sleeps to 5 ms
+        before the deadline and spins the rest, where a plain sleep overshoots by about 7 ms. Ticks are
+        due on fixed deadlines too, so what overshoot is left is taken out of the next wait instead of
+        slowing every tick. A loop more than one period behind (a slow tick, or Run checks) starts
+        counting again from now rather than ticking in a burst."""
+        sleep = sleep or precise_sleep
         period = 1 / self.fps
         due = self.clock()
         while not self.done:
@@ -276,12 +297,14 @@ class Controller:
         so a page's reply sees its command's effect. The answers go out whatever happens in the tick,
         so no command's caller is left waiting."""
         answers: list[tuple[Future, Result]] = []
+        self.people = []
         try:
             try:
                 self._tick(answers)
             except Exception as error:
                 self._fault(error)
             self._guard(self._publish)
+            self._step_autopilot()
         finally:
             for future, result in answers:
                 future.set_result(result)
@@ -312,6 +335,32 @@ class Controller:
             else:
                 self._guard(lambda: self._drive_tick(now - previous))
             self._guard(self.pace.tick)
+
+    def _step_autopilot(self) -> None:
+        """Step `so101 run`'s autopilot with this tick's facts. Its own error never faults the arm: it
+        stops, and the operator is told to carry on by hand."""
+        pilot = self.autopilot
+        if pilot is None or self.done:
+            return
+        try:
+            pilot.step(self._pilot_facts())
+        except Exception as error:
+            self.autopilot = None
+            with contextlib.suppress(Exception):
+                self._say(f"The autopilot stopped: {type(error).__name__}: {error}. Run the attempts from the page "
+                          "or the keys.")
+
+    def _pilot_facts(self) -> autopilot.Facts:
+        paused = self.state is State.PAUSED
+        asked = paused and self.paused_by == Event.POLICY_ASKED.value and self._ask is not None
+        return autopilot.Facts(
+            now=self.clock(), state=self.state.value, at_rest=self.at_rest, attempt=self.attempt_number,
+            attempt_open=self.open_attempt is not None, paused_by=self.paused_by if paused else None,
+            ask=self._ask.kind if asked else None, people=tuple(self.people),
+            person_answering=self.person_answering,
+            resume_refusal=step(self.state, Command.RESUME, self.facts(autopilot.SOURCE)).refused,
+            fault=self.fault_error if self.state is State.FAULT else None,
+        )
 
     def _guard(self, step: Callable[[], object]) -> None:
         """Run one step of the tick. An error in it is a fault."""
@@ -398,9 +447,10 @@ class Controller:
             self._ask = output.asks  # its kind goes in the `state` event that applies it
             event = Event.POLICY_ASKED  # applied once this tick's frame is recorded, like a scripted move's end
         if (attempt := self.open_attempt) is not None:
+            driver = output.driver if output is not None else OTHER
             if output is not None and output.skill is not None:
                 attempt.skill = output.skill
-            if state in (State.TELEOP, State.REWINDING):
+            if state in (State.TELEOP, State.REWINDING, State.RETURNING) or driver == PLAYBACK:
                 attempt.moved = True  # the stack's next handback says the arm may have moved
             if leader_pose is None and self.leader.connected:
                 leader_pose = self.leader.pose_for_frame()
@@ -410,8 +460,12 @@ class Controller:
             frame = self.recorder.frames
             self.recorder.add_frame(observation, arm.goal, Phase[state.name], policy_action=policy_action,
                                     intervention=state is State.TELEOP and attempt.policy_drove, leader=leader_pose,
-                                    skill=attempt.skill, driver=output.driver if output is not None else OTHER)
-            if state in DRIVEN:
+                                    skill=attempt.skill, driver=driver)
+            # One history, which a person's Rewind plays back: a layer's playback takes back what it
+            # undoes, and a layer's hold adds nothing, so a Rewind never replays either.
+            if driver == PLAYBACK:
+                self._undo_playback(attempt.history, arm.goal)
+            elif state in DRIVEN and driver != HOLD:
                 attempt.history.add(seconds, dict(self.follower.present), frame)
             attempt.extend_timeline(state, 1 / self.fps)
         if event is None and (limit := LIMITED.get(state)):
@@ -425,6 +479,22 @@ class Controller:
             self.apply(event)
         if self.quitting and self.state is State.RESTING and self.leader.to_rest is None:
             self.apply(Event.LEADER_RESTED)  # a quit at rest waited for the leader: it's there, or gone
+
+    @staticmethod
+    def _undo_playback(history: rewind.History, goal: dict | None) -> None:
+        """A layer played back the model's motion this tick, sending `goal`: drop the history's newest
+        moments down to the one nearest that goal. The playback retraces the measured poses the history
+        holds, so it ends where the playback is. Its first moment always stays."""
+        if goal is None:
+            return
+        moments = history.moments
+
+        def gap(moment: rewind.Moment) -> float:
+            return rollout.farthest(moment.pose, goal)[1]
+
+        while len(moments) > 1 and gap(moments[-2]) <= gap(moments[-1]):
+            history.pop()
+            history.rewound = True  # the arm went back to the newest moment, with no driving since
 
     def _drive(self, observation: dict, seconds: float) -> Driven:
         """Send this tick's goal, `seconds` after the last tick's. Raises LeaderLost when the leader
@@ -575,7 +645,8 @@ class Controller:
         if self.open_attempt is None:
             return "No attempt is open to label."
         if self.open_attempt.step_ins == 0:
-            return "Nothing to label: nobody has stepped in on the policy in this attempt."
+            return ("Nothing to label: nobody has stepped in on the policy, nor has it asked for a person, in "
+                    "this attempt.")
         if self.state is State.AUTONOMOUS:
             return "The policy is driving again. Label a step-in while the arm is paused, rewinding or in Teleop."
         return None
@@ -620,6 +691,40 @@ class Controller:
         self.prompt = None
         return Result("outcome", True)
 
+    @property
+    def person_answering(self) -> bool:
+        """A person is saying how the open attempt went: the terminal's right-arrow question or the
+        page's Reset sheet is open for it, and said so under ANSWER_S ago."""
+        answering, attempt = self._answering, self.open_attempt
+        return (answering is not None and attempt is not None and answering[0] == attempt.number
+                and self.clock() < answering[1])
+
+    def answering(self, still: bool) -> None:
+        """A person started saying how the open attempt went, or is still at it (`still`), or stopped."""
+        self._answering = (self.attempt_number, self.clock() + ANSWER_S) if still else None
+
+    def hold_refusal(self) -> str | None:
+        """Why the page's Hold or Continue for `so101 run`'s autopilot is refused now, or None."""
+        if self.autopilot is None:
+            return "No autopilot runs here: only so101 run has one."
+        if self.autopilot.done:
+            return "The autopilot has stopped: it starts no more attempts."
+        if self.state is not State.RESTING or self.open_attempt is not None:
+            return "Hold and Continue work between attempts, while the arm rests."
+        return None
+
+    def hold_autopilot(self, options: dict) -> Result:
+        """Hold the autopilot's next attempt back, or let it start."""
+        hold = options.get("hold")
+        if type(hold) is not bool:
+            return Result("autopilot_hold", False, f"autopilot_hold's hold must be true or false, not {hold!r}.")
+        if reason := self.hold_refusal():
+            return Result("autopilot_hold", False, reason)
+        self.autopilot.hold(hold)
+        self._say("Autopilot held: no attempt starts until Continue." if hold else
+                  "Autopilot continues: the next attempt starts after the reset time.")
+        return Result("autopilot_hold", True)
+
     def label_step_in(self, options: dict) -> Result:
         """Record why the operator stepped in last: a `label` event."""
         label = options.get("label")
@@ -647,8 +752,10 @@ class Controller:
         before, shortfall = self.state, wording.shortfall(self) if given is Event.STOPPED_SHORT else None
         no_attempt = self.open_attempt is None  # asked before the actions, which may close the one open
         self.state = transition.state
-        if before is State.AUTONOMOUS and given in STEP_INS:
+        if before is State.AUTONOMOUS and given in ASKED_OR_STEPPED_IN:
             self.open_attempt.step_in()
+        if self.state is State.PAUSED and before is not State.PAUSED:
+            self.paused_by = _paused_by(given, before)
         if transition.state is not before:
             self._confirm_until = None  # the arm moves on, or faults: a pending confirmation lapses
         if self.state not in (State.RETURNING, State.RESTING):
@@ -703,8 +810,9 @@ class Controller:
                 self.open_attempt.teleop_next = transition.then_teleop
             case Action.RUN_POLICY:
                 attempt = self.open_attempt
-                self.policy.run(Handback(PERSON if attempt.underway else START, moved=attempt.moved))
-                attempt.underway, attempt.moved = True, False
+                # START until the stack has had the arm in this attempt, even when a person drove it first.
+                self.policy.run(Handback(PERSON if attempt.policy_ran else START, moved=attempt.moved))
+                attempt.underway, attempt.policy_ran, attempt.moved = True, True, False
             case Action.PAUSE_POLICY:
                 self.policy.pause()
             case Action.START_REWIND:
@@ -849,7 +957,10 @@ class Controller:
     # --- Status (built in `status`) ----------------------------------------------------------------
 
     def _build_status(self) -> dict:
-        return status.build(self, allowed(self.state, self.facts()))
+        refusals = allowed(self.state, self.facts())
+        if self.autopilot is not None:
+            refusals["autopilot_hold"] = self.hold_refusal()
+        return status.build(self, refusals)
 
     def _publish(self) -> None:
         self._status = (self._build_status(), self.link.client)

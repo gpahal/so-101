@@ -31,6 +31,7 @@ class Attempt:
     waited_s: float = 0.0  # of the seconds toward attempt_limit_s, those where the policy sent no action
     limit_hit: str | None = None  # the limit it used up last, which a time_limit ending names
     underway: bool = False  # the policy or a human has driven in it
+    policy_ran: bool = False  # the policy stack has had the arm in it: its handbacks say PERSON, not START
     policy_drove: bool = False  # it has recorded a frame where the policy's action reached the arm
     teleop_next: bool = False  # the move to the start pose hands over to the leader, not the policy
     history: History | None = field(default_factory=History)  # what Rewind plays back; None once closed

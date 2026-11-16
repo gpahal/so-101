@@ -45,10 +45,12 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
   `state` event for `policy_asked`) and `skill` (the skill the model is conditioned on, or None for no change: the controller keeps the
   last one for the attempt, so a playback, a hold or a person's Teleop is recorded under the skill it
   interrupted). Outputs flow up the stack, so a layer reads the signals of the one below and adds its own.
-- **`Handback(why, moved)`**: `why` is `START` (an attempt starts), `PERSON` (a person resumed) or `LAYER`
-  (a layer above gave the arm back after a playback or a hold); `moved` is whether the arm may have moved
-  while someone else had it. The controller sets `moved` when the attempt had Teleop or Rewind ticks since
-  the stack last drove.
+- **`Handback(why, moved)`**: `why` is `START` (the stack's first handback in an attempt, even one a person
+  began in Teleop), `PERSON` (a person resumed) or `LAYER` (a layer above gave the arm back after a
+  playback or a hold); `moved` is whether the arm may have moved while someone else had it. The controller
+  sets `moved` when the attempt had Teleop, Rewind or Returning ticks, or a layer's playback, since the
+  stack last drove. A layer's playback takes back the controller's history of the motion it undid, and its
+  hold adds none, so a person's Rewind afterwards never replays either.
 - **`Conditioning(prompt, skills, index)`**: what the model is told. Only `EngineDriver` acts on it: it
   sets the engine's task (`set_task`, which pi0.5 reads), adds the one-hot `observation.environment_state`
   to the frame it builds (which ACT reads), and, while the model drives, clears the queued actions, so no

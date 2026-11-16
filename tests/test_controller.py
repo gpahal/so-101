@@ -25,7 +25,8 @@ from so_101 import rollout
 from so_101.control.commands import Result
 from so_101.control.controller import Controller
 from so_101.control.follower import pose_from_steps
-from so_101.policy.base import OTHER, POLICY, STUCK, WAITING, Ask, Layer, LayerContext
+from so_101.control.rewind import History, Rewind
+from so_101.policy.base import DONE, HOLD, OTHER, PLAYBACK, POLICY, START, STUCK, WAITING, Ask, Layer, LayerContext, Output
 from so_101.policy.engine import EngineDriver
 from so_101.control.recorder import Phase, Recorder
 from so_101.control.terminal import KeyReader
@@ -1406,15 +1407,16 @@ class ArmsTest(RigTest):
 
 
 class Asking(Layer):
-    """A layer over the driver: it asks for a person on its `ask_at`th step, says skill 1 from then on,
-    and notes each episode and handback it hears of."""
+    """A layer over the driver: it asks for a person, with `kind`, on its `ask_at`th step of each
+    attempt, says skill 1 from then on, and notes each episode and handback it hears of."""
 
-    def __init__(self, inner, ask_at: int) -> None:
+    def __init__(self, inner, ask_at: int, kind: str = STUCK) -> None:
         super().__init__(inner, LayerContext(lambda *args, **fields: None, lambda: 0.0, None, None), "asking")
-        self.ask_at, self.steps, self.heard, self.handbacks, self.at_rest = ask_at, 0, [], [], []
+        self.ask_at, self.kind, self.steps, self.heard, self.handbacks, self.at_rest = ask_at, kind, 0, [], [], []
 
     def begin_episode(self, number: int) -> None:
         self.heard.append(("begin", number))
+        self.steps = 0
         self.inner.begin_episode(number)
 
     def end_episode(self) -> None:
@@ -1432,8 +1434,38 @@ class Asking(Layer):
         if self.steps >= self.ask_at:
             out = dataclasses.replace(out, skill=1)
         if self.steps == self.ask_at:
-            out = dataclasses.replace(out, asks=Ask(STUCK, "stuck: a person should look"))
+            out = dataclasses.replace(out, asks=Ask(self.kind, f"{self.kind}: a person should look"))
         return out
+
+
+class PlayingBack(Layer):
+    """A layer over the driver that passes it `drive` steps, then plays back `back_s` of the model's
+    measured motion, newest first, as the supervisor does (`control.rewind`, on its own history), and
+    then holds the arm."""
+
+    def __init__(self, inner, drive: int, back_s: float, clock) -> None:
+        super().__init__(inner, LayerContext(lambda *args, **fields: None, clock, None, None), "playing")
+        self.drive, self.back_s, self.steps = drive, back_s, 0
+        self.history, self.playing, self.played_to = History(), None, None  # played_to: where the playback left the arm
+        self.handbacks = []
+
+    def run(self, handback) -> None:
+        self.handbacks.append(handback)
+        self.inner.run(handback)
+
+    def step(self, robot, tick):
+        self.steps += 1
+        if self.steps <= self.drive:
+            out = self.inner.step(robot, tick)
+            self.history.add(1 / FPS, dict(tick.pose), tick.frame)
+            return out
+        if self.played_to is None:
+            self.playing = self.playing or Rewind(self.history, self.back_s, self.ctx.clock)
+            if self.playing.step(robot, tick.pose, 1 / FPS) is not None:
+                self.played_to = dict(tick.pose)
+            return Output(None, PLAYBACK)
+        self.inner.hold(robot)
+        return Output(None, HOLD)
 
 
 class PolicyStackTest(unittest.TestCase):
@@ -1476,6 +1508,33 @@ class PolicyStackTest(unittest.TestCase):
         self.assertEqual([(h.why, h.moved) for h in rig.driver.handbacks],
                          [("start", False), ("person", False), ("person", True)])
 
+    def test_an_attempt_begun_in_teleop_hands_the_policy_its_start(self) -> None:
+        rig = Rig(wrap=lambda driver, recorder, clock: Asking(driver, ask_at=10**6))
+        self.addCleanup(rig.close)
+        rig.teleop(0.5)
+        rig.command("resume")
+        self.assertEqual([(h.why, h.moved) for h in rig.driver.handbacks], [(START, True)])
+
+    def test_an_ask_is_a_step_in_and_only_a_stuck_one_blames_the_frames_before_it(self) -> None:
+        from so_101.control import analysis
+
+        for kind, blamed in ((STUCK, True), (DONE, False)):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as folder:
+                rig = Rig(Path(folder) / "run", wrap=lambda driver, recorder, clock: Asking(driver, ask_at=2 * FPS, kind=kind))
+                rig.start_policy(ticks=3 * FPS)
+                self.assertEqual(rig.status()["state"], "paused")
+                self.assertEqual(rig.status()["label"]["refusal"], None)
+                self.assertTrue(rig.command("label", label="stuck").accepted, "label works after an ask")
+                rig.reset("failed")
+                self.assertEqual(rig.status()["summary"]["step_ins_per_attempt"], 1.0)
+                rig.close()
+                run = analysis.analyse(Run.at(rig.run_dir), 1.0)
+                [attempt] = run.attempts
+                [interruption] = attempt.interruptions
+                self.assertEqual((interruption.command, interruption.reason), ("policy_asked", "stuck"))
+                self.assertEqual(interruption.suspect is not None, blamed)
+                self.assertEqual(analysis.Metrics.of([run]).interruptions_per_attempt, 1.0, "so101 runs counts it too")
+
     def test_each_frame_records_the_skill_and_who_drove(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             rig = Rig(Path(folder) / "run", wrap=lambda driver, recorder, clock: Asking(driver, ask_at=5))
@@ -1495,6 +1554,127 @@ class PolicyStackTest(unittest.TestCase):
             self.assertEqual(skills[first_paused - 1], 1, "the step that asked said skill 1")
             self.assertTrue((skills[first_paused:][phases[first_paused:] == Phase.PAUSED] == 1).all())
             self.assertEqual(skills[0], -1, "no skill before the stack said one")
+
+
+class LoopTest(unittest.TestCase):
+    """The loop's pacing, the recording's encoder and the status as JSON."""
+
+    def test_the_loop_paces_with_lerobots_precise_sleep(self) -> None:
+        rig = Rig()
+        self.addCleanup(rig.close)
+        waits = []
+
+        def sleep(seconds: float) -> None:
+            waits.append(seconds)
+            rig.clock.advance(seconds)
+            rig.controller.done = len(waits) >= 3
+
+        with mock.patch("so_101.control.controller.precise_sleep", sleep):
+            rig.controller.run()
+        self.assertEqual(len(waits), 3)
+        for wait in waits:
+            self.assertAlmostEqual(wait, 1 / FPS, places=6)
+
+    def test_no_time_limit_is_null_in_the_status_and_any_status_is_strict_json(self) -> None:
+        rig = Rig(control=control(preview_fps=0, attempt_limit_s=float("inf")))
+        self.addCleanup(rig.close)
+        rig.start_policy()
+        status = rig.status()
+        self.assertIsNone(status["limit_s"])
+        json.dumps(status, allow_nan=False)
+
+    def test_an_event_with_nan_or_infinity_is_logged_as_strict_json(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            rig = Rig(Path(folder) / "run")
+            rig.controller.recorder.event("note", gap=float("nan"), limit=float("inf"), nested={"x": float("-inf")})
+            [event] = [e for e in rig.controller.events(0, 500) if e["type"] == "note"]
+            self.assertEqual((event["gap"], event["limit"], event["nested"]), (None, None, {"x": None}))
+            json.dumps(rig.controller.events(0, 500), allow_nan=False)
+            rig.close()
+            [logged] = rig.events("note")
+            self.assertIsNone(logged["gap"])
+
+    def test_the_recording_sets_the_encoders_queue_on_create_and_resume(self) -> None:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+        from so_101.control import recorder
+
+        calls = []
+        create, resume = LeRobotDataset.create, LeRobotDataset.resume
+
+        def spy(real, name):
+            def call(*args, **kwargs):
+                calls.append((name, kwargs.get("encoder_queue_maxsize")))
+                return real(*args, **kwargs)
+            return call
+
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(LeRobotDataset, "create", spy(create, "create")), \
+                mock.patch.object(LeRobotDataset, "resume", spy(resume, "resume")):
+            rig = Rig(Path(folder) / "run")
+            rig.policy(0.5)
+            rig.reset("failed")
+            rig.close()
+        self.assertEqual(calls, [("create", recorder.ENCODER_QUEUE_FRAMES), ("resume", recorder.ENCODER_QUEUE_FRAMES)])
+        self.assertGreater(recorder.ENCODER_QUEUE_FRAMES, 30, "more than LeRobot's default of 30")
+
+    def test_an_autopilot_never_exits_leaving_the_motors(self) -> None:
+        from so_101.control import states
+
+        rig = Rig()
+        self.addCleanup(rig.close)
+        rig.in_fault()
+        rig.motors.failing = True
+        rig.tick()
+        facts = rig.controller.facts("autopilot")
+        self.assertTrue(facts.follower_silent)
+        self.assertFalse(states.step(rig.controller.state, states.Command.QUIT, facts).accepted)
+        self.assertEqual(states.step(rig.controller.state, states.Command.QUIT, rig.controller.facts("signal")).actions,
+                         (states.Action.EXIT_LEAVING_MOTORS,))
+
+
+class HistoryTest(unittest.TestCase):
+    """A layer's playback and hold never enter the history a person's Rewind plays back."""
+
+    def test_a_persons_rewind_after_a_layers_playback_never_replays_it(self) -> None:
+        rig = Rig(wrap=lambda driver, recorder, clock: PlayingBack(driver, drive=2 * FPS, back_s=1.0, clock=clock))
+        self.addCleanup(rig.close)
+        rig.start_policy(ticks=1)
+        for _ in range(10 * FPS):
+            if rig.driver.played_to is not None:
+                break
+            rig.tick()
+        self.assertIsNotNone(rig.driver.played_to)
+        rig.tick(FPS)  # the layer holds
+        pan = "shoulder_pan.pos"
+        played_to = rig.driver.played_to[pan]
+        rig.command("pause")
+        sent = len(rig.goals())
+        self.assertTrue(rig.command("rewind").accepted)
+        rig.tick_until("paused")
+        rewound = [rig.units(goal)[pan] for goal in rig.goals()[sent:]]
+        self.assertLess(max(rewound), played_to + 0.5, "it goes back from where the playback left the arm")
+        self.assertLess(min(rewound), played_to - 1.0, "and further back from there")
+        rig.command("resume")
+        self.assertEqual([(h.why, h.moved) for h in rig.driver.handbacks][-1], ("person", True))
+
+    def test_a_handback_after_a_playback_or_a_paused_return_says_the_arm_moved(self) -> None:
+        rig = Rig(wrap=lambda driver, recorder, clock: PlayingBack(driver, drive=FPS, back_s=0.5, clock=clock))
+        self.addCleanup(rig.close)
+        rig.start_policy(ticks=1)
+        rig.tick_until("autonomous")
+        for _ in range(5 * FPS):
+            if rig.driver.played_to is not None:
+                break
+            rig.tick()
+        rig.command("pause")
+        rig.command("resume")
+        rig.command("reset")
+        rig.tick(5)
+        rig.command("pause")  # on the way to rest: the attempt stays open
+        rig.command("resume")
+        self.assertEqual([(h.why, h.moved) for h in rig.driver.handbacks],
+                         [("start", False), ("person", True), ("person", True)])
 
 
 def table_of(run_dir: Path) -> pd.DataFrame:
