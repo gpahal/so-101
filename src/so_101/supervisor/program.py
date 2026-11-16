@@ -65,7 +65,7 @@ def _section(data: dict, *keys: str) -> dict:
 
 def load(path: Path | None = None) -> Program:
     """Read and check the program at `path`, or the default one."""
-    from so_101.failbench.models import MODELS
+    from so_101.vision.models import MODELS
 
     path = Path(path) if path else DEFAULT
     try:

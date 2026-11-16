@@ -1,4 +1,4 @@
-"""The models the benchmark compares, how each is called and what it costs.
+"""The vision models `so101-failbench` compares and the supervisor asks, how each is called and what it costs.
 
 Prices are USD per million tokens, from each provider's pricing page (OpenRouter's catalog for the
 OpenRouter models) in November 2026; check them before trusting the cost columns. `estimate` is a rough
@@ -43,7 +43,7 @@ class Model:
         return bool(os.environ.get(self.env))
 
     def adapter(self):
-        from so_101.failbench import providers
+        from so_101.vision import providers
         return providers.adapter_for(self)
 
     def cost(self, tokens_in: int | None, tokens_out: int | None) -> float:

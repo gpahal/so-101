@@ -16,7 +16,7 @@ import numpy as np
 AUTONOMOUS = 1  # control.phase, as `control.recorder.Phase`
 COLUMNS = ("id", "src", "ep", "t", "moment", "label", "category", "gripper", "note")
 HEADER = """# Candidate samples from so101 serve runs, picked by the grasp detector (so101-failbench candidates).
-# Fill in label (ok or wrong) and category (a key of failbench/prompt.py's CATEGORIES, none for ok) from the
+# Fill in label (ok or wrong) and category (a key of vision/prompt.py's CATEGORIES, none for ok) from the
 # frames, delete the rows you can't decide, and say in note how each label was reached.
 """
 

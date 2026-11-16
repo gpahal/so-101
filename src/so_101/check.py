@@ -734,7 +734,7 @@ def check_supervisor(report: Report, s: Settings, problem) -> None:
     judge without its API key is a warning: the supervisor runs without it. Reads files and the environment only."""
     if s.supervisor.mode == "off":
         return
-    from so_101.failbench.cli import load_env
+    from so_101.vision.env import load_env
     from so_101.supervisor import program
 
     try:
@@ -743,7 +743,7 @@ def check_supervisor(report: Report, s: Settings, problem) -> None:
         problem("supervisor", str(error), f"fix the program, or set mode = \"off\" under [supervisor] in {s.path}")
         return
     load_env(s.path.parent / ".scratch" / "bench.env")
-    from so_101.failbench.models import MODELS
+    from so_101.vision.models import MODELS
 
     j = loaded.judges
     missing = [f"{key} needs {MODELS[key].env}" for key in dict.fromkeys((j.decision, j.chat, j.escalation))

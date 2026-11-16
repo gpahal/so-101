@@ -12,7 +12,7 @@ import math
 import random
 from dataclasses import dataclass
 
-from so_101.failbench import prompt
+from so_101.vision import prompt
 
 
 @dataclass

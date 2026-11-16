@@ -19,7 +19,7 @@ import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from so_101.failbench import prompt
+from so_101.vision import prompt
 
 LABELS = Path(__file__).with_name("labels.csv")
 CAMERAS = ("top", "wrist")

@@ -133,7 +133,7 @@ def policy_parts(s):
         sys.exit(f"so101-control can't load the program its perception and supervisor read: {error}")
     if s.supervisor.mode == "off":
         return grasp, loaded, None
-    from so_101.failbench.cli import load_env
+    from so_101.vision.env import load_env
     from so_101.supervisor import judges
 
     load_env(s.path.parent / ".scratch" / "bench.env")

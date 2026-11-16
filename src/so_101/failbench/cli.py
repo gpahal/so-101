@@ -7,31 +7,15 @@ import sys
 import time
 from pathlib import Path
 
-from so_101.failbench import dataset, metrics, models, runner
+from so_101.failbench import dataset, metrics, runner
+from so_101.vision import models
+from so_101.vision.env import load_env
 
 DATASET = Path("outputs/failbench/dataset")
 RUNS = Path("outputs/failbench/runs")
 SERVE_RUNS = Path("data/block-container/runs")
 CANDIDATES = Path("outputs/failbench/candidates.csv")
 ENV_FILE = Path(".scratch/bench.env")
-
-
-def load_env(path: Path) -> list[str]:
-    """Read KEY=value lines into the environment, without overriding variables already set.
-    Returns the names it set (never the values)."""
-    if not path.exists():
-        return []
-    names = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        name, value = name.strip(), value.strip().strip('"').strip("'")
-        if value and not os.environ.get(name):
-            os.environ[name] = value
-            names.append(name)
-    return names
 
 
 def pick_models(names: str | None) -> list[models.Model]:

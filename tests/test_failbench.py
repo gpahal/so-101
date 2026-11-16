@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from so_101.failbench import dataset, metrics, models, prompt, providers, runner
+from so_101.failbench import dataset, metrics, runner
+from so_101.vision import models, prompt, providers
 
 
 def sample(i, label="ok", category="none", moment="end"):
@@ -47,7 +48,7 @@ class ParseTest(unittest.TestCase):
         self.assertEqual((a["wrong"], a["p_wrong"], a["category"]), (False, 1.0, "other"))
 
     def test_no_answer(self):
-        with self.assertRaises(runner.ProviderError):
+        with self.assertRaises(providers.ProviderError):
             providers.parse_answer("I can't tell.")
 
 
@@ -116,7 +117,7 @@ class RunnerTest(unittest.TestCase):
     def test_errors_are_recorded_and_retried_on_request(self):
         class Broken:
             def predict(self, images, moment):
-                raise runner.ProviderError("bad request", retryable=False)
+                raise providers.ProviderError("bad request", retryable=False)
         providers._cache[self.model.key] = Broken()
         cache = self.run_once(1.0)
         self.assertTrue(all(r.get("error") for r in cache.for_model("fake", "top+wrist").values()))
@@ -129,13 +130,13 @@ class RunnerTest(unittest.TestCase):
 
 class EnvTest(unittest.TestCase):
     def test_env_file_does_not_override(self):
-        from so_101.failbench import cli
+        from so_101.vision.env import load_env
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "bench.env"
             p.write_text("# comment\nFAILBENCH_TEST_A=from_file\nFAILBENCH_TEST_B=\nFAILBENCH_TEST_C='x'\n")
             os.environ["FAILBENCH_TEST_A"] = "already"
             try:
-                names = cli.load_env(p)
+                names = load_env(p)
                 self.assertEqual(os.environ["FAILBENCH_TEST_A"], "already")
                 self.assertEqual(os.environ["FAILBENCH_TEST_C"], "x")
                 self.assertEqual(names, ["FAILBENCH_TEST_C"])

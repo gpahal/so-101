@@ -1,4 +1,4 @@
-"""The vision checks: failbench's adapters, asked from the supervisor's worker pool.
+"""The vision checks: the shared judges' adapters (`so_101.vision`), asked from the supervisor's worker pool.
 
 - **Event check** (after a close, after a release, at the end): the decision model and the chat model
   get the same two frames at the same time. The decision model's answer stands when it's sure; the chat
@@ -13,8 +13,6 @@ Every call is counted against the program's `max_cost_usd`; once a run has spent
 with an error instead of calling. Nothing here raises: a failed call is a verdict with `error` set.
 """
 
-import json
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -115,7 +113,7 @@ class Judges:
         """`adapters` maps a model key to an object with failbench's `predict(images, moment)` (and, for the
         escalation model, `escalate(sheet, log)`), for tests; without it, failbench's own adapters are made
         for the models whose key and SDK are there. `pool` runs the calls: a thread pool by default."""
-        from so_101.failbench.models import MODELS
+        from so_101.vision.models import MODELS
 
         self.p = program
         self.models = {key: MODELS[key] for key in (program.judges.decision, program.judges.chat, program.judges.escalation)}
@@ -139,11 +137,11 @@ class Judges:
             except Exception as error:  # the SDK isn't installed, or its client refused the key
                 self.missing[key] = f"{type(error).__name__}: {error}"
         if self.p.judges.escalation in adapters:
-            try:
-                import openai  # noqa: F401
-            except ImportError:
+            from so_101.vision.providers import sdk_missing
+
+            if why := sdk_missing(self.models[self.p.judges.escalation].provider):
                 del adapters[self.p.judges.escalation]
-                self.missing[self.p.judges.escalation] = "the openai SDK isn't installed (uv sync --group failbench)"
+                self.missing[self.p.judges.escalation] = why
         return adapters
 
     def available(self, key: str) -> bool:
@@ -208,35 +206,15 @@ class Judges:
             answer = stand_in.escalate(sheet, log)
             self._charge(float(answer.get("cost_usd") or 0.0))
             return answer
-        from openai import OpenAI
-
-        from so_101.failbench.providers import OPENROUTER_URL
-        from so_101.failbench.runner import b64
+        from so_101.vision.providers import openrouter_json
 
         model = self.models[key]
         started = time.monotonic()
         try:
-            client = OpenAI(base_url=OPENROUTER_URL, api_key=os.environ[model.env], timeout=60, max_retries=1,
-                            default_headers={"X-Title": "so101-supervisor"})
             choices = "\n".join(f"- {name}: {why}" for name, why in CHOICES.items())
-            r = client.chat.completions.create(
-                model=model.model_id,
-                messages=[{"role": "system", "content": ESCALATION_SYSTEM},
-                          {"role": "user", "content": [
-                              {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64(sheet)}"}},
-                              {"type": "text", "text": f"Log:\n{log}\n\nChoices:\n{choices}"}]}],
-                response_format={"type": "json_schema",
-                                 "json_schema": {"name": "escalation", "strict": True, "schema": ESCALATION_SCHEMA}},
-                max_tokens=4000,
-                extra_body={"usage": {"include": True}, "provider": {"require_parameters": True},
-                            **({"reasoning": {"effort": model.effort}} if model.effort else {})},
-            )
-            usage = r.usage
-            cost = getattr(usage, "cost", None) or (getattr(usage, "model_extra", None) or {}).get("cost")
-            cost = float(cost) if cost is not None else model.cost(getattr(usage, "prompt_tokens", None),
-                                                                  getattr(usage, "completion_tokens", None))
+            answer, cost = openrouter_json(model, ESCALATION_SYSTEM, sheet, f"Log:\n{log}\n\nChoices:\n{choices}",
+                                           "escalation", ESCALATION_SCHEMA, title="so101-supervisor")
             self._charge(cost)
-            answer = json.loads(r.choices[0].message.content or "{}")
             if answer.get("choice") not in CHOICES:
                 return {"error": f"no choice in the answer: {str(answer)[:200]}", "cost_usd": round(cost, 4)}
             return {**{k: str(answer.get(k, ""))[:300] for k in ("choice", "reason", "observation")},

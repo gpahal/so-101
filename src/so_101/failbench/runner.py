@@ -10,7 +10,6 @@ model's average cost so far (or its `estimate` from `models.py` before the first
 the call if that would pass the cap, so it can end a little under the cap but not far over it.
 """
 
-import base64
 import json
 import threading
 import time
@@ -19,13 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from so_101.failbench import dataset
-from so_101.failbench.models import Model
-
-
-class ProviderError(Exception):
-    def __init__(self, message: str, retryable: bool = False):
-        super().__init__(message)
-        self.retryable = retryable
+from so_101.vision.models import Model
+from so_101.vision.providers import ProviderError
 
 
 @dataclass
@@ -84,10 +78,6 @@ class Cache:
 
 def images_for(root: Path, s: dataset.Sample, variant: Variant) -> list[tuple[str, bytes]]:
     return [(cam, dataset.image_path(root, s, cam).read_bytes()) for cam in variant.cameras]
-
-
-def b64(data: bytes) -> str:
-    return base64.standard_b64encode(data).decode()
 
 
 def call_with_retries(fn, attempts: int = 5, first_wait: float = 2.0):
