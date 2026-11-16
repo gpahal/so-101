@@ -269,8 +269,9 @@ def run_skills(run: data.Run, attempt: analysis.Attempt, task: Task, grasp) -> t
     thresholds `grasp`.
 
     Frames a script moved (the move to the start pose, a Rewind, the return to rest, a layer's playback)
-    aren't replayed. In a skills run, the frames the model drove take the skill it was told (control.skill,
-    indexed in its own run.json's policy.skills and mapped onto the task's by name); every other frame,
+    aren't replayed. In a skills run, Autonomous frames take the skill the model was told (control.skill,
+    indexed in its own run.json's policy.skills and mapped onto the task's by name; of those, the ones the
+    model didn't drive, waiting or a layer's hold, are in no cut anyway, `control.analysis`); every other frame,
     such as a correction in Teleop, takes the skill the replay finds, so a person who grasps during pick
     is in place from the carry on, whatever the model was told."""
     from so_101 import skills

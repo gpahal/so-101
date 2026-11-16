@@ -163,6 +163,7 @@ class Controller:
         self.recorder = recorder
         self.operator = operator
         self.command = command
+        self._autopilot_failed = False  # `so101 run`'s autopilot raised and was stopped (`_step_autopilot`)
         self.policy = policy
         self.fps = fps
         self.rest_pose = rest_pose
@@ -349,7 +350,7 @@ class Controller:
         try:
             pilot.step(self._pilot_facts())
         except Exception as error:
-            self.autopilot = None
+            self.autopilot, self._autopilot_failed = None, True
             with contextlib.suppress(Exception):
                 self._say(f"The autopilot stopped: {type(error).__name__}: {error}. Run the attempts from the page "
                           "or the keys.")
@@ -710,6 +711,8 @@ class Controller:
     def hold_refusal(self) -> str | None:
         """Why the page's Hold or Continue for `so101 run`'s autopilot is refused now, or None."""
         if self.autopilot is None:
+            if self._autopilot_failed:
+                return "The autopilot stopped after an error: run the attempts from the page or the keys."
             return "No autopilot runs here: only so101 run has one."
         if self.autopilot.done:
             return "The autopilot has stopped: it starts no more attempts."

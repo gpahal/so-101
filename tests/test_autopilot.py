@@ -285,6 +285,19 @@ class AutopilotTest(unittest.TestCase):
         self.assertFalse(resumed.result(timeout=0).accepted)
         self.assertEqual(s.state(), "resting")
 
+    def test_after_the_autopilot_fails_hold_says_it_stopped_not_that_there_is_none(self) -> None:
+        s = Session(self)
+
+        def broken(facts):
+            raise RuntimeError("autopilot bug")
+
+        s.pilot.step = broken
+        s.tick()
+        result = s.page("autopilot_hold", hold=True)
+        self.assertFalse(result.accepted)
+        self.assertIn("autopilot stopped after an error", result.reason)
+        self.assertNotIn("only so101 run has one", result.reason)
+
     def test_serve_has_no_autopilot_to_hold(self) -> None:
         rig = Rig()
         self.addCleanup(rig.close)
