@@ -323,6 +323,7 @@ class Harness:
         self.logged: list[dict] = []
         self.said: list[str] = []
         self.asked: list[str] = []
+        self.ask_kinds: list[str] = []
         self.judges = judges(decision, chat, pool=pool)
         self.driver, self.robot = FakeDriver(), FakeRobot()
         self.now, self.frame, self.pose = 0.0, -1, pose()
@@ -352,7 +353,8 @@ class Harness:
             if self.driver.steps > steps:
                 i += 1
             if out.asks is not None:
-                self.asked.append(out.asks)
+                self.asked.append(out.asks.text)
+                self.ask_kinds.append(out.asks.kind)
                 self.layer.pause()
                 self.paused = True
 
@@ -472,6 +474,7 @@ class LayerTest(unittest.TestCase):
         h = Harness("act", {"stuck": 0.9})
         h.feed(Trace().to(2, pan=20).to(4.5))
         self.assertEqual(h.asked, ["Supervisor: stuck (frozen). Paused for you; asking for advice."])
+        self.assertEqual(h.ask_kinds, ["stuck"])
         [advice] = h.layer.maintain()  # serve keeps calling it while paused
         self.assertIn("Take over with the leader", advice)
         self.assertEqual(h.kinds("escalation")[0]["choice"], "teleop")
@@ -504,6 +507,7 @@ class LayerTest(unittest.TestCase):
         check = next(c for c in h.kinds("check") if c["moment"] == "after_release")
         self.assertTrue(check["success"])
         self.assertEqual(h.asked, ["Supervisor: the block looks in the container. Reset and label the attempt."])
+        self.assertEqual(h.ask_kinds, ["done"])
         h.layer.end_episode()
         self.assertEqual(h.kinds("attempt_end")[0]["released"], True)
 

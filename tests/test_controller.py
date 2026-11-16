@@ -25,7 +25,7 @@ from so_101 import rollout
 from so_101.control.commands import Result
 from so_101.control.controller import Controller
 from so_101.control.follower import pose_from_steps
-from so_101.policy.base import OTHER, POLICY, WAITING, Layer, LayerContext
+from so_101.policy.base import OTHER, POLICY, STUCK, WAITING, Ask, Layer, LayerContext
 from so_101.policy.engine import EngineDriver
 from so_101.control.recorder import Phase, Recorder
 from so_101.control.terminal import KeyReader
@@ -1411,7 +1411,7 @@ class Asking(Layer):
 
     def __init__(self, inner, ask_at: int) -> None:
         super().__init__(inner, LayerContext(lambda *args, **fields: None, lambda: 0.0, None, None), "asking")
-        self.ask_at, self.steps, self.heard, self.handbacks = ask_at, 0, [], []
+        self.ask_at, self.steps, self.heard, self.handbacks, self.at_rest = ask_at, 0, [], [], []
 
     def begin_episode(self, number: int) -> None:
         self.heard.append(("begin", number))
@@ -1427,11 +1427,12 @@ class Asking(Layer):
 
     def step(self, robot, tick):
         self.steps += 1
+        self.at_rest.append((tick.at_rest, tick.pose))
         out = self.inner.step(robot, tick)
         if self.steps >= self.ask_at:
             out = dataclasses.replace(out, skill=1)
         if self.steps == self.ask_at:
-            out = dataclasses.replace(out, asks="stuck: a person should look")
+            out = dataclasses.replace(out, asks=Ask(STUCK, "stuck: a person should look"))
         return out
 
 
@@ -1447,13 +1448,21 @@ class PolicyStackTest(unittest.TestCase):
             self.assertEqual(rig.status()["state"], "paused")
             self.assertEqual(rig.driver.steps, 5, "no step after the one that asked")
             paused = [e for e in rig.events("state") if e["state"] == "paused"]
-            self.assertEqual([e["cause"] for e in paused], ["policy_asked"])
+            self.assertEqual([(e["cause"], e["ask"]) for e in paused], [("policy_asked", STUCK)])
             self.assertTrue(any("a person should look" in m for m in said), "the operator is told why")
             self.assertTrue(rig.command("resume").accepted, "a person resumes it as after any pause")
             self.assertEqual(rig.status()["state"], "autonomous")
             rig.reset("failed")
             rig.close()
             self.assertEqual(rig.driver.heard, [("begin", 1), ("end",)])
+
+    def test_each_tick_says_whether_the_arm_is_at_rest(self) -> None:
+        rig = Rig(wrap=lambda driver, recorder, clock: Asking(driver, ask_at=10**6))
+        rig.start_policy(ticks=5)
+        self.assertTrue(rig.driver.at_rest)
+        for at_rest, pose in rig.driver.at_rest:
+            self.assertEqual(at_rest, rollout.farthest(pose, rig.controller.rest_pose)[1] <= rollout.TOLERANCE)
+        self.assertFalse(rig.driver.at_rest[0][0], "the policy starts from the start pose, away from rest")
 
     def test_each_handback_says_why_and_whether_the_arm_moved(self) -> None:
         rig = Rig(wrap=lambda driver, recorder, clock: Asking(driver, ask_at=10**6))

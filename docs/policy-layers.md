@@ -35,13 +35,14 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
 | `health() -> Health`, `record_failure(detail)` | the model's failure and reconnecting, read; a failure the loop saw, written | forwards |
 
 - **`Tick`**, built by the loop once per tick: `now` (the loop's clock), `frame` (the open episode's frame
-  number, or -1), `observation` (the robot's raw observation: joints and camera frames) and `pose` (the
-  measured joints).
+  number, or -1), `observation` (the robot's raw observation: joints and camera frames), `pose` (the
+  measured joints) and `at_rest` (every joint within `rollout.TOLERANCE` of the rest pose).
 - **`Output`**, returned by `step`: `action` (the model's action when it reached the arm, else None),
   `driver` (`POLICY`, `WAITING` when the model sent nothing, `PLAYBACK` or `HOLD` when a layer drove),
   `signals` (the perception's events this tick), `readings` (the perception's state: policy seconds,
-  rules near firing, closes, regrasps, carried, released, fired) and `asks` (why a layer wants a person,
-  or None) and `skill` (the skill the model is conditioned on, or None for no change: the controller keeps the
+  rules near firing, closes, regrasps, carried, released, fired) and `asks` (an `Ask(kind, text)` when a layer
+  wants a person, else None: `kind` is `stuck`, `done` or `layer`, and the loop logs it as `ask` in the
+  `state` event for `policy_asked`) and `skill` (the skill the model is conditioned on, or None for no change: the controller keeps the
   last one for the attempt, so a playback, a hold or a person's Teleop is recorded under the skill it
   interrupted). Outputs flow up the stack, so a layer reads the signals of the one below and adds its own.
 - **`Handback(why, moved)`**: `why` is `START` (an attempt starts), `PERSON` (a person resumed) or `LAYER`

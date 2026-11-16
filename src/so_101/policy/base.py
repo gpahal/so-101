@@ -24,6 +24,10 @@ OTHER, POLICY, WAITING, PLAYBACK, HOLD = 0, 1, 2, 3, 4
 DRIVERS = {OTHER: "other", POLICY: "policy", WAITING: "waiting", PLAYBACK: "playback", HOLD: "hold"}
 # Why the stack gets the arm: an attempt starts, a person resumed, or a layer above gives it back.
 START, PERSON, LAYER = "start", "person", "layer"
+# Why a layer asks for a person (`Ask.kind`): the attempt is stuck, the task looks done, or the layer
+# itself can't go on (it stopped after an error while it held the arm).
+STUCK, DONE = "stuck", "done"
+ASK_KINDS = (STUCK, DONE, LAYER)
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,16 @@ class Tick:
     frame: int  # the open episode's frame number this tick, or -1 with no attempt open
     observation: dict  # the robot's raw observation: joints ("<joint>.pos") and camera frames
     pose: dict  # the measured joints, keyed like the robot's actions
+    at_rest: bool = False  # every joint within rollout.TOLERANCE of the rest pose, as the controller measured
+
+
+@dataclass(frozen=True)
+class Ask:
+    """A layer asking for a person: the loop pauses, says `text`, and logs `kind` (one of ASK_KINDS)
+    in the `state` event for `policy_asked`."""
+
+    kind: str
+    text: str
 
 
 @dataclass(frozen=True)
@@ -53,7 +67,7 @@ class Output:
     driver: int = WAITING  # who drove: POLICY, WAITING (the model sent nothing), PLAYBACK or HOLD
     signals: tuple = ()  # the perception's `grasp.detector.Signal`s this tick
     readings: Readings | None = None
-    asks: str | None = None  # why a layer wants a person: the loop pauses
+    asks: Ask | None = None  # a layer wants a person: the loop pauses
     # The index of the skill the model is conditioned on (run.json's policy.skills), or None for no
     # change: the loop keeps the last one for the attempt, so a layer's playback and a person's Teleop
     # are recorded under the skill they interrupted.

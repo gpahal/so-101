@@ -78,7 +78,16 @@ ANSWER_SCHEMA = {
 # For decision models: the same context, as plain input text, then two questions.
 def decision_context(moment: str | None) -> str:
     return SYSTEM + "\n\n" + (f"Moment: {MOMENTS[moment]}" if moment else "Moment: unknown.") + \
-        "\nThe first image is the TOP camera, the second the WRIST camera."
+        "\n" + describe(("top", "wrist"))
+
+
+def describe(images) -> str:
+    """The sentence telling a model which images a request carries, in order. `images` is the request's
+    (name, JPEG bytes) pairs, or their names: `top`, `wrist`, and for the watch check the same cameras
+    from earlier, named like `top_2s_ago`. Every adapter and the supervisor's checks say it the same way.
+
+    For now it says what the two-camera event check sends, whatever the request carries."""
+    return "The first image is the TOP camera, the second the WRIST camera."
 
 
 WRONG_QUESTION = "Is something wrong with the task at this instant, for this moment of the attempt?"

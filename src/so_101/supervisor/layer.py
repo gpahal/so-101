@@ -30,9 +30,10 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 
 from so_101.control import rewind as R
-from so_101.policy.base import HOLD, LAYER, PLAYBACK, Handback, Layer, LayerContext, Output, Readings, Tick
-from so_101.supervisor import judges as J
 from so_101.grasp.thresholds import RULES
+from so_101.policy.base import (DONE, HOLD, LAYER, PLAYBACK, STUCK, Ask, Handback, Layer, LayerContext, Output,
+                                Readings, Tick)
+from so_101.supervisor import judges as J
 
 MODES = ("off", "shadow", "act")
 CAMERAS = ("top", "wrist")
@@ -75,7 +76,7 @@ class Supervisor(Layer):
         self.attempt: _Attempt | None = None
         self._inflight: list = []  # (future, kind, attempt number, close seq, extra)
         self._messages: list[str] = []  # for the operator, through `maintain`
-        self._asking: str | None = None  # for the runner to pause on, through Output.asks
+        self._asking: Ask | None = None  # for the runner to pause on, through Output.asks
         self._wants: list[tuple] = []  # what the next step starts, in order: (REWINDING, s), (HOLDING,), (PASS,)
         self.doing = PASS
         self._rewind: R.Rewind | None = None
@@ -153,7 +154,7 @@ class Supervisor(Layer):
         self.safely(self._watch_model, dt, tick, out)
         return replace(out, asks=out.asks or self._take_ask())
 
-    def _take_ask(self) -> str | None:
+    def _take_ask(self) -> Ask | None:
         asking, self._asking = self._asking, None
         return asking
 
@@ -176,7 +177,7 @@ class Supervisor(Layer):
         self._messages.append(f"Supervisor: stopped after an error ({self.broken}). The policy runs without it.")
         if self.doing != PASS:  # it was holding or playing back: a person decides what's next
             self.doing, self._rewind = HOLDING, None
-            self._asking = "Supervisor: stopped while it held the arm. Resume runs the policy without it."
+            self._asking = Ask(LAYER, "Supervisor: stopped while it held the arm. Resume runs the policy without it.")
 
     # --- Logging -----------------------------------------------------------------------------------
 
@@ -190,9 +191,9 @@ class Supervisor(Layer):
             self.attempt.log.append(f"t={self.attempt.t:.1f}s {line}")
 
     def _decide(self, decision: str, want: tuple | None = None, ask: str | None = None, tell: str | None = None,
-                **fields) -> bool:
+                ask_kind: str = STUCK, **fields) -> bool:
         """Log `decision` and, in act mode while the stack has the arm, start `want`, ask for a person
-        with `ask`, and tell the operator `tell`. Returns whether it acted."""
+        with `ask` (an `Ask` of `ask_kind`), and tell the operator `tell`. Returns whether it acted."""
         acting = self.mode == "act" and self._active
         self.log("decision", decision=decision, acted=acting, **fields)
         self._note(f"decision: {decision}")
@@ -201,7 +202,7 @@ class Supervisor(Layer):
                 self._wants.append(want)
             if ask is not None:
                 self._wants.append((HOLDING,))
-                self._asking = f"Supervisor: {ask}"
+                self._asking = Ask(ask_kind, f"Supervisor: {ask}")
                 self.attempt.asked = True
             if tell is not None:
                 self._messages.append(f"Supervisor: {tell}")
@@ -381,7 +382,7 @@ class Supervisor(Layer):
                     self._decide("tell the operator: the release missed the container",
                                  tell="the block may have missed the container.")
                 elif fields["success"] and not a.asked:
-                    self._decide("done: the block is in the container",
+                    self._decide("done: the block is in the container", ask_kind=DONE,
                                  ask="the block looks in the container. Reset and label the attempt.")
 
 

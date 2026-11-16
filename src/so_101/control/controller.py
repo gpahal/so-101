@@ -187,6 +187,7 @@ class Controller:
         # The last fault saved an attempt (`_closed`), until Reset leaves Fault: an outcome given with
         # that Reset labels it.
         self._faulted = False
+        self._ask = None  # the last `policy.base.Ask` the stack made, whose kind its `state` event logs
         self._checks = checks
         # The follower's step cap, which caps the leader's goals too.
         self.leader = Leader(leader, clock, self._say, inner.config.max_relative_target, log=self.recorder.event)
@@ -393,7 +394,8 @@ class Controller:
         if state is State.AUTONOMOUS and (failure := self.policy.health().failure):
             raise Failure(f"The policy failed: {_last_line(failure)}", detail=failure)
         if state is State.AUTONOMOUS and event is None and output is not None and output.asks:
-            self._say(output.asks)
+            self._say(output.asks.text)
+            self._ask = output.asks  # its kind goes in the `state` event that applies it
             event = Event.POLICY_ASKED  # applied once this tick's frame is recorded, like a scripted move's end
         if (attempt := self.open_attempt) is not None:
             if output is not None and output.skill is not None:
@@ -430,7 +432,7 @@ class Controller:
         arm, present = self.follower.arm, self.follower.present
         if self.state is State.AUTONOMOUS:
             tick = Tick(self.clock(), self.recorder.frames if self.open_attempt is not None else -1, observation,
-                        dict(present))
+                        dict(present), self.at_rest)
             try:
                 out = self.policy.step(arm, tick)
             except Exception as error:
@@ -665,8 +667,9 @@ class Controller:
         ended_by = self.open_attempt.ended_by if self.open_attempt is not None else None
         if self.state is not before:
             ending = {"ended_by": ended_by} if self.state is State.RETURNING and ended_by else {}
+            asked = {"ask": self._ask.kind} if given is Event.POLICY_ASKED and self._ask is not None else {}
             self.recorder.event("state", state=self.state.value, previous=before.value, cause=given.value,
-                                **ending, **({"note": shortfall} if shortfall else {}))
+                                **ending, **asked, **({"note": shortfall} if shortfall else {}))
         if shortfall:
             self._say(shortfall)
         if self.state is not before:

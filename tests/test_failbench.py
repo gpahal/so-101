@@ -128,6 +128,13 @@ class RunnerTest(unittest.TestCase):
         self.assertFalse(any(r.get("error") for r in cache.for_model("fake", "top+wrist").values()))
 
 
+class DescribeTest(unittest.TestCase):
+    def test_the_two_camera_check_names_top_then_wrist(self):
+        self.assertEqual(prompt.describe([("top", b""), ("wrist", b"")]),
+                         "The first image is the TOP camera, the second the WRIST camera.")
+        self.assertTrue(prompt.decision_context("end").endswith(prompt.describe(("top", "wrist"))))
+
+
 class EnvTest(unittest.TestCase):
     def test_env_file_does_not_override(self):
         from so_101.vision.env import load_env
