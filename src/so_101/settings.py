@@ -338,6 +338,17 @@ def _file(section: dict, key: str, where: str, path: Path) -> Path | None:
     return None if file is None else file if file.is_absolute() else path.parent / file
 
 
+def _run(section: dict, path: Path) -> Run:
+    if "duration_s" in section:
+        # `so101 run` once took its attempts' length from here; left in, it would change nothing.
+        raise ConfigError(f"[run] duration_s in {path} is no longer read: an attempt lasts [control] attempt_limit_s "
+                          "of policy time, and `so101 run --duration` sets another for one run. Remove the line.")
+    episodes = section.get("episodes", 1)
+    if type(episodes) is not int or episodes < 1:  # not int(episodes), which takes 1.5 and true
+        raise ConfigError(f"[run] episodes in {path} is {episodes!r}: set it to a whole number, 1 or more.")
+    return Run(episodes=episodes, device=section.get("device", "mps"))
+
+
 def _supervisor(section: dict, path: Path) -> Supervisor:
     mode = section.get("mode", "off")
     if mode not in SUPERVISOR_MODES:
@@ -406,10 +417,7 @@ def _parse(path: Path) -> Settings:
         teleop=Teleop(fps=teleop.get("fps", 60),
                       max_relative_target=step_cap(teleop.get("max_relative_target", 0), f"[teleop] max_relative_target in {path}")),
         cameras={name: camera(name, section) for name, section in data.get("cameras", {}).items()},
-        run=Run(
-            episodes=run.get("episodes", 1),
-            device=run.get("device", "mps"),
-        ),
+        run=_run(run, path),
         train={policy: recipe(policy, section) for policy, section in train.items()},
         remote={policy: _remote(policy, section, path) for policy, section in data.get("remote", {}).items()},
         control=_control(data.get("control", {})),

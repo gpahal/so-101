@@ -87,7 +87,7 @@ class ServePreflightTest(ConfigTest):
                                      policy_for=lambda policy, skills=False: "x/y",
                                      download_policy=download_policy)
         ns = argparse.Namespace(task="test", policy="act", remote=False, revision=None, checkpoint=None, action_steps=None,
-                                operator=None)
+                                operator=None, supervisor=None)
         out = io.StringIO()
         with mock.patch.object(serve, "policy_task", return_value=task), \
                 mock.patch("so_101.check.check_system"), \

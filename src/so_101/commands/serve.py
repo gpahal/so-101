@@ -6,18 +6,54 @@ the safety rules and the recording into data/<task>/runs/, is the same.
 """
 
 import argparse
+import dataclasses
 import json
 import os
 import signal
 import sys
 from functools import partial
 
-from so_101 import data, remote, settings
+from so_101 import data, remote, settings, tasks
 from so_101.commands.policy import policy_setup, policy_task
+
+# The LeRobot arguments `run` and `serve` pass on to so101-control, by prefix: how to reach a remote
+# server, the policy's own options, the follower's, and LeRobot's renaming of observation keys. Every
+# other rollout argument is either set here from so101.toml and tasks.toml, or means nothing to the
+# control center, which runs its own loop instead of LeRobot's strategies.
+FORWARDED = ("--inference.", "--policy.", "--robot.")
+RENAME_MAP = "--rename_map"
+
+
+def lerobot_extra(extra: list[str], mode: str, fps: int) -> list[str]:
+    """`extra` when every argument in it is one `run` and `serve` forward (FORWARDED, or RENAME_MAP), with
+    a value either after `=` or as the next argument; otherwise exit naming each one refused."""
+    refused, i = [], 0
+    while i < len(extra):
+        arg = extra[i]
+        name = arg.split("=", 1)[0]
+        # `--name value`: the next argument is this one's value, unless it's an option itself.
+        takes_next = arg.startswith("--") and "=" not in arg and i + 1 < len(extra) and not extra[i + 1].startswith("--")
+        i += 2 if takes_next else 1
+        if name == "--fps":
+            # The control center reads the fps from run.json, and LeRobot's own parts from --fps: one
+            # forwarded --fps would leave the recording, the loop and the policy at different rates.
+            sys.exit(f"{mode} runs at the task's fps, {fps}: set fps under the task in tasks.toml instead of "
+                     "passing --fps.")
+        if name == "--interpolation_multiplier":
+            sys.exit(f"{mode} steps the arm once per frame at the task's fps, {fps}, so "
+                     "--interpolation_multiplier would play each of the policy's actions over that many frames, "
+                     "slower than it was trained, instead of adding steps between them. Leave it out.")
+        if not (name.startswith(FORWARDED) or name == RENAME_MAP):
+            refused.append(name)
+    if refused:
+        sys.exit(f"so101 {mode} doesn't pass {', '.join(refused)} on to LeRobot: it forwards only --inference.*, "
+                 "--policy.*, --robot.* and --rename_map, and sets the rest from so101.toml and tasks.toml. "
+                 f"See `uv run so101 {mode} --help` for its own options.")
+    return extra
 
 
 def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
-    launch(s, ns, extra, "serve")
+    launch(s, ns, extra, "serve", policy_task(ns))
 
 
 def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
@@ -31,21 +67,21 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
     }
     if autopilot["episodes"] < 1:
         sys.exit("--episodes is how many attempts to make: 1 or more.")
-    launch(s, ns, extra, "run", autopilot)
+    launch(s, ns, extra, "run", task, autopilot)
 
 
-def launch(s: settings.Settings, ns: argparse.Namespace, extra: list[str], mode: str, autopilot: dict | None = None) -> None:
-    """Check the setup and start so101-control for `mode` (serve or run), with the autopilot's settings for run."""
+def launch(s: settings.Settings, ns: argparse.Namespace, extra: list[str], mode: str, task: tasks.Task,
+           autopilot: dict | None = None) -> None:
+    """Check the setup and start so101-control for `mode` (serve or run) on `task`, with the autopilot's
+    settings for run."""
     from so_101.control.main import RUN_ENV
     from so_101.recording import policy_commit, run_manifest
 
-    task = policy_task(ns)
-    # The control center reads the fps from run.json, and LeRobot's own parts from --fps: one forwarded
-    # --fps would leave the recording, the loop and the policy at different rates.
-    if any(arg == "--fps" or arg.startswith("--fps=") for arg in extra):
-        sys.exit(f"{mode} runs at the task's fps, {task.fps}: set fps under [{task.name}] in tasks.toml "
-                 "instead of passing --fps.")
-    setup = policy_setup(s, ns, task, serving=True)
+    extra = lerobot_extra(extra, mode, task.fps)
+    if ns.supervisor is not None:
+        # --supervisor stands in for [supervisor] mode: the preflight checks the mode this run uses.
+        s = dataclasses.replace(s, supervisor=dataclasses.replace(s.supervisor, mode=ns.supervisor))
+    setup = policy_setup(s, ns, task)
     server = setup.server
     # so101-control reads so101.toml and tasks.toml itself, and works out and prints the demos' start
     # pose. Only what's particular to this run goes to it, in run.json's contents (RUN_ENV).
@@ -79,7 +115,12 @@ def launch(s: settings.Settings, ns: argparse.Namespace, extra: list[str], mode:
     manifest["mode"] = mode
     if autopilot is not None:
         manifest["autopilot"] = autopilot
-    os.environ[RUN_ENV] = json.dumps({"dir": str(run.path), "manifest": manifest})
+    # `supervisor` only with the flag: so101-control reads [supervisor] mode from so101.toml otherwise,
+    # and records the mode it used in run.json's `supervisor_program`.
+    sent = {"dir": str(run.path), "manifest": manifest}
+    if ns.supervisor is not None:
+        sent["supervisor"] = ns.supervisor
+    os.environ[RUN_ENV] = json.dumps(sent)
     print("Not an emergency stop: keep a hand near the follower's power switch.\n", flush=True)
     # Ctrl+Z reaches this process too: stopped, it would leave the terminal to the shell. so101-control
     # inherits the ignore until it sets its own handler (`main.refuse_suspend`). uv keeps running.

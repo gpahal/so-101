@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -16,7 +17,7 @@ from so_101.tasks import get_task
 SCENE_DIR_ENV = "SO101_SIM_SCENE"  # `so_101.sim.env.SCENE_DIR_ENV`, which imports MuJoCo
 DEMOS_DIR_ENV = "SO101_SIM_DEMOS"  # `so_101.sim.env.DEMOS_DIR_ENV`
 CAMERAS = ("top", "wrist")
-ACTIONS = ("build", "replay", "score", "nudge", "physics", "check", "eval", "aim")
+ACTIONS = ("build", "replay", "score", "nudge", "physics", "check", "eval", "aim")  # each its own parser in cli.py
 
 
 def record_nudges(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
@@ -121,16 +122,18 @@ def aim_camera(s: settings.Settings, ns: argparse.Namespace) -> None:
 
 
 def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
+    """Each action has its own parser (cli.py), so `ns` holds only that action's options, and `extra` is
+    empty but for nudge and eval, which forward it to LeRobot."""
     if ns.action == "nudge":  # on the arm's computer, which needs neither MuJoCo nor the demos
         record_nudges(s, ns, extra)
         return
     if ns.action == "aim":  # needs the camera and the recorded demos, not a build or MuJoCo
-        if extra:
-            sys.exit(f"so101 sim aim doesn't take {' '.join(extra)}.")
         aim_camera(s, ns)
         return
-    if extra and ns.action != "eval":
-        sys.exit(f"so101 sim {ns.action} doesn't take {' '.join(extra)}.")
+    if ns.action == "eval":  # before loading anything, so a mistyped duration costs nothing
+        duration = s.control.attempt_limit_s if ns.duration is None else ns.duration
+        if not (math.isfinite(duration) and duration > 0):
+            sys.exit(f"--duration is {duration:g}: give each simulated attempt a number of seconds above 0.")
     try:
         from so_101.sim import build as sim_build
     except ImportError as error:
@@ -151,7 +154,7 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         # With the demos here, the sim draws the arm and the wrist camera's view from their real frames.
         # Not while building: the colours a build matches are the ones drawn without them.
         os.environ[DEMOS_DIR_ENV] = str(demos.resolve())
-    limit = s.teleop.max_relative_target if ns.limit is None else ns.limit
+    limit = s.teleop.max_relative_target if getattr(ns, "limit", None) is None else ns.limit  # replay and eval
     if ns.action == "build":
         try:
             sim_build.build(
@@ -236,7 +239,7 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
         action_steps = resolve_action_steps(ns.action_steps, json.loads((policy / "config.json").read_text()))
         os.environ[SCENE_DIR_ENV] = str(scene.resolve())
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-        length = int((s.run.duration_s or 60) * task.fps)
+        length = round(duration * task.fps)
         args = [
             f"--policy.path={policy}",
             f"--policy.device={s.run.device}",
@@ -249,7 +252,9 @@ def cmd_sim(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
             "--eval.batch_size=1",
             f"--output_dir={output}",
         ]
-        print(f"Each attempt gets {length / task.fps:g} s ([run] duration_s), and ends early once the block has lain in the jar for 0.5 s.", flush=True)
+        source = "--duration" if ns.duration is not None else "[control] attempt_limit_s"
+        print(f"Each attempt gets {length / task.fps:g} s ({source}), and ends early once the block has lain in the jar "
+              "for 0.5 s.", flush=True)
         code = run_lerobot("lerobot-eval", [*args, *extra])
         print(f"\nResults and videos: {output}")
         sys.exit(code)

@@ -222,8 +222,9 @@ rewind_s = 2.5
 # long again to finish or retry, while a forgotten attempt still ends. Only policy time counts because
 # the backstop limits how long the policy gets: a pause to look closer or step away never ends an
 # attempt. At the limit the arm returns to rest, the attempt is saved, and `serve` asks how it went.
-# The right arrow or Reset is the normal way an attempt ends. `so101 run` keeps [run] duration_s for
-# comparable evaluations.
+# The right arrow or Reset is the normal way an attempt ends. `so101 run` ends its attempts here too;
+# `so101 run --duration` sets another limit for one run, and `so101 sim eval` gives each simulated
+# attempt this long unless its own --duration says otherwise.
 attempt_limit_s = 45
 # Backstop of Teleop seconds in one attempt. 3 minutes is six times a 30 s demo, so it doesn't cut
 # a slow correction or demo short, but a forgotten one stops recording.
@@ -267,7 +268,8 @@ preview_fps = 5
 # attempt. It never ends or labels an attempt, and acts on nothing while you have the arm. Its vision checks bill the keys in
 # .scratch/bench.env (TYPESAFE_API_KEY for Jev, OPENROUTER_API_KEY for Gemini 3.8 Flash and the
 # escalation), up to max_cost_usd per run in the program, and need `uv sync --group failbench`.
-# Without them it runs the rules alone.
+# Without them it runs the rules alone. `--supervisor off|shadow|act` on `so101 serve` and `so101 run`
+# sets the mode for one run instead, and each run's run.json records the mode it ran with.
 mode = "off"
 # The program: when it checks, its judges, its responses and its budget, with where each number came
 # from. Leave it out to use src/so_101/supervisor/program.toml. A path is relative to this file.

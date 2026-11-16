@@ -74,13 +74,13 @@ def policy_task(ns: argparse.Namespace) -> tasks.Task:
     return task
 
 
-def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task, serving: bool = False) -> PolicySetup:
+def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task) -> PolicySetup:
     """Check the setup and build the policy, robot and camera arguments for `run` and `serve`.
 
     With --remote, the server must already serve this model: starting one bills until `so101 server
-    stop`, so it's never done here. With `serving`, for `serve`, the leader is checked too when it's
-    plugged in, and its failures are only warnings, since only Teleop needs it, and the checks also
-    fail on a bad rest pose or `[control]` setting."""
+    stop`, so it's never done here. The leader is checked too when it's plugged in, and its failures
+    are only warnings, since only Teleop needs it, and the checks also fail on a bad rest pose or
+    `[control]` setting."""
     skills = bool(getattr(ns, "skills", False))
     if skills:
         task.require_skills()
@@ -105,20 +105,17 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task,
         model = local or task.policy_for(ns.policy, skills)
         sys.exit(f"{model} expects cameras {sorted(sizes)}, but the task records {sorted(task.cameras)}.")
     arms: tuple[settings.ArmName, ...] = ("follower",)
-    if serving:
-        try:
-            s.leader.resolve_port()
-            arms = ARMS
-        except PortNotFoundError:
-            pass  # the leader is optional: only Teleop needs it
-    found, report = preflight(s, "serving the policy" if serving else "running the policy", arms=arms,
-                              cameras=[s.camera(name) for name in task.cameras],
-                              control="FAIL" if serving else None, teleop_only=("leader",) if serving else (),
-                              video=True)
+    try:
+        s.leader.resolve_port()
+        arms = ARMS
+    except PortNotFoundError:
+        pass  # the leader is optional: only Teleop needs it
+    found, report = preflight(s, "serving the policy", arms=arms, cameras=[s.camera(name) for name in task.cameras],
+                              control="FAIL", teleop_only=("leader",), video=True)
     specs = [cam.lerobot_spec(width=sizes[cam.name][0], height=sizes[cam.name][1]) for cam in found]
     checkpoint = None if server else local or task.download_policy(ns.revision, skills)
     args = [
-        f"--strategy.type={'base' if serving else 'episodic'}",
+        "--strategy.type=base",  # LeRobot's default; so101-control runs its own loop, never a strategy
         # A remote server sets the action steps itself, and its client rejects --policy flags.
         *(
             remote.client_args(ns.policy)

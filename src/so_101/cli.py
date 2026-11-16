@@ -1,8 +1,10 @@
 """`so101`: run LeRobot commands for the SO-101 arms with ports and ids from `so101.toml`.
 
 On the commands that forward (`setup-motors`, `calibrate`, `teleop`, `cameras`, `record`, `train`,
-`run` and `serve`), any arguments after the known ones are passed through to the LeRobot command, so
-`uv run so101 teleop --teleop_time_s=30` works. Every other command refuses them.
+`sim nudge` and `sim eval`), any arguments after the known ones are passed through to the LeRobot
+command, so `uv run so101 teleop --teleop_time_s=30` works. `run` and `serve` forward only
+`--inference.*`, `--policy.*`, `--robot.*` and `--rename_map` (`commands.serve.lerobot_extra`). Every
+other command refuses them.
 
 This file parses the arguments and dispatches. The longer commands, `serve` and `runs`, and what
 `run` and `serve` share, are in `so_101.commands`.
@@ -24,7 +26,6 @@ from so_101.commands.policy import policy_setup, policy_task, resolve_action_ste
 from so_101.commands.runs import cmd_runs
 from so_101.commands.serve import cmd_run
 from so_101.commands.serve import cmd_serve
-from so_101.commands.sim import ACTIONS as SIM_ACTIONS
 from so_101.commands.sim import cmd_sim
 from so_101.console import filter_stderr, run_lerobot
 from so_101.devices import apply_camera_controls, find_camera, video_devices
@@ -299,7 +300,7 @@ def cmd_tasks(s: settings.Settings, __: argparse.Namespace, ___: list[str]) -> N
             print(f"    - {step}")
         print(f"  steps:   uv run so101 record {task.name}, review, build, train, then run {task.name}")
         if task.skills:
-            print(f"  skills:  uv run so101 skills {task.name}, then train --skills and serve --skills")
+            print(f"  skills:  uv run so101 skills {task.name}, then train --skills, and serve --skills or run --skills")
         print(f"  run:     uv run so101 run {task.name}\n")
 
 
@@ -605,7 +606,7 @@ def run_build(s: settings.Settings, task: tasks.Task, sources: tuple[str, ...] =
 
 
 def dataset_kind(ns: argparse.Namespace, task: tasks.Task) -> str:
-    """SKILLS with --skills, which needs the task's skills and no --with; WHOLE otherwise."""
+    """SKILLS with --skills, which needs the task's skills and no --keep-labels; WHOLE otherwise."""
     if not getattr(ns, "skills", False):
         return data.WHOLE
     task.require_skills()
@@ -787,6 +788,13 @@ def cmd_skills(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     inspect(s, get_task(ns.task), sheets=not ns.no_sheets)
 
 
+def add_supervisor_flag(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--supervisor", choices=settings.SUPERVISOR_MODES,
+                   help="run the supervisor in this mode instead of [supervisor] mode in so101.toml: off, shadow "
+                        "(logs what it would do) or act (plays back misses, holds, asks for you); shadow and act "
+                        "bill the vision API keys (default: so101.toml's)")
+
+
 def add_policy_flags(p: argparse.ArgumentParser, verb: str, remote_flag: bool) -> None:
     """Which model a command drives or serves, and how; `verb` goes in --policy's help."""
     p.add_argument("--action-steps", type=int, help="actions to carry out before predicting again (default: the model's trained value; "
@@ -799,12 +807,7 @@ def add_policy_flags(p: argparse.ArgumentParser, verb: str, remote_flag: bool) -
                        help="a model `train --target local` saved on this Mac: the folder it printed (default: the Hub repo)")
 
 
-def main() -> None:
-    command = next((arg for arg in sys.argv[1:] if not arg.startswith("-")), None)
-    # `sim nudge` records too; the other `sim` actions encode nothing.
-    if command in VIDEO_COMMANDS or sys.argv[1:3] == ["sim", "nudge"]:
-        svtshim.ensure()  # first: it restarts this process, which must happen before stderr is filtered
-    filter_stderr()
+def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="so101", description="Run LeRobot commands for the SO-101 arms using so101.toml.", allow_abbrev=False,
     )
@@ -824,18 +827,43 @@ def main() -> None:
     p.set_defaults(fn=cmd_scan)
 
     p = sub.add_parser("sim", help="build a simulated twin of a task from its demos, try policies in it, and aim the top camera back at the demos' view")
-    p.add_argument("action", choices=SIM_ACTIONS)
-    add_task(p)
-    p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="for check and eval: which model (default: act, the only one that runs on this Mac)")
-    p.add_argument("--revision", help="for check and eval: which version of the model: a Hub tag or commit (default: the newest)")
-    p.add_argument("--checkpoint", metavar="DIR", help="for check and eval: a model `train --target local` saved on this Mac (default: the Hub repo)")
-    p.add_argument("--episodes", type=int, help="for replay: the first so many demos (default: all). For nudge: pushes to record (default 3). For eval: attempts (default 10)")
-    p.add_argument("--action-steps", type=int, help="for eval: actions to carry out before predicting again (default: the model's trained value)")
-    p.add_argument("--limit", type=float, help="for replay and eval: the per-step movement limit (default: max_relative_target in so101.toml)")
-    p.add_argument("--recording", metavar="DIR", help="for replay: replay this recording's commands instead of the demos': a serve or run run's `dataset` folder under data/<task>/runs/")
-    p.add_argument("--refit-cameras", action="store_true", help="for build: fit the cameras and the joint offsets again, after moving a camera or recalibrating")
-    p.add_argument("--refit-motors", action="store_true", help="for build: fit the motors to the real follower again")
-    p.set_defaults(fn=cmd_sim, forwards=True)  # eval passes the rest to lerobot-eval, nudge to lerobot-record
+    actions = p.add_subparsers(dest="action", required=True, metavar="ACTION",
+                               parser_class=partial(argparse.ArgumentParser, allow_abbrev=False))
+
+    def sim_action(name: str, help_text: str, forwards: bool = False) -> argparse.ArgumentParser:
+        action = actions.add_parser(name, help=help_text, description=help_text)
+        add_task(action)
+        action.set_defaults(fn=cmd_sim, forwards=forwards)
+        return action
+
+    def sim_model(action: argparse.ArgumentParser) -> None:
+        action.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model (default: act, the only one that runs on this Mac)")
+        action.add_argument("--revision", help="which version of the model: a Hub tag or commit (default: the newest)")
+        action.add_argument("--checkpoint", metavar="DIR", help="a model `train --target local` saved on this Mac (default: the Hub repo)")
+
+    def sim_limit(action: argparse.ArgumentParser) -> None:
+        action.add_argument("--limit", type=float, help="the per-step movement limit (default: max_relative_target in so101.toml)")
+
+    a = sim_action("build", "fit the sim to the task's built demos and write sims/<task>/")
+    a.add_argument("--refit-cameras", action="store_true", help="fit the cameras and the joint offsets again, after moving a camera or recalibrating")
+    a.add_argument("--refit-motors", action="store_true", help="fit the motors to the real follower again")
+    a = sim_action("replay", "replay the demos' real commands in the sim, or a run's with --recording")
+    a.add_argument("--episodes", type=int, help="the first so many demos (default: all)")
+    sim_limit(a)
+    a.add_argument("--recording", metavar="DIR", help="replay this recording's commands instead of the demos': a serve or run run's `dataset` folder under data/<task>/runs/")
+    sim_action("score", "compare the sim with real frames held back from the fits; no model involved")
+    a = sim_action("nudge", "record teleoperated pushes of the block for `sim physics` (moves the arm); passes the rest to lerobot-record", forwards=True)
+    a.add_argument("--episodes", type=int, help="pushes to record (default: 3)")
+    sim_action("physics", "fit how the block slides on the mat to the recorded pushes (uploads them to the Hub)")
+    a = sim_action("check", "compare the model's actions on real and sim frames of the same moments")
+    sim_model(a)
+    a = sim_action("eval", "run the task's ACT policy in the sim; passes the rest to lerobot-eval", forwards=True)
+    sim_model(a)
+    a.add_argument("--episodes", type=int, help="attempts (default: 10)")
+    a.add_argument("--duration", type=float, help="seconds each attempt gets (default: [control] attempt_limit_s in so101.toml)")
+    a.add_argument("--action-steps", type=int, help="actions to carry out before predicting again (default: the model's trained value)")
+    sim_limit(a)
+    sim_action("aim", "guide the top camera and the mat back to the demos' view (reads the top camera only)")
 
     p = sub.add_parser("pose", help="compare the follower's current pose with the demos' start pose, or save it as the rest pose (reads the motors only)")
     add_task(p)
@@ -886,10 +914,11 @@ def main() -> None:
     p.set_defaults(fn=cmd_record, forwards=True)
 
     p = sub.add_parser("review", help="review recorded episodes on a web page to trim or delete them (writes "
-                                      "edits.toml); --runs reviews serve runs instead (writes each run's labels.toml)")
+                                      "edits.toml); --runs reviews serve and run runs instead (writes each run's "
+                                      "labels.toml)")
     add_task(p)
     p.add_argument("--runs", action="store_true",
-                   help="review the interruptions and outcomes of the task's serve runs instead of its demos")
+                   help="review the interruptions and outcomes of the task's serve and run runs instead of its demos")
     p.add_argument("--episode", help="only a session (YYYYmmdd-HHMMSS) or one episode (SESSION/N); "
                                      "with --runs, a run (YYYYmmdd-HHMMSS) or one attempt (RUN/N)")
     p.add_argument("--all", action="store_true", help="include episodes, or with --runs attempts, already reviewed")
@@ -902,8 +931,8 @@ def main() -> None:
     add_task(p)
     p.add_argument("--force", action="store_true", help="rebuild even if nothing changed")
     p.add_argument("--with", dest="with_", metavar="SOURCES",
-                   help="also train on serve runs: corrections, human-attempts, policy-successes, comma-separated "
-                        "(default: the demos only)")
+                   help="also train on serve and run runs: corrections, human-attempts, policy-successes, "
+                        "comma-separated (default: the demos only)")
     p.add_argument("--keep-labels", action="store_true",
                    help="keep intervention and control.phase, and add control.label and control.attempt_success")
     add_skills_flag(p, "build the skills dataset: each demo's skills from tasks.toml, for one model of all of them")
@@ -915,7 +944,8 @@ def main() -> None:
     p.add_argument("--no-sheets", action="store_true", help="print the cuts without drawing the contact sheets")
     p.set_defaults(fn=cmd_skills)
 
-    p = sub.add_parser("runs", help="summarise a task's serve runs and export failure-fix pairs to outputs/ (read-only on data/)")
+    p = sub.add_parser("runs", help="summarise a task's serve and run runs and export failure-fix pairs to outputs/ "
+                                    "(read-only on data/)")
     add_task(p)
     p.set_defaults(fn=cmd_runs)
 
@@ -928,7 +958,8 @@ def main() -> None:
     p.add_argument("--policy", choices=sorted(POLICY_FLAGS), default="act", help="which model to train (default: act)")
     p.add_argument("--target", help="HF Jobs flavor, or `local` for this Mac (default: [train.<policy>] in so101.toml)")
     p.add_argument("--with", dest="with_", metavar="SOURCES",
-                   help="build with these serve-run sources too, as `so101 build --with` (default: the demos only)")
+                   help="build with these sources from serve and run runs too, as `so101 build --with` (default: "
+                        "the demos only)")
     p.add_argument("--base", metavar="REPO[@REVISION]",
                    help="start from this Hub model instead of the default (act: none, from scratch; pi05: "
                         f"{default_base('pi05')}), such as a model you trained, pinned with @tag")
@@ -945,27 +976,52 @@ def main() -> None:
     add_policy_flags(p, "run", remote_flag=True)
     p.add_argument("--operator", help="your name, recorded on every event your actions cause and shown on the page (default: none)")
     add_skills_flag(p, "run the skills model, switching skills at each handover")
-    p.set_defaults(fn=cmd_run, forwards=True)
+    add_supervisor_flag(p)
+    p.set_defaults(fn=cmd_run, forwards=True)  # only --inference.*, --policy.*, --robot.* and --rename_map
 
     p = sub.add_parser("serve", help="supervise a task's policy from a control page over Tailscale, or the terminal: start, pause, rewind, take over with the leader and end attempts")
     add_task(p)
     add_policy_flags(p, "run", remote_flag=True)
     p.add_argument("--operator", help="your name, recorded on every event your actions cause and shown on the page (default: none)")
     add_skills_flag(p, "serve the skills model, switching skills at each handover")
-    p.set_defaults(fn=cmd_serve, forwards=True)
+    add_supervisor_flag(p)
+    p.set_defaults(fn=cmd_serve, forwards=True)  # only --inference.*, --policy.*, --robot.* and --rename_map
 
     p = sub.add_parser("server", help="start, stop or check the cloud GPU job that `run --remote` and `serve --remote` use")
-    p.add_argument("action", choices=["start", "stop", "status"])
-    p.add_argument("task", nargs="?", help="for start, default: `default` in tasks.toml")
-    add_policy_flags(p, "serve", remote_flag=False)
-    p.add_argument("--target", help="HF Jobs flavor (default: [remote.<policy>] in so101.toml)")
-    p.add_argument("--timeout", help="stop the job after this long, like 30m or 2h (default: [remote.<policy>] in so101.toml)")
-    add_skills_flag(p, "for start: serve the skills model, <policy>_so101_<task>_skills")
-    p.set_defaults(fn=cmd_server)
+    actions = p.add_subparsers(dest="action", required=True, metavar="ACTION",
+                               parser_class=partial(argparse.ArgumentParser, allow_abbrev=False))
+    a = actions.add_parser("start", help="start a policy server on a Hugging Face Jobs GPU (bills until `server stop`)",
+                           description="Start a policy server on a Hugging Face Jobs GPU. It bills until `so101 server stop`.")
+    add_task(a)
+    add_policy_flags(a, "serve", remote_flag=False)
+    a.add_argument("--target", help="HF Jobs flavor (default: [remote.<policy>] in so101.toml)")
+    a.add_argument("--timeout", help="stop the job after this long, like 30m or 2h (default: [remote.<policy>] in so101.toml)")
+    add_skills_flag(a, "serve the skills model, <policy>_so101_<task>_skills")
+    a.set_defaults(fn=cmd_server)
+    for name, help_text in (("stop", "cancel every running policy-server job, which stops its billing"),
+                            ("status", "list the running policy-server jobs and what each serves")):
+        actions.add_parser(name, help=help_text, description=help_text).set_defaults(fn=cmd_server)
 
-    ns, extra = parser.parse_known_args()
+    return parser
+
+
+def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    """`argv` parsed, and the arguments after the known ones, which only a command that forwards takes."""
+    parser = make_parser()
+    ns, extra = parser.parse_known_args(argv)
     if extra and not ns.forwards:
-        parser.error(f"unrecognized arguments: {' '.join(extra)} (`so101 {ns.command}` passes nothing on to LeRobot)")
+        command = " ".join(filter(None, (ns.command, getattr(ns, "action", None))))
+        parser.error(f"unrecognized arguments: {' '.join(extra)} (`so101 {command}` passes nothing on to LeRobot)")
+    return ns, extra
+
+
+def main() -> None:
+    command = next((arg for arg in sys.argv[1:] if not arg.startswith("-")), None)
+    # `sim nudge` records too; the other `sim` actions encode nothing.
+    if command in VIDEO_COMMANDS or sys.argv[1:3] == ["sim", "nudge"]:
+        svtshim.ensure()  # first: it restarts this process, which must happen before stderr is filtered
+    filter_stderr()
+    ns, extra = parse_args(sys.argv[1:])
     try:
         s = settings.load()
         # LeRobot takes the last of a repeated flag, so a forwarded cap replaces so101.toml's: check it the same way.

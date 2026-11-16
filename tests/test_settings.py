@@ -28,6 +28,31 @@ class TeleopTest(ConfigTest):
         self.assertEqual(settings.load().teleop.max_relative_target, 0.0, "0 turns the limit off")
 
 
+class RunTest(ConfigTest):
+    def test_a_leftover_duration_names_the_settings_that_replaced_it(self) -> None:
+        # `so101 run` once read its attempts' length from here; it's [control] attempt_limit_s now, and
+        # a value left here would otherwise be ignored without a word.
+        self.config.write_text(ARMS + "\n[run]\nduration_s = 60\n")
+        with self.assertRaises(settings.ConfigError) as error:
+            settings.load()
+        message = str(error.exception)
+        self.assertIn("[run] duration_s", message)
+        self.assertIn("[control] attempt_limit_s", message)
+        self.assertIn("--duration", message)
+        self.assertEqual(len(message.splitlines()), 1)
+
+    def test_episodes_is_a_whole_number_of_one_or_more(self) -> None:
+        self.config.write_text(ARMS + "\n[run]\nepisodes = 5\n")
+        self.assertEqual(settings.load().run.episodes, 5)
+        self.config.write_text(ARMS)
+        self.assertEqual(settings.load().run.episodes, 1)
+        for value in ("0", "-1", "1.5", '"3"', "true"):
+            with self.subTest(value):
+                self.config.write_text(ARMS + f"\n[run]\nepisodes = {value}\n")
+                with self.assertRaisesRegex(settings.ConfigError, r"\[run\] episodes"):
+                    settings.load()
+
+
 class RemoteTest(ConfigTest):
     def test_pi05_pins_its_unused_action_columns_unless_the_file_turns_it_off(self) -> None:
         section = '\n[remote.pi05]\njob_target = "l4x1"\njob_timeout = "1h"\n'

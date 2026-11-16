@@ -15,6 +15,7 @@ recording into `data/<task>/runs/`, so `review --runs`, `runs`, `build --with` a
 ```
 so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--operator NAME]
           [--policy act|pi05] [--remote] [--revision TAG] [--checkpoint DIR] [--action-steps N] [--skills]
+          [--supervisor off|shadow|act]
 ```
 
 - `--episodes`: attempts to make (default `[run] episodes`).
@@ -22,7 +23,10 @@ so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--operator NAME
   `[run] duration_s` is removed: one setting for both commands.
 - `--reset-time`: seconds between attempts to reset the scene (default the task's `reset_time_s`).
 - `--display` is removed: the control page shows both cameras.
-- Everything else as `serve`. `run.json` records `"mode": "run"` and the autopilot's settings.
+- Everything else as `serve`, `--supervisor` included (it sets `[supervisor] mode` for one run). `run.json`
+  records `"mode": "run"`, the supervisor's mode and the autopilot's settings.
+- Like `serve`, it passes on to `so101-control` only LeRobot's `--inference.*`, `--policy.*`, `--robot.*` and
+  `--rename_map`, and stops on any other argument, naming it.
 
 ## The autopilot (`control/autopilot.py`)
 
