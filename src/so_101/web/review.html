@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SO-101 review</title>
+<style>
+  :root {
+    --fg: #e7e9ee; --mut: #8b919c; --bg: #0b0d10; --panel: #14171c; --line: #262a31; --r: 12px;
+    /* The control page's colors per phase, so a run reads the same on both pages. */
+    --s-auto: #22c55e; --s-pause: #f59e0b; --s-rewind: #3b82f6; --s-teleop: #a78bfa; --s-move: #8b919c; --s-fault: #ef4444;
+    --keep: #22c55e; --suspect: #ef4444; --playhead: #e7e9ee;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --fg: #16181d; --mut: #5d636e; --bg: #f6f7f9; --panel: #ffffff; --line: #d9dce2; --playhead: #16181d;
+      --s-auto: #15803d; --s-pause: #b45309; --s-rewind: #1d4ed8; --s-teleop: #7c3aed; --s-move: #6b7280; --s-fault: #b91c1c;
+      --keep: #15803d; --suspect: #dc2626; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, system-ui, sans-serif; color: var(--fg); background: var(--bg); font-size: 14px; }
+  button { font: inherit; color: inherit; cursor: pointer; background: transparent; border: 1px solid var(--line); border-radius: 10px; min-height: 40px; padding: 6px 12px; }
+  button:disabled { cursor: not-allowed; opacity: .5; }
+  input { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .app { max-width: 1400px; margin: 0 auto; padding: 12px 16px; display: grid; gap: 12px; }
+  @media (min-width: 1000px) { .app { grid-template-columns: 280px minmax(0, 1fr); align-items: start; } .top { grid-column: 1 / -1; } }
+  .top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .title { font-weight: 650; font-size: 16px; }
+  .small { font-size: 12px; color: var(--mut); }
+  .banner { border-radius: 10px; padding: 10px 12px; font-size: 13px; border: 1px solid color-mix(in srgb, var(--s-pause) 55%, transparent);
+    background: color-mix(in srgb, var(--s-pause) 12%, transparent); }
+  .list { display: grid; gap: 6px; max-height: 40vh; overflow-y: auto; }
+  @media (min-width: 1000px) { .list { max-height: calc(100vh - 80px); position: sticky; top: 12px; } }
+  .entry { text-align: left; display: grid; gap: 2px; padding: 8px 10px; }
+  .entry.on { border-color: var(--s-rewind); background: color-mix(in srgb, var(--s-rewind) 14%, transparent); }
+  .entry .now { font-size: 12px; color: var(--mut); }
+  .entry.done .now::before { content: "\2713  "; color: var(--keep); }
+  main { display: grid; gap: 10px; min-width: 0; }
+  .cams { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .cam { position: relative; border-radius: 10px; overflow: hidden; aspect-ratio: 4 / 3; background: var(--panel); border: 1px solid var(--line); }
+  .cam img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .cam .lbl { position: absolute; top: 6px; left: 6px; font-size: 10px; padding: 2px 6px; border-radius: 6px; background: rgba(0,0,0,.55); color: #fff; letter-spacing: .05em; text-transform: uppercase; }
+  .cam .none { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: var(--mut); }
+  .transport { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .transport .time { font-family: ui-monospace, monospace; font-size: 13px; }
+  canvas { width: 100%; display: block; touch-action: none; }
+  #timeline { height: 120px; cursor: pointer; }
+  #joints { height: 200px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--mut); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .card { border: 1px solid var(--line); border-radius: var(--r); padding: 12px; background: var(--panel); display: grid; gap: 8px; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+  .buttons button b { font-weight: 650; }
+  kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-left: 6px; color: var(--mut); }
+  .go { border-color: var(--keep); background: color-mix(in srgb, var(--keep) 16%, transparent); }
+  .bad { border-color: var(--s-fault); background: color-mix(in srgb, var(--s-fault) 12%, transparent); }
+  .step { text-align: left; padding: 8px 10px; }
+  .step.on { border-color: var(--s-pause); background: color-mix(in srgb, var(--s-pause) 14%, transparent); }
+  .events { display: grid; gap: 4px; font-size: 12px; max-height: 220px; overflow-y: auto; }
+  .ev { display: grid; grid-template-columns: 64px 1fr; gap: 6px; text-align: left; border: none; min-height: 0; padding: 2px 4px; border-radius: 6px; }
+  .ev:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+  .ev time { color: var(--mut); font-family: ui-monospace, monospace; }
+  .toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); padding: 10px 14px;
+    border-radius: 10px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+  .toast.ok { border-color: var(--keep); } .toast.no { border-color: var(--s-fault); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div><span class="title" id="heading">so101 review</span> <span class="small" id="progress"></span></div>
+    <div class="small">Space plays, arrows step a frame (Shift: a second)</div>
+  </div>
+  <div class="banner top" id="warning" hidden></div>
+  <nav class="list" id="list"></nav>
+  <main id="main" hidden>
+    <div>
+      <div class="title" id="item-title"></div>
+      <div class="small" id="item-now"></div>
+      <div class="small" id="item-notes"></div>
+    </div>
+    <div class="cams" id="cams"></div>
+    <div class="transport">
+      <button id="back" title="Back one frame">&#9664;&#9646;</button>
+      <button id="play" title="Play or pause (Space)">Play</button>
+      <button id="fwd" title="Forward one frame">&#9646;&#9654;</button>
+      <span class="time" id="time"></span>
+    </div>
+    <canvas id="timeline"></canvas>
+    <div class="legend" id="legend"></div>
+    <canvas id="joints"></canvas>
+    <div class="legend" id="joint-legend"></div>
+    <div class="card" id="panel"></div>
+    <div class="card" id="events-card" hidden>
+      <div class="small">Events, by time: click one to go to it</div>
+      <div class="events" id="events"></div>
+    </div>
+  </main>
+  <div class="card" id="done" hidden><div class="title">Nothing left to review here.</div>
+    <div class="small">Every item in the list has a decision. Pick one to change it, or stop the reviewer with Ctrl+C.</div></div>
+</div>
+<div class="toast" id="toast" hidden></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const PHASE_COLORS = { starting: "--s-move", autonomous: "--s-auto", paused: "--s-pause", handover: "--s-move",
+  teleop: "--s-teleop", rewinding: "--s-rewind", returning: "--s-move" };
+const PHASE_NAMES = { starting: "moving to start", autonomous: "policy", paused: "paused", handover: "handover",
+  teleop: "teleop", rewinding: "rewinding", returning: "returning" };
+const PALETTE = ["#38bdf8", "#f472b6", "#facc15", "#34d399", "#fb923c", "#c084fc", "#2dd4bf", "#f87171", "#a3e635", "#60a5fa"];
+const JOINT_COLORS = ["#38bdf8", "#f472b6", "#facc15", "#34d399", "#fb923c", "#c084fc"];
+const CHUNK = 150;  // frames per /frames request, as the server's FRAMES_PER_REQUEST
+
+let kind = null, items = [], item = null, frame = 0, playing = false, token = 0;
+let urls = {};  // camera -> object URL per frame, or undefined until loaded
+let failed = {};  // camera -> why its frames couldn't be loaded
+let keep = null, touched = false;  // a demo's kept range in seconds [start, end], and whether it was changed
+let step = 0, pending = null;  // an attempt's step (an interruption, or its outcome at the end) and its changed suspect range
+let drag = null, deleting = false;
+
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function color(type) { let h = 0; for (const c of type) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; }
+function secs(f) { return (f / item.fps).toFixed(2); }
+function esc(text) { const d = document.createElement("div"); d.textContent = text == null ? "" : String(text); return d.innerHTML; }
+
+let toastTimer = null;
+function toast(text, ok) {
+  const t = $("toast"); t.textContent = text; t.className = "toast " + (ok ? "ok" : "no"); t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, ok ? 2500 : 6000);
+}
+
+async function getJSON(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  const body = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
+async function decide(body) {
+  try {
+    const r = await fetch("/decision", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item: item.id, ...body }) });
+    const reply = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+    if (!r.ok) { toast(reply.error || `HTTP ${r.status}`, false); return null; }
+    toast("Saved: " + reply.saved, true);
+    const n = items.findIndex((x) => x.id === reply.entry.id);
+    if (n >= 0) items[n] = reply.entry;
+    item = reply.item;
+    renderList();
+    return reply;
+  } catch (e) { toast("The reviewer didn't answer: " + e.message, false); return null; }
+}
+
+// --- The list ----------------------------------------------------------------------------------------
+
+function renderList() {
+  const left = items.filter((x) => !x.reviewed).length;
+  $("progress").textContent = `${left} of ${items.length} left`;
+  $("list").innerHTML = "";
+  for (const x of items) {
+    const b = document.createElement("button");
+    b.className = "entry" + (item && x.id === item.id ? " on" : "") + (x.reviewed ? " done" : "");
+    b.innerHTML = `<span>${esc(x.title)}</span><span class="now">${esc(x.now)} &middot; ${x.seconds.toFixed(1)} s</span>`;
+    b.onclick = () => open(x.id);
+    $("list").appendChild(b);
+  }
+}
+
+function next() {
+  // The next item without a decision after this one, else any other without one.
+  const at = items.findIndex((x) => x.id === item.id);
+  const after = items.slice(at + 1).find((x) => !x.reviewed) || items.find((x, n) => n !== at && !x.reviewed);
+  if (after) open(after.id);
+  else { $("main").hidden = true; $("done").hidden = false; stop(); item = null; renderList(); }
+}
+
+// --- Opening an item and loading its frames -----------------------------------------------------------
+
+async function open(id) {
+  stop();
+  let detail;
+  try { detail = await getJSON("/item/" + id); } catch (e) { toast(e.message, false); return; }
+  for (const list of Object.values(urls)) for (const u of list) if (u) URL.revokeObjectURL(u);
+  token += 1; urls = {}; failed = {}; item = detail; frame = 0; deleting = false; pending = null; step = 0;
+  $("done").hidden = true; $("main").hidden = false;
+  if (kind === "demos") resetKeep();
+  $("item-title").textContent = item.title + ` (${item.seconds.toFixed(1)} s)`;
+  $("item-notes").textContent = (item.notes || []).join(" ");
+  $("cams").innerHTML = "";
+  for (const camera of item.cameras) {
+    urls[camera] = new Array(item.frames);
+    const box = document.createElement("div");
+    box.className = "cam";
+    box.innerHTML = `<img id="img-${camera}" alt=""><span class="none" id="none-${camera}">Loading...</span><span class="lbl">${esc(camera)}</span>`;
+    $("cams").appendChild(box);
+    load(camera, token);
+  }
+  if (kind === "runs") select(0);  // the first interruption, or the outcome when there's none
+  renderList(); renderEvents(); renderPanel(); draw();
+}
+
+async function load(camera, mine) {
+  for (let from = 0; from < item.frames; from += CHUNK) {
+    if (mine !== token) return;
+    let body;
+    try {
+      const r = await fetch(`/frames/${item.id}/${encodeURIComponent(camera)}?from=${from}&to=${Math.min(from + CHUNK, item.frames)}`);
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `HTTP ${r.status}`); }
+      body = await r.arrayBuffer();
+    } catch (e) { if (mine === token) { failed[camera] = e.message; show(); } return; }
+    if (mine !== token) return;
+    const view = new DataView(body);
+    let at = 0, n = from;
+    while (at + 4 <= body.byteLength) {
+      const length = view.getUint32(at);
+      urls[camera][n] = URL.createObjectURL(new Blob([body.slice(at + 4, at + 4 + length)], { type: "image/jpeg" }));
+      at += 4 + length; n += 1;
+    }
+    show(); draw();
+  }
+}
+
+// --- Playing and seeking -------------------------------------------------------------------------------
+
+function show() {
+  if (!item) return;
+  for (const camera of item.cameras) {
+    // A frame not loaded yet shows no picture, never the last one, which would pass for this frame.
+    const u = urls[camera][frame], img = $("img-" + camera), none = $("none-" + camera);
+    if (u) { img.src = u; none.hidden = true; }
+    else { img.removeAttribute("src"); none.textContent = failed[camera] || "Loading..."; none.hidden = false; }
+  }
+  $("time").textContent = `${secs(frame)} / ${item.seconds.toFixed(2)} s, frame ${frame} of ${item.frames}`;
+}
+
+function seek(f) { frame = Math.max(0, Math.min(item.frames - 1, Math.round(f))); show(); draw(); }
+
+let started = 0, from = 0;
+function play() {
+  if (!item) return;
+  if (frame >= item.frames - 1) frame = 0;
+  playing = true; started = performance.now(); from = frame; $("play").textContent = "Pause";
+  requestAnimationFrame(tick);
+}
+function stop() { playing = false; $("play").textContent = "Play"; }
+function tick(now) {
+  if (!playing || !item) return;
+  const f = from + Math.floor((now - started) / 1000 * item.fps);
+  if (f >= item.frames - 1) { seek(item.frames - 1); stop(); return; }
+  if (f !== frame) seek(f);
+  requestAnimationFrame(tick);
+}
+
+// --- The timeline --------------------------------------------------------------------------------------
+
+const PAD = 10;
+function setup(canvas) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  }
+  const g = canvas.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  return [g, w, h];
+}
+function xOf(f, w) { return PAD + (f / item.frames) * (w - 2 * PAD); }
+function fOf(x, w) { return ((x - PAD) / (w - 2 * PAD)) * item.frames; }
+
+function handles() {
+  // The two draggable edges, in frames: a demo's kept range, or the shown interruption's suspect range.
+  if (kind === "demos") return keep ? [keep[0] * item.fps, keep[1] * item.fps] : null;
+  const i = item.interruptions[step];
+  if (!i) return null;
+  const range = pending || i.suspect;
+  return range ? [range[0], range[1]] : null;
+}
+
+function lane(g, w, y, h, start, stop, fill, alpha = 1) {
+  g.globalAlpha = alpha; g.fillStyle = fill;
+  g.fillRect(xOf(start, w), y, Math.max(1.5, xOf(stop, w) - xOf(start, w)), h); g.globalAlpha = 1;
+}
+
+function draw() {
+  if (!item) return;
+  drawTimeline(); drawJoints();
+}
+
+function drawTimeline() {
+  const canvas = $("timeline");
+  const bands = item.bands || [];
+  canvas.style.height = (96 + bands.length * 18) + "px";
+  const [g, w, h] = setup(canvas);
+  const legend = [];
+  g.font = "10px ui-monospace, monospace";
+  let y = 4;
+  if (kind === "runs") {
+    for (const p of item.phases) lane(g, w, y, 16, p.start, p.stop, css(PHASE_COLORS[p.phase] || "--s-move"), .85);
+    for (const name of new Set(item.phases.map((p) => p.phase)))
+      legend.push([css(PHASE_COLORS[name] || "--s-move"), PHASE_NAMES[name] || name]);
+    y += 20;
+    item.interruptions.forEach((i, n) => {
+      const range = n === step && pending ? pending : i.suspect;
+      if (range) lane(g, w, y, 12, range[0], range[1], css("--suspect"), n === step ? .75 : .35);
+      g.strokeStyle = css("--fg"); g.lineWidth = n === step ? 2 : 1;
+      g.beginPath(); g.moveTo(xOf(i.frame, w), 2); g.lineTo(xOf(i.frame, w), y + 14); g.stroke();
+    });
+    if (item.interruptions.length) legend.push([css("--suspect"), "suspect frames"], [css("--fg"), "interruption"]);
+    y += 16;
+    const types = new Set();
+    for (const e of item.events) {
+      types.add(e.type);
+      const c = color(e.type);
+      if (e.start_frame != null) lane(g, w, y + 4, 6, Math.min(e.start_frame, e.end_frame), Math.max(e.start_frame, e.end_frame), c, .6);
+      g.fillStyle = c; g.beginPath();
+      const x = xOf(e.frame, w); g.moveTo(x, y); g.lineTo(x - 4, y + 12); g.lineTo(x + 4, y + 12); g.fill();
+    }
+    for (const t of types) legend.push([color(t), t]);
+    y += 16;
+  } else {
+    lane(g, w, y, 18, 0, item.frames, css("--mut"), .25);
+    if (keep) lane(g, w, y, 18, keep[0] * item.fps, keep[1] * item.fps, css("--keep"), .75);
+    y += 22;
+    const s = item.suggestion;
+    if (s.keep) lane(g, w, y, 8, s.keep[0] * item.fps, s.keep[1] * item.fps, css("--keep"), .35);
+    else if (s.delete != null) lane(g, w, y, 8, 0, item.frames, css("--s-fault"), .35);
+    legend.push([css("--keep"), "kept range (thick bar, with its handles) and the suggestion (thin bar)"]);
+    y += 26;
+  }
+  for (const band of bands) {
+    for (const s of band.spans) {
+      lane(g, w, y, 14, s.start, s.stop, color(band.name + ":" + s.value), .7);
+      g.fillStyle = css("--fg");
+      if (xOf(s.stop, w) - xOf(s.start, w) > 40) g.fillText(String(s.value), xOf(s.start, w) + 3, y + 10);
+    }
+    legend.push([css("--mut"), band.name + " (bands)"]);
+    y += 18;
+  }
+  const hs = handles();
+  if (hs) for (const f of hs) {
+    const x = xOf(f, w); g.fillStyle = css("--fg");
+    g.fillRect(x - 2, 2, 4, y - 4);
+  }
+  // Loaded frames, per camera, as a thin line.
+  for (const camera of item.cameras) {
+    const list = urls[camera] || [];
+    g.fillStyle = css("--mut");
+    let count = 0; for (const u of list) if (u) count += 1;
+    if (count < item.frames) g.fillRect(PAD, y, (w - 2 * PAD) * count / item.frames, 2);
+    y += 3;
+  }
+  // Seconds along the bottom.
+  g.fillStyle = css("--mut"); g.strokeStyle = css("--line");
+  const every = item.seconds > 60 ? 10 : item.seconds > 20 ? 5 : item.seconds > 8 ? 2 : 1;
+  for (let s = 0; s <= item.seconds; s += every) {
+    const x = xOf(s * item.fps, w);
+    g.beginPath(); g.moveTo(x, y + 2); g.lineTo(x, y + 6); g.stroke();
+    g.fillText(s + " s", Math.min(x + 2, w - 30), y + 16);
+  }
+  g.strokeStyle = css("--playhead"); g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(xOf(frame, w), 0); g.lineTo(xOf(frame, w), h); g.stroke();
+  $("legend").innerHTML = legend.map(([c, t]) => `<span><i style="background:${c}"></i>${esc(t)}</span>`).join("");
+}
+
+function drawJoints() {
+  const [g, w, h] = setup($("joints"));
+  const { names, values } = item.joints;
+  const gripper = names.findIndex((n) => n.startsWith("gripper"));
+  const plots = [[names.map((_, n) => n).filter((n) => n !== gripper), 4, h * 0.68 - 6], [gripper >= 0 ? [gripper] : [], h * 0.68 + 4, h - 4]];
+  g.font = "10px ui-monospace, monospace";
+  for (const [which, top, bottom] of plots) {
+    if (!which.length) continue;
+    let lo = Infinity, hi = -Infinity;
+    for (const n of which) for (const v of values[n]) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    if (!isFinite(lo)) continue;
+    if (hi - lo < 1) { hi += .5; lo -= .5; }
+    g.strokeStyle = css("--line"); g.strokeRect(PAD, top, w - 2 * PAD, bottom - top);
+    g.fillStyle = css("--mut"); g.fillText(hi.toFixed(0), PAD + 2, top + 10); g.fillText(lo.toFixed(0), PAD + 2, bottom - 2);
+    for (const n of which) {
+      g.strokeStyle = JOINT_COLORS[n % JOINT_COLORS.length]; g.lineWidth = 1.2; g.beginPath();
+      let pen = false;
+      values[n].forEach((v, f) => {
+        if (v == null) { pen = false; return; }
+        const x = xOf(f, w), yy = bottom - (v - lo) / (hi - lo) * (bottom - top);
+        if (pen) g.lineTo(x, yy); else g.moveTo(x, yy);
+        pen = true;
+      });
+      g.stroke();
+    }
+  }
+  g.strokeStyle = css("--playhead"); g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(xOf(frame, w), 0); g.lineTo(xOf(frame, w), h); g.stroke();
+  $("joint-legend").innerHTML = names.map((n, i) => `<span><i style="background:${JOINT_COLORS[i % JOINT_COLORS.length]}"></i>${esc(n)}${i === gripper ? " (own scale, below)" : ""}</span>`).join("");
+}
+
+function pointer(canvas, e) { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, r.width]; }
+$("timeline").addEventListener("pointerdown", (e) => {
+  if (!item) return;
+  const canvas = $("timeline"), [x, w] = pointer(canvas, e), hs = handles();
+  canvas.setPointerCapture(e.pointerId);
+  stop();
+  if (hs) {
+    const near = hs.map((f) => Math.abs(xOf(f, w) - x));
+    const which = near[0] <= near[1] ? 0 : 1;
+    if (near[which] <= 10) { drag = which; return; }
+  }
+  drag = "seek"; seek(fOf(x, w));
+});
+$("timeline").addEventListener("pointermove", (e) => {
+  if (drag === null || !item) return;
+  const [x, w] = pointer($("timeline"), e), f = Math.max(0, Math.min(item.frames, Math.round(fOf(x, w))));
+  if (drag === "seek") { seek(f); return; }
+  setEdge(drag, f);
+});
+$("timeline").addEventListener("pointerup", () => { drag = null; });
+$("joints").addEventListener("pointerdown", (e) => { if (!item) return; stop(); const [x, w] = pointer($("joints"), e); seek(fOf(x, w)); });
+
+function setEdge(which, f) {
+  // Move one edge of the range the handles hold to frame `f` (a range's stop is the frame after its last).
+  if (kind === "demos") {
+    const s = f / item.fps, r = keep.slice();
+    r[which] = +s.toFixed(2);
+    if (r[0] >= r[1]) return;
+    keep = r; touched = true;
+  } else {
+    const i = item.interruptions[step];
+    if (!i) return;
+    const r = (pending || i.suspect || [i.start, i.frame]).slice();
+    r[which] = f;
+    if (r[0] >= r[1]) return;
+    pending = r;
+  }
+  renderPanel(); draw();
+}
+
+// --- Decisions: demos ----------------------------------------------------------------------------------
+
+function resetKeep() {
+  const s = item.suggestion, e = item.edit;
+  keep = (e && e.keep) || s.keep || [0, +item.seconds.toFixed(2)];
+  touched = !!(e && e.keep && !(s.keep && e.keep[0] === s.keep[0] && e.keep[1] === s.keep[1]));
+}
+
+function demoPanel() {
+  const s = item.suggestion;
+  const accept = touched ? `Keep ${keep[0].toFixed(2)}-${keep[1].toFixed(2)} s` : "Accept the suggestion";
+  return `
+    <div><b>Suggestion:</b> ${esc(s.hint)}</div>
+    <div class="small">Now: ${esc(item.now)}. Kept range: ${keep[0].toFixed(2)}-${keep[1].toFixed(2)} s: drag its handles on the
+      timeline, or press [ and ] to move its start and end to the playhead. <a href="#" id="reset-keep">Back to the suggestion</a></div>
+    <div class="buttons">
+      <button class="go" id="accept"><b>${accept}</b><kbd>Enter</kbd></button>
+      <button id="keep-all">Keep it all<kbd>k</kbd></button>
+      <button class="bad" id="delete">Delete...<kbd>d</kbd></button>
+      <button id="skip">Skip for now<kbd>s</kbd></button>
+    </div>
+    <form class="buttons" id="delete-form" ${deleting ? "" : "hidden"}>
+      <input id="reason" placeholder="Why, e.g. dropped the cube" size="32" autocomplete="off">
+      <button class="bad" type="submit">Delete it</button><button type="button" id="cancel-delete">Cancel<kbd>Esc</kbd></button>
+    </form>`;
+}
+
+async function demoDecide(body) { if (await decide(body)) next(); }
+function accept() { demoDecide(touched ? { edit: "trim", keep } : { edit: "accept" }); }
+function askDelete() { deleting = true; renderPanel(); $("reason").focus(); }
+
+// --- Decisions: attempts -------------------------------------------------------------------------------
+
+function select(n) {
+  step = n; pending = null;
+  const i = item.interruptions[n];
+  if (i) seek(Math.max(0, (i.suspect ? i.suspect[0] : i.frame) - item.fps));
+  renderPanel(); draw();
+}
+
+function runPanel() {
+  const count = item.interruptions.length;
+  const steps = item.interruptions.map((i, n) => `
+    <button class="step${n === step ? " on" : ""}" data-step="${n}">
+      <b>${n + 1}. ${esc(i.command)} at ${secs(i.frame)} s</b> (${esc(i.reason || "no reason given")}), then ${esc(i.then)}<br>
+      <span class="small">suspect: ${esc(n === step && pending ? `frames ${pending[0]}-${pending[1]}, ${secs(pending[0])}-${secs(pending[1])} s (not saved yet)` : i.text)}</span>
+    </button>`).join("");
+  const recorded = item.recorded_outcome !== item.outcome ? ` (recorded as ${esc(item.recorded_outcome)})` : "";
+  const outcome = `<button class="step${step === count ? " on" : ""}" data-step="${count}"><b>Outcome:</b> ${esc(item.outcome)}${recorded}${item.labelled ? ", in labels.toml" : ""}</button>`;
+  let actions;
+  if (step < count) {
+    actions = `
+      <div class="small">Drag the suspect range's handles on the timeline, or press [ and ] to move its start and end to the playhead.</div>
+      <div class="buttons">
+        <button class="go" id="keep-suspect"><b>${pending ? "Save these suspect frames" : "Keep what is shown"}</b><kbd>Enter</kbd></button>
+        <button id="clear-suspect">No suspect frames<kbd>c</kbd></button>
+        <button id="auto-suspect">Automatic<kbd>a</kbd></button>
+      </div>`;
+  } else {
+    actions = `
+      <div class="buttons">
+        ${item.outcomes.map((o) => `<button class="${o === "succeeded" ? "go" : o === "failed" ? "bad" : ""}" data-outcome="${o}">${esc(o)}<kbd>${o[0]}</kbd></button>`).join("")}
+        <button class="go" id="confirm"><b>Confirm ${esc(item.outcome)}</b><kbd>Enter</kbd></button>
+        <button id="skip">Next attempt, no decision<kbd>n</kbd></button>
+      </div>`;
+  }
+  return `<div class="small">Ended by ${esc(item.ended_by || "?")}. ${count ? "Each interruption, then the outcome." : "No interruptions: only the outcome."}</div>
+    <div style="display:grid;gap:6px">${steps}${outcome}</div>${actions}`;
+}
+
+async function suspect(body) {
+  const i = item.interruptions[step];
+  if (await decide({ interruption: i.frame, ...body })) select(step + 1);
+}
+function keepSuspect() {
+  if (pending) suspect({ suspect: pending });
+  else select(step + 1);
+}
+async function outcome(o) { if (await decide({ outcome: o })) next(); }
+
+// --- The panel and the events ---------------------------------------------------------------------------
+
+function renderPanel() {
+  if (!item) return;
+  $("item-now").textContent = (kind === "demos" ? "Now: " : "Outcome now: ") + item.now;
+  $("panel").innerHTML = kind === "demos" ? demoPanel() : runPanel();
+  const on = (id, fn) => { const el = $(id); if (el) el.onclick = (e) => { e.preventDefault(); fn(); }; };
+  if (kind === "demos") {
+    on("accept", accept); on("keep-all", () => demoDecide({ edit: "keep" })); on("delete", askDelete); on("skip", next);
+    on("reset-keep", () => { touched = false; keep = item.suggestion.keep || [0, +item.seconds.toFixed(2)]; renderPanel(); draw(); });
+    on("cancel-delete", () => { deleting = false; renderPanel(); });
+    $("delete-form").onsubmit = (e) => { e.preventDefault(); deleting = false; demoDecide({ edit: "delete", reason: $("reason").value }); };
+  } else {
+    for (const b of $("panel").querySelectorAll("[data-step]")) b.onclick = () => select(+b.dataset.step);
+    for (const b of $("panel").querySelectorAll("[data-outcome]")) b.onclick = () => outcome(b.dataset.outcome);
+    on("keep-suspect", keepSuspect); on("clear-suspect", () => suspect({ suspect: [] }));
+    on("auto-suspect", () => suspect({ auto: true })); on("confirm", () => outcome(item.outcome)); on("skip", next);
+  }
+}
+
+function renderEvents() {
+  const events = kind === "runs" ? item.events : [];
+  $("events-card").hidden = !events.length;
+  $("events").innerHTML = "";
+  for (const e of events) {
+    const b = document.createElement("button");
+    b.className = "ev";
+    b.innerHTML = `<time>${secs(e.frame)} s</time><span><b style="color:${color(e.type)}">${esc(e.type)}</b> ${esc(e.text)}</span>`;
+    b.onclick = () => { stop(); seek(e.frame); };
+    $("events").appendChild(b);
+  }
+}
+
+// --- Keys ---------------------------------------------------------------------------------------------
+
+document.addEventListener("keydown", (e) => {
+  if (!item || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target instanceof HTMLInputElement) {
+    if (e.key === "Escape") { deleting = false; renderPanel(); }
+    return;
+  }
+  const k = e.key;
+  const handled = () => e.preventDefault();
+  if (k === " ") { handled(); playing ? stop() : play(); return; }
+  if (k === "ArrowLeft" || k === "ArrowRight") {
+    handled(); stop(); seek(frame + (k === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? item.fps : 1)); return;
+  }
+  if (k === "[" || k === "]") { handled(); setEdge(k === "[" ? 0 : 1, k === "[" ? frame : frame + 1); return; }
+  if (kind === "demos") {
+    if (k === "Enter") { handled(); accept(); }
+    else if (k === "k") demoDecide({ edit: "keep" });
+    else if (k === "d") { handled(); askDelete(); }
+    else if (k === "s") next();
+    else if (k === "Escape" && deleting) { deleting = false; renderPanel(); }
+    return;
+  }
+  const count = item.interruptions.length;
+  if (step < count) {
+    if (k === "Enter") { handled(); keepSuspect(); }
+    else if (k === "c") suspect({ suspect: [] });
+    else if (k === "a") suspect({ auto: true });
+  } else {
+    const o = item.outcomes.find((x) => x[0] === k);
+    if (k === "Enter") { handled(); outcome(item.outcome); }
+    else if (o) outcome(o);
+    else if (k === "n") next();
+  }
+});
+
+$("play").onclick = () => (playing ? stop() : play());
+$("back").onclick = () => { stop(); seek(frame - 1); };
+$("fwd").onclick = () => { stop(); seek(frame + 1); };
+new ResizeObserver(() => draw()).observe($("main"));
+if (window.matchMedia) window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", draw);
+
+(async function start() {
+  let listing;
+  try { listing = await getJSON("/items"); } catch (e) { toast(e.message, false); return; }
+  kind = listing.kind; items = listing.items;
+  $("heading").textContent = `${listing.task}: ${kind === "demos" ? "demos" : "run attempts"}`;
+  document.title = `SO-101 review: ${listing.task}`;
+  if (listing.warning) { $("warning").textContent = listing.warning; $("warning").hidden = false; }
+  renderList();
+  const first = items.find((x) => !x.reviewed) || items[0];
+  if (first) open(first.id); else $("done").hidden = false;
+})();
+</script>
+</body>
+</html>

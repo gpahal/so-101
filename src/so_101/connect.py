@@ -9,7 +9,7 @@ connect snapped it back up to where it was.
 
 `install` makes `configure` write each motor's Goal_Position as its Present_Position just before the
 torque comes back on, so the arm holds where it is. Every command that connects the follower calls
-it first: `serve` (`control/main.py`), `run` (`rollout.main`) and `check --live` in their process,
+it first: `serve` (`control/main.py`), `run` and `check --live` in their process,
 and `teleop`, `record`, `record --dry-run --replay` and `calibrate` through the `so101-teleoperate`,
 `so101-record`, `so101-replay` and `so101-calibrate` entry points below, which run LeRobot's scripts.
 

@@ -20,11 +20,14 @@ the policy here, and the engine it returns pauses, resumes and resets the same w
 """
 
 import contextlib
+import dataclasses
 import json
+import math
 import os
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 
 # No `from __future__ import annotations` here: LeRobot's parser reads the config's type from the
@@ -111,39 +114,29 @@ def check_settings(s) -> None:
         sys.exit(f"so101-control can't start with these settings from {s.path}:\n{problems}")
 
 
-def supervisor_parts(s):
-    """The supervisor's program and judges when `[supervisor] mode` isn't off, else (None, None). Exits on
-    a bad program, before anything is connected. API keys come from the environment or
-    .scratch/bench.env beside so101.toml, as `so101-failbench` reads them; a judge without its key or
-    SDK is left out, and the start event names why."""
-    if s.supervisor.mode == "off":
-        return None, None
-    from so_101.failbench.cli import load_env
-    from so_101.supervisor import judges, program
+def policy_parts(s):
+    """The program (the gripper and rule thresholds every run's perception uses, and the supervisor's
+    settings) and, when `[supervisor] mode` isn't off, its judges, else None. Exits on a bad program,
+    before anything is connected. API keys come from the environment or .scratch/bench.env beside
+    so101.toml, as `so101-failbench` reads them; a judge without its key or SDK is left out, and the
+    start event names why."""
+    from so_101.supervisor import program
 
     try:
         loaded = program.load(s.supervisor.program)
     except program.ProgramError as error:
-        sys.exit(f"so101-control can't start the supervisor: {error}")
+        sys.exit(f"so101-control can't load the program its perception and supervisor read: {error}")
+    if s.supervisor.mode == "off":
+        return loaded, None
+    from so_101.failbench.cli import load_env
+    from so_101.supervisor import judges
+
     load_env(s.path.parent / ".scratch" / "bench.env")
     made = judges.Judges(loaded)
     missing = ", ".join(f"{key} ({why})" for key, why in made.missing.items())
     print(f"Supervisor: {s.supervisor.mode} mode, program v{loaded.version}."
           + (f" Left out: {missing}." if missing else ""), flush=True)
     return loaded, made
-
-
-def skills_program(s, task):
-    """The program whose gripper thresholds find each skill's handover, for a skills run. Exits, before
-    anything is connected, when the task has no skills or the program doesn't load."""
-    from so_101.supervisor import program
-
-    if not task.skills:
-        sys.exit(f"so101-control: this run serves a skills model, but {task.name} has no [{task.name}.skills] in tasks.toml.")
-    try:
-        return program.load(s.supervisor.program)
-    except program.ProgramError as error:
-        sys.exit(f"so101-control can't find the skills' handovers: {error}")
 
 
 def leader_maker(arm):
@@ -266,7 +259,7 @@ def control(cfg) -> None:
     from so_101.control import terminal
     from so_101.control.controller import Controller
     from so_101.control.follower import pose_from_steps
-    from so_101.control.policy import EngineDriver
+    from so_101.policy.engine import EngineDriver
     from so_101.control.recorder import Recorder
     from so_101.control.server import ControlServer, resolve_bind, route_warning
     from so_101.control.watch import DeviceWatch
@@ -275,13 +268,20 @@ def control(cfg) -> None:
     # so101.toml, read once for the whole run.
     s = settings.load()
     check_settings(s)  # before anything is connected or bound
-    program, judges = supervisor_parts(s)
-    control_settings = s.control
+    program, judges = policy_parts(s)
     run = json.loads(os.environ[RUN_ENV])
     folder, manifest = data.Run.at(Path(run["dir"])), run["manifest"]
+    # `so101 run`: an autopilot starts and ends the attempts (docs/run.md), each lasting its --duration
+    # of policy time, which stands in for [control] attempt_limit_s; 0 lasts until a person ends it.
+    autopilot = manifest.get("autopilot")
+    if autopilot and autopilot.get("duration_s") is not None:
+        limit = autopilot["duration_s"] or math.inf
+        s = dataclasses.replace(s, control=dataclasses.replace(s.control, attempt_limit_s=limit))
+    control_settings = s.control
     policy, fps = manifest["policy"], manifest["control"]["fps"]
     task = tasks.load()[folder.task]
-    skill_program = skills_program(s, task) if policy.get("skills") else None
+    if policy.get("skills") and not task.skills:
+        sys.exit(f"so101-control: this run serves a skills model, but {task.name} has no [{task.name}.skills] in tasks.toml.")
     # Worked out once, before the robot connects: it reads every training file, and one that can't be
     # read stops this process with nothing connected.
     start_pose = data.demo_start_pose(s, task)
@@ -373,18 +373,14 @@ def control(cfg) -> None:
         print(f"Recording this run to {folder.path}: one episode per attempt, saved when the arm is back at "
               "rest.", flush=True)
         recorder = Recorder(folder, robot, fps=fps, task=cfg.task)
-        # Layers over the policy, each with the driver's methods: serve steps the outermost as its driver.
-        policy_layer = driver
-        if skill_program is not None:  # a skills model: one skill at a time, switched at each handover
-            from so_101.skills import SkillPolicy
+        # The policy stack over the model (docs/policy-layers.md): the loop steps its top.
+        from so_101.policy import stack
+        from so_101.policy.base import LayerContext
 
-            policy_layer = SkillPolicy(driver, task.skills, skill_program, log=recorder.event)
-        if program is not None:  # the supervisor is a policy over the policy: serve steps it as its driver
-            from so_101.supervisor.layer import SupervisedPolicy
-
-            policy_layer = SupervisedPolicy(policy_layer, program, judges, mode=s.supervisor.mode, log=recorder.event,
-                                            frame=lambda: recorder.frames, cameras=tuple(robot.inner.cameras))
-            cleanup.callback(policy_layer.close)  # before the recorder closes: late verdicts are dropped
+        policy_layer = stack.build(driver, LayerContext(recorder.event, time.monotonic, program),
+                                   skills=task.skills if policy.get("skills") else (), judges=judges,
+                                   mode=s.supervisor.mode, cameras=tuple(robot.inner.cameras))
+        cleanup.callback(policy_layer.close)  # before the recorder closes: late verdicts are dropped
         controller = Controller(
             robot,
             policy_layer,
@@ -421,7 +417,18 @@ def control(cfg) -> None:
                   f"--https=443 localhost:{control_settings.port}`, then restart so101 serve.", flush=True)
         if awake := keep_awake():
             print(awake, flush=True)
-        print(f"Ready. The arm holds where it is until you start an attempt.\n{terminal.HELP}", flush=True)
+        if autopilot:
+            from so_101.control.autopilot import Autopilot
+
+            pilot = Autopilot(submit=controller.submit, status=controller.status, events=controller.events,
+                              say=lambda message: terminal.say(message, ""), clock=time.monotonic,
+                              episodes=autopilot["episodes"], reset_s=autopilot["reset_s"])
+            cleanup.callback(pilot.stop)
+            pilot.start()
+            print(f"Ready. The autopilot makes {autopilot['episodes']} attempt(s), {autopilot['reset_s']:g} s apart; "
+                  f"a command of yours takes over the attempt it's in.\n{terminal.HELP}", flush=True)
+        else:
+            print(f"Ready. The arm holds where it is until you start an attempt.\n{terminal.HELP}", flush=True)
         controller.run()
         if controller.status()["state"] != "resting" or not controller.at_rest:
             print("Exiting away from rest: the motors turn off, so the arm goes limp.", flush=True)

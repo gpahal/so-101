@@ -19,7 +19,8 @@ from so_101 import settings
 from so_101.failbench import candidates
 from so_101.supervisor import judges as J
 from so_101.supervisor import program as P
-from so_101.supervisor.layer import SupervisedPolicy
+from so_101.policy import stack
+from so_101.policy.base import PERSON, PLAYBACK, POLICY, START, WAITING, Handback, Health, LayerContext, Output, Tick
 from so_101.supervisor.detector import ARM, GRIPPER, Detector
 
 FPS = 30
@@ -231,12 +232,13 @@ FRAME = np.zeros((48, 64, 3), np.uint8)
 
 
 class FakeDriver:
-    """The policy driver the layer wraps. Each step it reports an action, or none on a waiting tick."""
+    """The model the stack wraps: each step reports an action, or none on a waiting tick."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.handbacks: list = []
         self.steps = self.holds = 0
-        self.raised = self.retrying = self.failure = None
+        self.failure: str | None = None
         self.drove = True
         self.error: Exception | None = None
 
@@ -246,23 +248,44 @@ class FakeDriver:
     def stop(self) -> None:
         self.calls.append("stop")
 
-    def maintain(self) -> None:
-        return None
+    def close(self) -> None:
+        pass
+
+    def begin_episode(self, number: int) -> None:
+        pass
+
+    def end_episode(self) -> None:
+        pass
+
+    def maintain(self) -> list[str]:
+        return []
 
     def pause(self) -> None:
         self.calls.append("pause")
 
-    def run(self) -> None:
+    def run(self, handback) -> None:
         self.calls.append("run")
+        self.handbacks.append(handback)
 
     def hold(self, robot) -> None:
         self.holds += 1
 
-    def step(self, robot, observation):
+    def condition(self, conditioning) -> None:
+        pass
+
+    def health(self) -> Health:
+        return Health(self.failure)
+
+    def record_failure(self, detail: str) -> None:
+        self.failure = detail
+
+    def step(self, robot, tick) -> Output:
         if self.error is not None:
             raise self.error
         self.steps += 1
-        return {"shoulder_pan.pos": observation["shoulder_pan.pos"]} if self.drove else None
+        if not self.drove:
+            return Output(None, WAITING)
+        return Output({"shoulder_pan.pos": tick.observation["shoulder_pan.pos"]}, POLICY)
 
 
 class FakeRobot:
@@ -285,10 +308,11 @@ class Harness:
         self.judges = judges(decision, chat, pool=pool)
         self.driver, self.robot = FakeDriver(), FakeRobot()
         self.now, self.frame, self.pose = 0.0, -1, pose()
-        self.layer = SupervisedPolicy(self.driver, PROGRAM, self.judges, mode=mode, frame=lambda: self.frame,
-                                      log=lambda type_, **fields: self.logged.append(fields), clock=lambda: self.now)
+        ctx = LayerContext(lambda type_, **fields: self.logged.append({"type": type_, **fields}), lambda: self.now,
+                           PROGRAM)
+        self.layer = stack.build(self.driver, ctx, judges=self.judges, mode=mode, cameras=("top", "wrist"))
         self.layer.begin_episode(1)
-        self.layer.run()
+        self.layer.run(Handback(START))
         self.paused = False
 
     def feed(self, trace: Trace, until=None, limit: int = 3000) -> None:
@@ -299,19 +323,18 @@ class Harness:
             limit -= 1
             self.now += 1 / FPS
             self.frame += 1
-            if (message := self.layer.maintain()) is not None:
-                self.said.append(message)
-            if self.layer.driving == "policy":
+            self.said.extend(self.layer.maintain())
+            if self.layer.doing == "pass":
                 p, self.driver.drove = moves[i]
             else:
                 p = self.robot.goals[-1] if self.robot.goals else self.pose
             steps = self.driver.steps
-            self.layer.step(self.robot, {**p, "top": FRAME, "wrist": FRAME})
+            out = self.layer.step(self.robot, Tick(self.now, self.frame, {**p, "top": FRAME, "wrist": FRAME}, dict(p)))
             self.pose = p
             if self.driver.steps > steps:
                 i += 1
-            if (asked := self.layer.asks()) is not None:
-                self.asked.append(asked)
+            if out.asks is not None:
+                self.asked.append(out.asks)
                 self.layer.pause()
                 self.paused = True
 
@@ -320,14 +343,15 @@ class Harness:
         self.feed(_still(self.pose, ticks))
 
     def rewinding(self) -> bool:
-        return self.layer.driving == "rewind"
+        return self.layer.doing == "rewinding"
 
     def resume(self) -> None:
         self.paused = False
-        self.layer.run()
+        self.layer.run(Handback(PERSON, moved=True))
 
     def kinds(self, kind: str) -> list[dict]:
-        return [e for e in self.logged if e["kind"] == kind]
+        """The supervisor's events of `kind`, or the events of type `kind` (playback, grasp, rule)."""
+        return [e for e in self.logged if (e["type"] == "supervisor" and e.get("kind") == kind) or e["type"] == kind]
 
     def decisions(self) -> list[str]:
         return [d["decision"] for d in self.kinds("decision")]
@@ -360,7 +384,7 @@ class LayerTest(unittest.TestCase):
         h.feed(miss(), until=h.rewinding)
         h.settle()
         self.assertEqual(h.driver.calls, ["run", "pause", "run"])
-        [rewind] = h.kinds("rewind")
+        [rewind] = h.kinds("playback")
         self.assertLess(rewind["start_frame"], rewind["end_frame"])
         self.assertAlmostEqual(rewind["seconds"], 2.5, delta=0.05)
         self.assertEqual(rewind["cause"], "arrived")
@@ -370,8 +394,9 @@ class LayerTest(unittest.TestCase):
     def test_a_playback_s_ticks_are_never_the_policy_s_action(self) -> None:
         h = Harness("act", {"after_close": 0.95})
         h.feed(miss(), until=h.rewinding)
-        self.assertEqual(h.layer.driving, "rewind")
-        self.assertIsNone(h.layer.step(h.robot, {**h.robot.goals[-1], "top": FRAME, "wrist": FRAME}))
+        self.assertEqual(h.layer.doing, "rewinding")
+        out = h.layer.step(h.robot, Tick(h.now, h.frame, {**h.robot.goals[-1], "top": FRAME, "wrist": FRAME}, h.robot.goals[-1]))
+        self.assertEqual((out.action, out.driver), (None, PLAYBACK))
 
     def test_the_second_miss_plays_back_further(self) -> None:
         h = Harness("act", {"after_close": 0.95})
@@ -396,11 +421,11 @@ class LayerTest(unittest.TestCase):
         h = Harness("act", {"after_close": 0.95})
         h.feed(Trace().to(2, pan=20))
         h.layer.pause()  # serve's Pause: a person may move the arm now
-        h.layer.run()
+        h.layer.run(Handback(PERSON, moved=True))
         handed_back = h.frame + 1
         h.feed(Trace().to(0.3, gripper=10).to(1.5), until=h.rewinding)  # 1.2 s since, under the 2.5 s asked for
         h.settle()
-        [rewind] = h.kinds("rewind")
+        [rewind] = h.kinds("playback")
         self.assertEqual(rewind["start_frame"], handed_back)
 
     def test_a_pause_cuts_a_playback_short_and_logs_what_it_undid(self) -> None:
@@ -408,28 +433,28 @@ class LayerTest(unittest.TestCase):
         h.feed(miss(), until=h.rewinding)
         h.feed(_still(h.pose, 10), limit=10)  # ten ticks of the playback
         h.layer.pause()
-        [rewind] = h.kinds("rewind")
+        [rewind] = h.kinds("playback")
         self.assertEqual(rewind["cause"], "paused")
         self.assertLess(rewind["seconds"], 2.5)
-        self.assertEqual(h.layer.driving, "policy")
+        self.assertEqual(h.layer.doing, "pass")
 
     def test_a_stuck_rule_holds_the_arm_and_a_sure_ok_watch_check_hands_it_back(self) -> None:
         pool = Pool(now=False)  # the watch check takes its time
         h = Harness("act", {"stuck": 0.05}, pool=pool)
-        h.feed(Trace().to(2, pan=20).to(4.5), until=lambda: h.layer.driving == "hold")  # frozen
+        h.feed(Trace().to(2, pan=20).to(4.5), until=lambda: h.layer.doing == "holding")  # frozen
         h.feed(_still(h.pose, 5), limit=5)
         self.assertEqual(h.driver.holds, 6, "the arm holds on every tick until the answer")
         pool.run()
         h.feed(_still(h.pose, 3), limit=3)
         self.assertEqual(h.decisions()[:2], ["hold: frozen", "resume: the watch check saw nothing wrong"])
         self.assertEqual(h.driver.calls, ["run", "pause", "run"])
-        self.assertEqual((h.layer.driving, h.kinds("escalation"), h.asked), ("policy", [], []))
+        self.assertEqual((h.layer.doing, h.kinds("escalation"), h.asked), ("pass", [], []))
 
     def test_a_confirmed_stuck_rule_asks_for_a_person_and_the_advice_follows(self) -> None:
         h = Harness("act", {"stuck": 0.9})
         h.feed(Trace().to(2, pan=20).to(4.5))
         self.assertEqual(h.asked, ["Supervisor: stuck (frozen). Paused for you; asking for advice."])
-        advice = h.layer.maintain()  # serve keeps calling it while paused
+        [advice] = h.layer.maintain()  # serve keeps calling it while paused
         self.assertIn("Take over with the leader", advice)
         self.assertEqual(h.kinds("escalation")[0]["choice"], "teleop")
         watch = h.judges._adapters["jev"].asked[-1]
@@ -472,7 +497,7 @@ class LayerTest(unittest.TestCase):
         pool.run()
         h.layer.maintain()
         self.assertFalse(h.kinds("decision")[0]["acted"])
-        h.layer.run()
+        h.layer.run(Handback(PERSON))
         h.feed(_still(h.pose, 5))
         self.assertEqual(h.robot.goals, [], "no playback once it has the arm again")
 
@@ -481,12 +506,12 @@ class LayerTest(unittest.TestCase):
         h.feed(Trace().to(0.5, pan=5))
 
         def broken(*args):
-            raise RuntimeError("detector bug")
+            raise RuntimeError("checks bug")
 
-        h.layer.attempt.detector.step = broken
+        h.layer._due_checks = broken
         steps = h.driver.steps
         h.feed(Trace().to(1, pan=10))
-        self.assertEqual([e["error"] for e in h.kinds("error")], ["RuntimeError: detector bug"])
+        self.assertEqual([e["error"] for e in h.kinds("error")], ["RuntimeError: checks bug"])
         self.assertEqual(h.driver.steps - steps, 31, "every step still went to the policy")
         self.assertTrue(any("stopped after an error" in line for line in h.said))
 
@@ -494,10 +519,10 @@ class LayerTest(unittest.TestCase):
         h = Harness("act", {})
         h.driver.error = ValueError("inference failed")
         with self.assertRaisesRegex(ValueError, "inference failed"):
-            h.layer.step(h.robot, {**pose(), "top": FRAME, "wrist": FRAME})
-        h.driver.raised = None
-        h.layer.raised = "traceback"
-        self.assertEqual(h.driver.raised, "traceback", "the runner's note of it lands on the wrapped driver")
+            h.layer.step(h.robot, Tick(0.0, 0, {**pose(), "top": FRAME, "wrist": FRAME}, pose()))
+        h.layer.record_failure("traceback")
+        self.assertEqual(h.layer.health().failure, "traceback", "the runner's note of it lands on the model, and reads back")
+        self.assertEqual(h.driver.failure, "traceback")
 
 
 class CandidatesTest(unittest.TestCase):
@@ -547,8 +572,9 @@ class InServeTest(unittest.TestCase):
         made = []
 
         def wrap(driver, recorder, clock):
-            made.append(SupervisedPolicy(driver, PROGRAM, judges({"after_close": 0.95, "stuck": 0.95}),
-                                         mode="act", log=recorder.event, frame=lambda: recorder.frames, clock=clock))
+            made.append(stack.build(driver, LayerContext(recorder.event, clock, PROGRAM),
+                                    judges=judges({"after_close": 0.95, "stuck": 0.95}), mode="act",
+                                    cameras=("top", "wrist")))
             return made[0]
 
         with tempfile.TemporaryDirectory() as folder:
@@ -557,8 +583,7 @@ class InServeTest(unittest.TestCase):
             rig.tick_until("paused", limit=40 * FPS)
             rig.reset("failed")
             rig.controller.close()
-            events = rig.events("supervisor")
-            playbacks = [e for e in events if e["kind"] == "rewind"]
+            playbacks = rig.events("playback")
             self.assertEqual(len(playbacks), 2, "two misses played back; the third asks for a person")
             self.assertAlmostEqual(playbacks[0]["seconds"], 2.5, delta=0.05)
             self.assertGreater(playbacks[1]["seconds"], 2.5, "the second goes further back")

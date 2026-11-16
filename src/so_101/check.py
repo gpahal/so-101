@@ -711,8 +711,16 @@ def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] =
             bad_value(key, "isn't a finite number", allowed)
         elif value < low or value == low and not rule.inclusive:
             bad_value(key, f"is out of range: {rule.why}", allowed)
-    if isinstance(c.port, bool) or not isinstance(c.port, int) or not 1 <= c.port <= 65535:
-        bad_value("port", "isn't a port number", "a whole number from 1 to 65535")
+    ports_ok = True
+    for key in ("port", "review_port"):
+        value = getattr(c, key)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+            ports_ok = False
+            bad_value(key, "isn't a port number", "a whole number from 1 to 65535")
+    if ports_ok and c.review_port == c.port:
+        # `so101 review` may run while `serve` does, so the two pages can't share a port.
+        bad_value("review_port", "is the control page's port too, so `review` couldn't run while `serve` does",
+                  f"a whole number from 1 to 65535 other than port's {c.port}")
     for key, rule in rules.items():
         if rule.choices and getattr(c, key) not in rule.choices:
             bad_value(key, "isn't allowed", "one of " + ", ".join(f'"{a}"' for a in rule.choices))

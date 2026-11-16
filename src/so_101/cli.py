@@ -22,6 +22,7 @@ from so_101 import data, remote, rollout, settings, svtshim, tasks
 from so_101.check import narrow_joints_warning, preflight
 from so_101.commands.policy import policy_setup, policy_task, resolve_action_steps
 from so_101.commands.runs import cmd_runs
+from so_101.commands.serve import cmd_run
 from so_101.commands.serve import cmd_serve
 from so_101.commands.sim import ACTIONS as SIM_ACTIONS
 from so_101.commands.sim import cmd_sim
@@ -33,7 +34,6 @@ from so_101.settings import ARMS, Arm, ConfigError, PortNotFoundError, cameras_a
 from so_101.tasks import get_task
 
 
-UNTIL_STOPPED_S = 24 * 3600  # an attempt of `--duration 0`: LeRobot needs a length, and Esc or Ctrl+C ends it
 # A record session longer than this gets a warning: a hard kill loses the whole session (see cmd_record).
 LONG_SESSION = 20
 
@@ -364,14 +364,21 @@ def cmd_record(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -
 
 
 def cmd_review(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
-    if ns.runs:
-        from so_101.review_runs import review_runs
+    task = get_task(ns.task)
+    if ns.terminal:
+        if ns.runs:
+            from so_101.review_runs import review_runs
 
-        review_runs(s, get_task(ns.task), ns.episode, ns.all, viewer=not ns.no_view)
+            review_runs(s, task, ns.episode, ns.all)
+        else:
+            from so_101.review import review
+
+            review(s, task, ns.episode, ns.all)
         return
-    from so_101.review import review
+    from so_101.web.review import Demos, Runs, open_page
 
-    review(s, get_task(ns.task), ns.episode, ns.all, viewer=not ns.no_view)
+    source = (Runs if ns.runs else Demos)(s, task, ns.episode, ns.all)
+    open_page(s, task, source, ns.episode, ns.all)
 
 
 # Never uploaded: the build is remade from the sessions and edits, Finder's .DS_Store is noise, and
@@ -594,8 +601,8 @@ def dataset_kind(ns: argparse.Namespace, task: tasks.Task) -> str:
     if not getattr(ns, "skills", False):
         return data.WHOLE
     task.require_skills()
-    if getattr(ns, "with_", None) or getattr(ns, "keep_labels", False):
-        sys.exit("--skills builds from the demos only for now: drop --with and --keep-labels.")
+    if getattr(ns, "keep_labels", False):
+        sys.exit("--skills takes no --keep-labels yet.")
     return data.SKILLS
 
 
@@ -716,58 +723,6 @@ def local_train_args(s: settings.Settings, task, policy: str, root: Path, skills
             "--policy.push_to_hub=false", f"--output_dir={output}"], output
 
 
-def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
-    if ns.skills:
-        sys.exit("run doesn't run skills models: it uses LeRobot's own loop, which can't switch skills. "
-                 "Use `uv run so101 serve --skills`.")
-    task = policy_task(ns)
-    setup = policy_setup(s, ns, task)
-
-    duration = s.run.duration_s if ns.duration is None else ns.duration
-    episodes = s.run.episodes if ns.episodes is None else ns.episodes
-    reset_time = task.reset_time_s if ns.reset_time is None else ns.reset_time
-    name = f"{ns.policy}_{task.name}_{time.strftime('%Y%m%d-%H%M%S')}"
-    run_dir = s.outputs_dir / "rollouts" / name
-    dataset = run_dir / "dataset"
-    log = run_dir / "run.log"
-    args = [
-        *setup.args,
-        f"--dataset.repo_id=local/rollout_{name}",
-        f"--dataset.root={dataset}",
-        f"--dataset.single_task={task.prompt}",
-        f"--dataset.fps={task.fps}",
-        f"--dataset.num_episodes={episodes}",
-        f"--dataset.episode_time_s={duration or UNTIL_STOPPED_S}",
-        f"--dataset.reset_time_s={reset_time}",
-        "--dataset.push_to_hub=false",
-        "--dataset.streaming_encoding=true",
-        "--dataset.encoder_threads=2",
-        "--dataset.rgb_encoder.preset=10",
-    ]
-    if ns.display:
-        args.append("--display_data=true")
-    run_dir.mkdir(parents=True)
-    print(f"\nRecording this run to {run_dir}\n  Video and joint data: {dataset}\n  Log: {log}", flush=True)
-    # so101-rollout drives to the demos' start pose before each attempt, when the task has a build.
-    if start_pose := data.demo_start_pose(s, task):
-        os.environ[rollout.START_POSE_ENV] = json.dumps(start_pose)
-        print(f"  Each attempt starts at the demos' start pose: {data.describe_pose(start_pose)}", flush=True)
-    else:
-        print("  Each attempt starts at the pose the arm is in now.", flush=True)
-    print(f"  {setup.steps_line(s)}", flush=True)
-    print("  Keys: right arrow ends an attempt or reset, left arrow redoes it, Esc stops.\n", flush=True)
-    setup.run("so101-rollout", [*args, *extra], log, partial(print_rollout_summary, run_dir, dataset, log))
-
-
-def print_rollout_summary(run_dir: Path, dataset: Path, log: Path) -> None:
-    info = dataset / "meta" / "info.json"
-    attempts = json.loads(info.read_text()).get("total_episodes", 0) if info.is_file() else 0
-    print(f"\nThis run is in {run_dir}\n  Attempts saved: {attempts}", flush=True)
-    for video in sorted((dataset / "videos").glob("*/*/*.mp4")):
-        print(f"  Video: {video}", flush=True)
-    print(f"  Video and joint data: {dataset}\n  Log: {log}", flush=True)
-
-
 def cmd_server(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
     if ns.action == "stop":
         remote.stop_server()
@@ -865,7 +820,7 @@ def main() -> None:
     p.add_argument("--episodes", type=int, help="for replay: the first so many demos (default: all). For nudge: pushes to record (default 3). For eval: attempts (default 10)")
     p.add_argument("--action-steps", type=int, help="for eval: actions to carry out before predicting again (default: the model's trained value)")
     p.add_argument("--limit", type=float, help="for replay and eval: the per-step movement limit (default: max_relative_target in so101.toml)")
-    p.add_argument("--recording", metavar="DIR", help="for replay: replay this recording's commands instead of the demos': a run's `dataset` folder under outputs/rollouts/")
+    p.add_argument("--recording", metavar="DIR", help="for replay: replay this recording's commands instead of the demos': a serve or run run's `dataset` folder under data/<task>/runs/")
     p.add_argument("--refit-cameras", action="store_true", help="for build: fit the cameras and the joint offsets again, after moving a camera or recalibrating")
     p.add_argument("--refit-motors", action="store_true", help="for build: fit the motors to the real follower again")
     p.set_defaults(fn=cmd_sim, forwards=True)  # eval passes the rest to lerobot-eval, nudge to lerobot-record
@@ -918,15 +873,17 @@ def main() -> None:
     p.add_argument("--no-train", action="store_true", help="dry run: skip the short training test")
     p.set_defaults(fn=cmd_record, forwards=True)
 
-    p = sub.add_parser("review", help="step through recorded episodes to trim or delete them (writes edits.toml); "
-                                      "--runs reviews serve runs instead (writes each run's labels.toml)")
+    p = sub.add_parser("review", help="review recorded episodes on a web page to trim or delete them (writes "
+                                      "edits.toml); --runs reviews serve runs instead (writes each run's labels.toml)")
     add_task(p)
     p.add_argument("--runs", action="store_true",
                    help="review the interruptions and outcomes of the task's serve runs instead of its demos")
     p.add_argument("--episode", help="only a session (YYYYmmdd-HHMMSS) or one episode (SESSION/N); "
                                      "with --runs, a run (YYYYmmdd-HHMMSS) or one attempt (RUN/N)")
     p.add_argument("--all", action="store_true", help="include episodes, or with --runs attempts, already reviewed")
-    p.add_argument("--no-view", action="store_true", help="don't open episodes in the Rerun viewer")
+    p.add_argument("--terminal", action="store_true",
+                   help="answer text prompts in the terminal instead of opening the review page, as over SSH; "
+                        "shows no video")
     p.set_defaults(fn=cmd_review)
 
     p = sub.add_parser("build", help="make the training dataset from all sessions plus edits.toml")
@@ -966,14 +923,16 @@ def main() -> None:
     add_skills_flag(p, "train one model on the task's skills, from the skills dataset, into <policy>_so101_<task>_skills")
     p.set_defaults(fn=cmd_train, forwards=True)
 
-    p = sub.add_parser("run", help="run a task's policy on the follower, recording to outputs/rollouts/")
+    p = sub.add_parser("run", help="run a task's policy for several attempts on its own: serve's control center with an "
+                                   "autopilot that starts and ends each attempt, recorded to data/<task>/runs/")
     add_task(p)
-    p.add_argument("--duration", type=float, help="seconds per attempt; 0 runs until Esc or Ctrl+C (default: [run] in so101.toml)")
-    p.add_argument("--episodes", type=int, help="how many attempts to make (default: [run] in so101.toml)")
+    p.add_argument("--episodes", type=int, help="how many attempts to make (default: [run] episodes in so101.toml)")
+    p.add_argument("--duration", type=float, help="seconds of policy time per attempt; 0 runs until you end it "
+                                                  "(default: [control] attempt_limit_s in so101.toml)")
     p.add_argument("--reset-time", type=float, help="seconds to reset the scene between attempts (default: the task's reset_time_s)")
-    p.add_argument("--display", action="store_true", help="stream cameras and joints to a Rerun viewer")
     add_policy_flags(p, "run", remote_flag=True)
-    add_skills_flag(p, "not supported: a skills model runs in `serve --skills`")
+    p.add_argument("--operator", help="your name, recorded on every event your actions cause and shown on the page (default: none)")
+    add_skills_flag(p, "run the skills model, switching skills at each handover")
     p.set_defaults(fn=cmd_run, forwards=True)
 
     p = sub.add_parser("serve", help="supervise a task's policy from a control page over Tailscale, or the terminal: start, pause, rewind, take over with the leader and end attempts")

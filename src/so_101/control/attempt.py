@@ -34,6 +34,8 @@ class Attempt:
     policy_drove: bool = False  # it has recorded a frame where the policy's action reached the arm
     teleop_next: bool = False  # the move to the start pose hands over to the leader, not the policy
     history: History | None = field(default_factory=History)  # what Rewind plays back; None once closed
+    skill: int = -1  # the skill the policy stack last said the model was conditioned on, recorded on each frame
+    moved: bool = False  # Teleop or Rewind moved the arm since the policy stack last had it
     # Runs of one phase, each {"phase", "s", "stepped_in"}.
     timeline: list[dict] = field(default_factory=list)
     stepped_in: bool = False  # the next run of the timeline starts with a step-in

@@ -1,4 +1,9 @@
-"""`so101 serve`: check the setup, then run the control center as `so101-control`."""
+"""`so101 serve` and `so101 run`: check the setup, then run the control center as `so101-control`.
+
+They are one program (docs/run.md). `run` adds an autopilot that starts and ends the attempts, and
+passes its settings in run.json's `autopilot`; everything else, the policy stack, the page, the keys,
+the safety rules and the recording into data/<task>/runs/, is the same.
+"""
 
 import argparse
 import json
@@ -12,6 +17,25 @@ from so_101.commands.policy import policy_setup, policy_task
 
 
 def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
+    launch(s, ns, extra, "serve")
+
+
+def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
+    task = policy_task(ns)
+    if ns.duration is not None and ns.duration < 0:
+        sys.exit("--duration is seconds of policy time per attempt: 0 or more (0 runs until you end it).")
+    autopilot = {
+        "episodes": s.run.episodes if ns.episodes is None else ns.episodes,
+        "reset_s": task.reset_time_s if ns.reset_time is None else ns.reset_time,
+        "duration_s": ns.duration,  # None: [control] attempt_limit_s
+    }
+    if autopilot["episodes"] < 1:
+        sys.exit("--episodes is how many attempts to make: 1 or more.")
+    launch(s, ns, extra, "run", autopilot)
+
+
+def launch(s: settings.Settings, ns: argparse.Namespace, extra: list[str], mode: str, autopilot: dict | None = None) -> None:
+    """Check the setup and start so101-control for `mode` (serve or run), with the autopilot's settings for run."""
     from so_101.control.main import RUN_ENV
     from so_101.recording import policy_commit, run_manifest
 
@@ -19,7 +43,7 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     # The control center reads the fps from run.json, and LeRobot's own parts from --fps: one forwarded
     # --fps would leave the recording, the loop and the policy at different rates.
     if any(arg == "--fps" or arg.startswith("--fps=") for arg in extra):
-        sys.exit(f"serve runs at the task's fps, {task.fps}: set fps under [{task.name}] in tasks.toml "
+        sys.exit(f"{mode} runs at the task's fps, {task.fps}: set fps under [{task.name}] in tasks.toml "
                  "instead of passing --fps.")
     setup = policy_setup(s, ns, task, serving=True)
     server = setup.server
@@ -28,7 +52,7 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     policy = {
         "type": ns.policy,
         "repo": None if ns.checkpoint else task.policy_for(ns.policy, ns.skills),
-        # A skills model: so101-control runs it under `skills.SkillPolicy`, which switches skills.
+        # A skills model: so101-control's policy stack switches skills (`policy.skills.SkillSequencer`).
         "skills": [skill.record() for skill in task.skills] if ns.skills else None,
         "revision": None if ns.checkpoint else ns.revision or "main",
         "checkpoint": str(setup.checkpoint) if ns.checkpoint else None,  # a model saved on this Mac
@@ -52,6 +76,9 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         image_sizes=setup.sizes,
     )
     manifest["operator"] = ns.operator
+    manifest["mode"] = mode
+    if autopilot is not None:
+        manifest["autopilot"] = autopilot
     os.environ[RUN_ENV] = json.dumps({"dir": str(run.path), "manifest": manifest})
     print("Not an emergency stop: keep a hand near the follower's power switch.\n", flush=True)
     # Ctrl+Z reaches this process too: stopped, it would leave the terminal to the shell. so101-control
@@ -66,7 +93,7 @@ def print_serve_summary(run: data.Run) -> None:
     from so_101.control.analysis import read_events
 
     if not run.path.is_dir():  # the child stopped before it was ready, as when the port is taken
-        print("\nNothing was recorded: `serve` stopped before the run started, so it made no run folder.", flush=True)
+        print("\nNothing was recorded: so101-control stopped before the run started, so it made no run folder.", flush=True)
         return
     events = read_events(run)  # skips a last line a crash cut short
     saved = sum(bool(e.get("saved")) for e in events if e.get("type") == "attempt_end")

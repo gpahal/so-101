@@ -1,9 +1,11 @@
 """`so101 build`: turn recorded sessions plus edits.toml into a training dataset.
 
-Two kinds (`data.DATASETS`): `whole`, each kept demo as one episode (plus runs with --with), and `skills`
-(`--skills`), each kept demo's skills as episodes in order, cut where `so_101.skills` finds their events,
-each frame with its skill's prompt as `task` and its one-hot as `observation.environment_state`. A demo
-the skills can't be cut from is left out, with a note.
+Two kinds (`data.DATASETS`): `whole`, each kept demo as one episode, and `skills` (`--skills`), each kept
+demo's skills as episodes in order, cut where `so_101.skills` finds their events, each frame with its
+skill's prompt as `task` and its one-hot as `observation.environment_state`. A demo the skills can't be
+cut from is left out, with a note. Either takes runs with --with; in a skills build each run cut is split
+where the skill changes (`run_skills`): by its control.skill column in a skills run, by its `grasp`
+events in any other.
 
 Raw sessions are never changed. Each kept episode is read back (joint rows and decoded video
 frames), cut to its `keep` range, and written into a fresh dataset with LeRobot's own writer, so
@@ -98,13 +100,11 @@ class Plan:
                        int(self.frame_labels[i]), self.attempt.outcome == "succeeded")
 
     def entry(self, task: Task | None = None) -> dict:
-        if self.skill is not None:
-            return {"session": self.recording.name, "episode": self.episode, "frames": [self.start, self.stop],
-                    "skill": task.skills[self.skill].name}
+        skill = {} if self.skill is None else {"skill": task.skills[self.skill].name}
         if self.attempt is None:
-            return {"session": self.recording.name, "episode": self.episode, "frames": [self.start, self.stop]}
+            return {"session": self.recording.name, "episode": self.episode, "frames": [self.start, self.stop], **skill}
         return {"run": self.recording.name, "attempt": self.attempt.number, "episode": self.episode,
-                "frames": [self.start, self.stop], "source": self.source}
+                "frames": [self.start, self.stop], "source": self.source, **skill}
 
     def damaged(self, task: Task, e: Exception) -> str:
         name = self.recording.name
@@ -187,9 +187,10 @@ def plan(s: Settings, task: Task) -> tuple[list[Plan], list[str]]:
     return plans, notes
 
 
-def plan_runs(s: Settings, task: Task, sources: tuple[str, ...], reference) -> tuple[list[Plan], list[str]]:
+def plan_runs(s: Settings, task: Task, sources: tuple[str, ...], reference, skills: bool = False) -> tuple[list[Plan], list[str]]:
     """The training cuts of every run from `sources`, each its own episode. `reference` is the
-    demos' metadata: a run must have the same fps, robot and demo columns to join them."""
+    demos' metadata: a run must have the same fps, robot and demo columns to join them. With `skills`,
+    each cut is split where the skill changes (`run_skills`), each piece an episode of its skill."""
     plans, notes = [], []
     if not sources:
         return plans, notes
@@ -223,17 +224,64 @@ def plan_runs(s: Settings, task: Task, sources: tuple[str, ...], reference) -> t
             )
         attempts = {a.number: a for a in result.attempts}
         indexed = {int(e) for e in meta.episodes["episode_index"]}
+        events = analysis.read_events(run) if skills else []
         for cut in cuts:
             if cut.episode not in indexed:
                 notes.append(f"run {run.name} attempt {cut.attempt}: episode {cut.episode} isn't in the dataset's "
                              "episode index, left out")
                 continue
-            if cut.frames < MIN_EPISODE_S * meta.fps:
-                notes.append(f"run {run.name} attempt {cut.attempt}: {cut.source} frames {cut.start}-{cut.stop} "
-                             f"are under {MIN_EPISODE_S} s, left out")
-                continue
-            plans.append(Plan(run, cut.episode, cut.start, cut.stop, attempts[cut.attempt], cut.source))
+            pieces = [(cut.start, cut.stop, None)]
+            if skills:
+                per_frame, why = run_skills(run, attempts[cut.attempt], events, task)
+                if per_frame is None:
+                    notes.append(f"run {run.name} attempt {cut.attempt}: {why}, so its {cut.source} frames are left out")
+                    continue
+                pieces = split_by_skill(per_frame, cut.start, cut.stop)
+            for start, stop, skill in pieces:
+                if stop - start < MIN_EPISODE_S * meta.fps:
+                    which = "" if skill is None else f" ({task.skills[skill].name})"
+                    notes.append(f"run {run.name} attempt {cut.attempt}: {cut.source} frames {start}-{stop}{which} "
+                                 f"are under {MIN_EPISODE_S} s, left out")
+                    continue
+                plans.append(Plan(run, cut.episode, start, stop, attempts[cut.attempt], cut.source, skill=skill))
     return plans, notes
+
+
+def run_skills(run: data.Run, attempt: analysis.Attempt, events: list[dict], task: Task) -> tuple[np.ndarray | None, str]:
+    """Each frame's skill, as an index in `task.skills`, for one attempt of a run, or None and why not.
+
+    A skills run says it on every frame (control.skill), indexed in its own run.json's policy.skills,
+    which is mapped onto the task's by name. Any other run is split by its perception's `grasp` events:
+    the first skill until the next skill's handover event, that skill from then on."""
+    names = [skill.name for skill in task.skills]
+    recorded = (run.manifest().get("policy") or {}).get("skills")
+    if recorded and (attempt.skills >= 0).any():
+        index = {n: names.index(r["name"]) for n, r in enumerate(recorded) if r.get("name") in names}
+        if len(index) != len(recorded):
+            return None, f"its skills ({', '.join(r.get('name', '?') for r in recorded)}) aren't all the task's"
+        per_frame = np.array([index.get(int(k), 0) if k >= 0 else 0 for k in attempt.skills], dtype=np.int8)
+        return per_frame, ""
+    handovers = [(e["frame"], e["grasp"]) for e in events
+                 if e.get("type") == "grasp" and e.get("attempt") == attempt.number and isinstance(e.get("frame"), int)]
+    if not handovers and not recorded:
+        return None, "it has no grasp events to split it into skills (recorded before the perception logged them)"
+    per_frame = np.zeros(len(attempt.phases), dtype=np.int8)
+    current = 0
+    for frame, kind in sorted(handovers):
+        if current + 1 < len(task.skills) and kind == task.skills[current + 1].handover:
+            current += 1
+            per_frame[frame:] = current
+    return per_frame, ""
+
+
+def split_by_skill(per_frame: np.ndarray, start: int, stop: int) -> list[tuple[int, int, int]]:
+    """Frames [start, stop) as runs of one skill: (start, stop, skill) each."""
+    pieces, a = [], start
+    for i in range(start + 1, stop + 1):
+        if i == stop or per_frame[i] != per_frame[a]:
+            pieces.append((a, i, int(per_frame[a])))
+            a = i
+    return pieces
 
 
 def skill_plans(s: Settings, task: Task) -> tuple[list[Plan], list[str], list[dict]]:
@@ -267,8 +315,8 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
 
     if kind == data.SKILLS:
         task.require_skills()
-        if sources or keep_labels:
-            raise ConfigError("A skills build takes the demos only: --with and --keep-labels aren't supported for it yet.")
+        if keep_labels:
+            raise ConfigError("A skills build takes no --keep-labels yet.")
     # Taken before reading anything, so an edit or a run recorded during the build rebuilds next time.
     inputs = data.build_inputs(s, task, sources, keep_labels, kind)
     cuts = None
@@ -281,7 +329,7 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
             print(f"  {note}")
         raise ConfigError(f"Nothing to build for {task.name}: record some demos first (`uv run so101 record {task.name}`).")
     source = plans[0].meta
-    run_plans, run_notes = plan_runs(s, task, sources, source)
+    run_plans, run_notes = plan_runs(s, task, sources, source, skills=kind == data.SKILLS)
     notes += run_notes
     plans = [*plans, *run_plans]
     for note in notes:

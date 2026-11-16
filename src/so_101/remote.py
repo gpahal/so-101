@@ -1,7 +1,7 @@
 """Run a policy on a Hugging Face Jobs GPU while the arm and cameras stay on this Mac.
 
 The job runs LeRobot's policy server, listening only on its own loopback. An SSH tunnel makes that
-port appear on this Mac, and `so101-rollout` (`run --remote`) or `so101-control` (`serve --remote`)
+port appear on this Mac, and `so101-control` (`run --remote` and `serve --remote`)
 connects to it with `client_args`.
 """
 

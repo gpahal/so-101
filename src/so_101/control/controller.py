@@ -55,6 +55,7 @@ from so_101.control.link import Link
 from so_101.control.previews import Previews
 from so_101.control.recorder import OUTCOMES, Phase, Recorder
 from so_101.control.rewind import DRIVEN, Rewind
+from so_101.policy.base import OTHER, PERSON, POLICY, START, Handback, Output, Tick
 from so_101.control.shedding import Pace
 from so_101.control.states import (
     CONFIRM_S,
@@ -82,6 +83,7 @@ class Driven(NamedTuple):
     policy_action: dict | None = None  # the policy's raw action, if one reached the arm this tick
     leader_pose: dict | None = None  # the leader's pose, if it was read
     event: Event | None = None  # what became of a scripted move, applied once the frame is recorded
+    output: Output | None = None  # what the policy stack returned, in Autonomous
 
 
 def _move_event(arrived: bool | None) -> Event | None:
@@ -115,10 +117,10 @@ class Controller:
         notify: Callable[[str, str], None] | None = None,
         operator: str | None = None,
     ) -> None:
-        """`robot` is LeRobot's robot wrapper (ThreadSafeRobot) with hold configured. `policy` is an
-        EngineDriver, or a layer over one with the same methods (`supervisor.layer.SupervisedPolicy`):
-        it hears each attempt open and close (`begin_episode`, `end_episode`), and in Autonomous may ask
-        for a person (`asks`), which pauses it like a lost link. Poses are in the arm's units, keyed like its actions. `rest_pose` is the
+        """`robot` is LeRobot's robot wrapper (ThreadSafeRobot) with hold configured. `policy` is the
+        policy stack (`policy.stack.build`, `policy.base.Policy`): it hears each attempt open and close
+        (`begin_episode`, `end_episode`), gets the arm with a `Handback` saying why, is stepped with a
+        `Tick` in Autonomous, and its `Output` may ask for a person, which pauses it like a lost link. Poses are in the arm's units, keyed like its actions. `rest_pose` is the
         `[control]` rest pose, already converted from raw steps with `pose_from_steps`. Without
         `start_pose` (no build), attempts start from wherever the arm is. `notify(message,
         state)` hears every message, with the new state when it announces one. `recorder` records the
@@ -341,9 +343,10 @@ class Controller:
             self.apply(Event.LEADER_LOST)
 
     def _maintain_policy(self) -> None:
-        """Let the policy driver reconnect a failed remote engine; announce what it says."""
+        """Let the policy stack do its housekeeping (a remote model's reconnecting, the supervisor's
+        verdicts); announce what it says."""
         try:
-            if (message := self.policy.maintain()) is not None:
+            for message in self.policy.maintain():
                 self._say(message)
         except Exception as error:  # reconnecting must never stop the loop
             self._say(f"Reconnecting the policy failed: {type(error).__name__}: {error}")
@@ -381,18 +384,22 @@ class Controller:
         observation = self.follower.observe(self.open_attempt is not None)
         state, arm = self.state, self.follower.arm
         try:
-            policy_action, leader_pose, event = self._drive(observation, seconds)
+            policy_action, leader_pose, event, output = self._drive(observation, seconds)
         except LeaderLost as lost:
             self.leader.drop(str(lost))
             if state is State.TELEOP:  # in Handover, `_drive` already held the follower this tick
                 self.policy.hold(arm)  # the follower holds rather than chase a stale pose
-            policy_action, leader_pose, event = Driven(event=Event.LEADER_LOST)
-        if state is State.AUTONOMOUS and (failure := self.policy.failure):
+            policy_action, leader_pose, event, output = Driven(event=Event.LEADER_LOST)
+        if state is State.AUTONOMOUS and (failure := self.policy.health().failure):
             raise Failure(f"The policy failed: {_last_line(failure)}", detail=failure)
-        if state is State.AUTONOMOUS and event is None and (asked := self.policy.asks()) is not None:
-            self._say(asked)
+        if state is State.AUTONOMOUS and event is None and output is not None and output.asks:
+            self._say(output.asks)
             event = Event.POLICY_ASKED  # applied once this tick's frame is recorded, like a scripted move's end
         if (attempt := self.open_attempt) is not None:
+            if output is not None and output.skill is not None:
+                attempt.skill = output.skill
+            if state in (State.TELEOP, State.REWINDING):
+                attempt.moved = True  # the stack's next handback says the arm may have moved
             if leader_pose is None and self.leader.connected:
                 leader_pose = self.leader.pose_for_frame()
             # The policy drove only on a tick its action reached the arm: one waiting for an action (a
@@ -400,7 +407,8 @@ class Controller:
             attempt.policy_drove |= policy_action is not None
             frame = self.recorder.frames
             self.recorder.add_frame(observation, arm.goal, Phase[state.name], policy_action=policy_action,
-                                    intervention=state is State.TELEOP and attempt.policy_drove, leader=leader_pose)
+                                    intervention=state is State.TELEOP and attempt.policy_drove, leader=leader_pose,
+                                    skill=attempt.skill, driver=output.driver if output is not None else OTHER)
             if state in DRIVEN:
                 attempt.history.add(seconds, dict(self.follower.present), frame)
             attempt.extend_timeline(state, 1 / self.fps)
@@ -421,12 +429,15 @@ class Controller:
         fails in Handover or Teleop."""
         arm, present = self.follower.arm, self.follower.present
         if self.state is State.AUTONOMOUS:
+            tick = Tick(self.clock(), self.recorder.frames if self.open_attempt is not None else -1, observation,
+                        dict(present))
             try:
-                return Driven(policy_action=self.policy.step(arm, observation))
+                out = self.policy.step(arm, tick)
             except Exception as error:
                 if self.follower.blame(error) is None:  # the policy's side failed, not a goal to the arm
-                    self.policy.raised = traceback.format_exc()  # Resume is refused from now on
+                    self.policy.record_failure(traceback.format_exc())  # Resume is refused from now on
                 raise
+            return Driven(policy_action=out.action if out.driver == POLICY else None, output=out)
         if self.state is State.TELEOP:
             pose = self.leader.read()
             arm.send_action(pose)  # through max_relative_target, like every goal
@@ -550,9 +561,10 @@ class Controller:
     def _policy_reason(self) -> str | None:
         """Why the policy can't run now: it failed, for good when it's local, or until it has
         reconnected when it's remote. None when it can run."""
-        if not (failure := self.policy.failure):
+        health = self.policy.health()
+        if not (failure := health.failure):
             return None
-        if retrying := self.policy.retrying:
+        if retrying := health.retrying:
             return f"The policy failed: {_last_line(failure)}. {retrying}"
         return f"The policy failed and can't run again until so101 serve restarts: {_last_line(failure)}"
 
@@ -687,8 +699,9 @@ class Controller:
                 self.scripted_move = rollout.Move(self.start_pose or dict(self.follower.present), self.fps, self.clock)
                 self.open_attempt.teleop_next = transition.then_teleop
             case Action.RUN_POLICY:
-                self.policy.run()
-                self.open_attempt.underway = True
+                attempt = self.open_attempt
+                self.policy.run(Handback(PERSON if attempt.underway else START, moved=attempt.moved))
+                attempt.underway, attempt.moved = True, False
             case Action.PAUSE_POLICY:
                 self.policy.pause()
             case Action.START_REWIND:

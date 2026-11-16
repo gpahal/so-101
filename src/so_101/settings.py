@@ -157,8 +157,7 @@ def cameras_arg(specs: list[str]) -> str:
 
 @dataclass(frozen=True)
 class Run:
-    duration_s: float
-    episodes: int
+    episodes: int  # how many attempts `so101 run`'s autopilot makes
     device: str
 
 
@@ -215,7 +214,8 @@ class ControlSetting:
     choices: tuple[str, ...] = ()  # the strings it may be
 
 
-# Every `[control]` setting but the rest pose. `check_control` also checks `port` is a port number.
+# Every `[control]` setting but the rest pose. `check_control` also checks `port` and `review_port`
+# are port numbers, and different ones.
 CONTROL_SETTINGS = {
     "rewind_s": ControlSetting(2.5, minimum=0, why="each Rewind has to go back some time"),
     "attempt_limit_s": ControlSetting(45, minimum=0, why="at 0 s every attempt would end as it starts"),
@@ -229,6 +229,7 @@ CONTROL_SETTINGS = {
     ),
     "bind": ControlSetting("tailscale", choices=("tailscale", "127.0.0.1")),
     "port": ControlSetting(8101),
+    "review_port": ControlSetting(8766),
     "preview_fps": ControlSetting(5, minimum=0, inclusive=True, why="0 turns the camera previews off"),
 }
 
@@ -257,6 +258,7 @@ class Control:
     link_timeout_s: float
     bind: str
     port: int
+    review_port: int  # the reviewer page's (`so101 review`), which follows `bind` too
     preview_fps: float
 
 
@@ -392,7 +394,6 @@ def _parse(path: Path) -> Settings:
                       max_relative_target=step_cap(teleop.get("max_relative_target", 0), f"[teleop] max_relative_target in {path}")),
         cameras={name: camera(name, section) for name, section in data.get("cameras", {}).items()},
         run=Run(
-            duration_s=run.get("duration_s", 30),
             episodes=run.get("episodes", 1),
             device=run.get("device", "mps"),
         ),

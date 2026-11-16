@@ -1,6 +1,7 @@
-"""Run a LeRobot inference engine one control tick at a time, as LeRobot's rollout strategies do.
+"""The leaf of the policy stack: a LeRobot inference engine, one control tick at a time, as LeRobot's
+rollout strategies run it. The only module that touches LeRobot's inference (`base.Policy`).
 
-The controller calls `step` only while the policy drives. Every action goes through LeRobot's
+The control loop steps the stack only while it drives, and the stack steps this only while the model drives. Every action goes through LeRobot's
 dispatch gate (`next_interpolated_action`, `commit_action`), the robot action processor and
 `follower.Arm`, so `max_relative_target` still caps it.
 
@@ -28,6 +29,9 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from so_101.policy.base import POLICY, WAITING, Conditioning, Handback, Health, Output, Tick
+
+STATE_KEY = "observation.environment_state"  # a skills model's one-hot input (`so_101.skills`)
 # How often to try connecting again after the remote engine failed. The server frees a lost session
 # after its idle timeout (10 s by default), so the first tries may be refused as busy.
 RECONNECT_EVERY_S = 5.0
@@ -70,6 +74,10 @@ class EngineDriver:
         self._tries = 0
         self.retrying: str | None = None  # how reconnecting is going, while it is
         self.raised: str | None = None  # the traceback of an exception a step raised from the policy's side
+        self.running = False  # between `run` and `pause`
+        # The skill one-hot a skills model reads as observation.environment_state (`condition`), added
+        # to each processed observation; the frame it's built into names it in `dataset_features`.
+        self._skill_values: dict[str, float] = {}
 
     @classmethod
     def from_context(cls, ctx, reconnect: Callable[[], Any] | None = None) -> "EngineDriver":
@@ -87,6 +95,9 @@ class EngineDriver:
     def start(self) -> None:
         self.engine.start()
 
+    def close(self) -> None:
+        """Nothing beyond `stop`: the process stops the driver itself."""
+
     def stop(self) -> None:
         with self._swap_lock:
             self._stopping.set()
@@ -95,9 +106,13 @@ class EngineDriver:
         if spare is not None:
             spare.stop()
 
-    def maintain(self) -> str | None:
+    def maintain(self) -> list[str]:
         """Called by the control loop every tick. After a failure, start reconnecting; once a new
-        engine is connected, swap it in. Returns what to tell the operator, or None."""
+        engine is connected, swap it in. Returns what to tell the operator."""
+        message = self._maintain()
+        return [message] if message is not None else []
+
+    def _maintain(self) -> str | None:
         if self._reconnect is None or self.failure is None:
             return None
         if (engine := self._replacement) is not None:
@@ -154,14 +169,31 @@ class EngineDriver:
 
     def pause(self) -> None:
         """Stop the policy: no action it queued reaches the arm after this."""
+        self.running = False
         self.engine.pause()
         self._clear()
 
-    def run(self) -> None:
+    def run(self, handback: Handback | None = None) -> None:
         """Start or continue the policy from a clean slate: reset clears its queued actions."""
         self.engine.reset()
         self._clear()
         self.engine.resume()
+        self.running = True
+
+    def condition(self, conditioning: Conditioning) -> None:
+        """Tell the model what to do: the prompt as the engine's task, and a skills model's one-hot as
+        observation.environment_state in the frame it builds. While the model drives, a change clears
+        its queued actions, so none meant for the old skill reaches the arm."""
+        set_task = getattr(self.engine, "set_task", None)
+        changed = bool(set_task(conditioning.prompt)) if set_task is not None else False
+        values = conditioning.values()
+        if values and STATE_KEY not in self.dataset_features:
+            self.dataset_features = {**self.dataset_features,
+                                     STATE_KEY: {"dtype": "float32", "shape": (len(values),), "names": list(values)}}
+        changed = changed or values != self._skill_values
+        self._skill_values = values
+        if changed and self.running:
+            self.run()
 
     def hold(self, robot) -> None:
         """Hold the arm at its last target, as LeRobot does while a policy may not move it."""
@@ -175,25 +207,32 @@ class EngineDriver:
     def end_episode(self) -> None:
         """The attempt closed."""
 
-    def asks(self) -> str | None:
-        """Why the policy wants a person now, or None. A layer over this driver may; the policy never does."""
-        return None
-
     @property
     def failure(self) -> str | None:
         if self.raised is not None:
             return self.raised
         return (self.engine.failure_traceback or "the policy failed") if self.engine.failed else None
 
-    def step(self, robot, observation: dict[str, Any]) -> dict | None:
-        """Send the policy's next action. Returns it as the policy gave it, before the step cap, when it
-        reached the arm, or None on a tick with none."""
+    def health(self) -> Health:
+        return Health(self.failure, self.retrying)
+
+    def record_failure(self, detail: str) -> None:
+        """A step raised from the policy's side (the loop tells it from the robot's): Resume is refused from now on."""
+        self.raised = detail
+
+    def step(self, robot, tick: Tick) -> Output:
+        """Send the policy's next action: an Output with the action as the policy gave it, before the
+        step cap, when it reached the arm, or WAITING on a tick with none."""
+        action = self._step(robot, tick.observation)
+        return Output(action, POLICY) if action is not None else Output(None, WAITING)
+
+    def _step(self, robot, observation: dict[str, Any]) -> dict | None:
         from lerobot.inference import commit_action, next_interpolated_action
         from lerobot.utils import OBS_STR
         from lerobot.utils.feature_utils import build_dataset_frame
 
         if self._processed is None or self.interpolator.needs_new_action():
-            self._processed = self.observation_processor(observation)
+            self._processed = {**self.observation_processor(observation), **self._skill_values}
             self.engine.notify_observation(self._processed)
         processed = self._processed
 

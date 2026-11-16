@@ -1,6 +1,6 @@
 # Skills: one model trained on the parts of a task
 
-Status: built, not yet run on the arm or a remote server. How to use it is in the README, under Training one model on skills; this note keeps the design and its measurements. Not built: `--with` for skills, `run --skills` and `sim eval` for skills models.
+Status: built, not yet run on the arm or a remote server. How to use it is in the README, under Training one model on skills; this note keeps the design and its measurements. Not built: skills models in `sim eval`.
 pick, place and combined dataset were made from them by a scratch script and checked (every row equal to
 the raw session's, every cut confirmed on the camera frames). Nothing in `so101` builds, trains or runs
 skills yet.
@@ -87,12 +87,12 @@ uv run so101 server start --skills --policy pi05
 uv run so101 serve --skills --policy pi05 --remote
 ```
 
-Left out at first, each refused with a message rather than half-supported:
-- **`build --skills --with ...`.** Run cuts (corrections, policy successes) aren't cut into skills yet.
-  They can be later: the same events found on a run's frames, and the layer's `skill` events say which
-  skill was running.
-- **`run --skills` and `sim eval`.** Both run LeRobot's own loops, so the skill layer doesn't fit in them
-  without a wrapper around LeRobot's policy. `serve` is where skills run first.
+- **`build --skills --with ...`** adds runs, each cut split where the skill changes: by the run's
+  `control.skill` column for a skills model's run, by its `grasp` events for any other
+  ([`policy-layers.md`](policy-layers.md)).
+- **`run --skills`** runs a skills model with `run`'s autopilot ([`run.md`](run.md)).
+- **`sim eval`** doesn't: it runs LeRobot's own loop, which the policy stack doesn't fit in without a
+  wrapper around LeRobot's policy.
 
 ## On disk
 
@@ -158,12 +158,12 @@ Steps follow the demo count, as for `whole`, so time and cost are the same: the 
 
 ## Running a skills model
 
-`--skills` adds a skill layer over the policy driver, under the supervisor when it's on:
-`EngineDriver` → `SkillPolicy` → `SupervisedPolicy`. Like the supervisor, it has the driver's methods and
-sends `serve` no commands.
+`--skills` adds the skill sequencer to the policy stack ([`policy-layers.md`](policy-layers.md)):
+`EngineDriver` → `Perception` → `SkillSequencer` → `Supervisor`. Like every layer it sends the controller no
+commands; it conditions the model through the stack, and only the model acts on that.
 
 1. Each attempt starts with the first skill: the prompt and one-hot are pick's.
-2. The detector runs on every tick. When the next skill's `handover` event fires (the carry, about
+2. The perception's detector runs on every tick the model drives. When the next skill's `handover` event fires (the carry, about
    1.57 s after the close), the layer switches: it sets the new prompt and one-hot and clears the
    policy's queue, so no pick action from before the switch reaches the arm. The cost per switch: one
    ACT inference locally (44 ms, measured); for remote π0.5, an estimated stop of 0.7 to 1.3 s while a new
@@ -185,7 +185,8 @@ leaves out both layouts' datasets.
 ## How it's built
 
 - `src/so_101/skills.py`: the skill definitions from `tasks.toml` and their checks, the events of a
-  demo's frames (the supervisor's detector, plus lift and widest), each demo's spans, and `SkillPolicy`.
+  demo's frames (the supervisor's detector, plus lift and widest), and each demo's spans. The runtime
+  layer is `policy/skills.py`'s `SkillSequencer`.
 - `tasks.py`: parse `[<task>.skills]`.
 - `data.py`: `dataset_root(s, task, kind)` and `build_manifest_path(s, task, kind)` in place of
   `train_root`; the layout docstring. Every user of `train_root` goes through these, so `sim`'s demos
@@ -194,7 +195,7 @@ leaves out both layouts' datasets.
   `task` and `observation.environment_state` per frame, and keep `build.json` inside the dataset.
 - `cli.py`: the `skills` command, `--skills` on `build`, `train`, `serve` and `server start`, and the
   `_skills` repo names (`tasks.Task.policy_for` and `dataset` take the kind).
-- `commands/serve.py` and `control/main.py`: stack `SkillPolicy` when the run is a skills run.
+- `policy/stack.py`: adds the `SkillSequencer` when the run is a skills run.
 - Tests (`tests/test_skills.py`): the definitions and their refusals; the events and spans on made-up
   traces, with a demo with no carry and a handover outside its spans refused; a skills build on fake
   sessions with every row, one-hot and prompt checked against the source; the layer switching once on

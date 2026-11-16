@@ -10,7 +10,9 @@ import contextlib
 import dataclasses
 import io
 import json
+import shutil
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,7 +24,11 @@ from fakes import FakeCamera, FakeClock, make_follower
 from so_101 import cli, data, remote, settings, skills
 from so_101.build import build
 from so_101.control.recorder import features
-from so_101.skills import Point, SkillError, SkillPolicy
+from so_101.policy import stack
+from so_101.policy.base import (LAYER, PERSON, POLICY, START, Conditioning, Handback, Health,
+                                 LayerContext, Output, Tick)
+from so_101.skills import Point, SkillError
+from so_101.supervisor import judges as J
 from so_101.supervisor import program
 from so_101.tasks import Task
 
@@ -196,97 +202,220 @@ class BuildTest(unittest.TestCase):
         moved = dataclasses.replace(TASK, skills=skills.parse({**TABLE, "pick": {**TABLE["pick"], "to": "carry + 1"}}, "test"))
         self.assertFalse(data.build_is_current(self.s, moved, kind=data.SKILLS), "a changed skill rebuilds")
 
-    def test_a_skills_build_takes_the_demos_only(self) -> None:
-        with self.assertRaisesRegex(Exception, "demos only"):
-            build(self.s, TASK, ("corrections",), kind=data.SKILLS)
+    def record_run(self, name: str, with_skills: bool) -> Path:
+        """A serve run on the fake arm that closes on the block, holds it past the carry and succeeds:
+        through the perception alone (a whole-model run), or with the skill sequencer too."""
+        from test_controller import START_POSE, Rig
+
+        opened = [{**START_POSE, "gripper.pos": min(10.0 + 2 * i, 40.0)} for i in range(1, 31)]
+        closed = [{**opened[-1], "gripper.pos": max(40.0 - 3 * i, 18.4)} for i in range(1, 11)]
+        actions = [[a[k] for k in START_POSE] for a in opened + closed]
+        run_dir = data.task_dir(self.s, TASK) / "runs" / name
+        rig = Rig(run_dir, actions=actions, wrap=lambda driver, recorder, clock: stack.build(
+            driver, LayerContext(recorder.event, clock, PROGRAM), skills=SKILLS if with_skills else ()))
+        rig.start_policy(ticks=5 * FPS)
+        rig.reset("succeeded")
+        rig.close()
+        policy = {"skills": [skill.record() for skill in SKILLS]} if with_skills else {}
+        (run_dir / "run.json").write_text(json.dumps({"policy": policy}))
+        return run_dir
+
+    def test_run_cuts_are_split_where_the_skill_changes(self) -> None:
+        for name, with_skills in (("20260101-110000", False), ("20260101-120000", True)):
+            with self.subTest("skills run" if with_skills else "whole-model run"):
+                run_dir = self.record_run(name, with_skills)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    build(self.s, TASK, ("policy-successes",), kind=data.SKILLS)
+                manifest = json.loads(data.build_manifest_path(self.s, TASK, data.SKILLS).read_text())
+                pieces = [e for e in manifest["episodes"] if e.get("run") == name]
+                self.assertEqual([e["skill"] for e in pieces], ["pick", "place"])
+                events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+                carry = next(e["frame"] for e in events if e.get("type") == "grasp" and e["grasp"] == "carry")
+                self.assertEqual(pieces[0]["frames"][1], pieces[1]["frames"][0], "the pieces meet")
+                self.assertLessEqual(abs(pieces[1]["frames"][0] - carry), 1, "they meet at the carry")
+                built = table(data.dataset_root(self.s, TASK, data.SKILLS))
+                n = manifest["episodes"].index(pieces[1])
+                np.testing.assert_array_equal(np.stack(built[built["episode_index"] == n][skills.STATE_KEY]).max(axis=0),
+                                              [0.0, 1.0])
+                shutil.rmtree(run_dir)
 
 
-class FakeEngine:
+class FakeLeaf:
+    """The model at the bottom of the stack: notes what it's told and handed; each step drives."""
+
     def __init__(self) -> None:
-        self.tasks: list[str] = []
-
-    def set_task(self, task: str) -> bool:
-        self.tasks.append(task)
-        return True
-
-
-class FakeDriver:
-    def __init__(self) -> None:
-        self.engine = FakeEngine()
+        self.conditions: list[Conditioning] = []
+        self.handbacks: list[Handback] = []
         self.calls: list[str] = []
-        self.raised = self.retrying = self.failure = None
-        self.dataset_features = {"observation.state": {"dtype": "float32", "shape": (6,), "names": NAMES}}
-        self.observation_processor = lambda observation: dict(observation)
+        self.failure: str | None = None
 
-    def __getattr__(self, name):
-        if name in ("start", "stop", "pause", "run", "begin_episode", "end_episode"):
-            return lambda *args: self.calls.append(name)
-        raise AttributeError(name)
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def close(self) -> None: ...
+    def begin_episode(self, number: int) -> None: ...
+    def end_episode(self) -> None: ...
+    def hold(self, robot) -> None: ...
 
-    def asks(self):
-        return None
+    def pause(self) -> None:
+        self.calls.append("pause")
 
-    def maintain(self):
-        return None
+    def run(self, handback: Handback) -> None:
+        self.calls.append("run")
+        self.handbacks.append(handback)
 
-    def step(self, robot, observation):
-        return {"action": 1}
+    def condition(self, conditioning: Conditioning) -> None:
+        self.conditions.append(conditioning)
+
+    def maintain(self) -> list[str]:
+        return []
+
+    def health(self) -> Health:
+        return Health(self.failure)
+
+    def record_failure(self, detail: str) -> None:
+        self.failure = detail
+
+    def step(self, robot, tick: Tick) -> Output:
+        return Output({"shoulder_pan.pos": tick.pose["shoulder_pan.pos"]}, POLICY)
 
 
-class LayerTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.logged: list[dict] = []
-        self.now = 0.0
-        self.driver = FakeDriver()
-        self.layer = SkillPolicy(self.driver, SKILLS, PROGRAM, log=lambda type_, **f: self.logged.append(f),
-                                 clock=lambda: self.now)
-        self.layer.begin_episode(1)
-        self.layer.run()
+class Stack:
+    """Perception and the skill sequencer over a FakeLeaf, stepped by hand as serve steps the stack."""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+        self.now, self.frame = 0.0, -1
+        self.leaf = FakeLeaf()
+        ctx = LayerContext(lambda type_, **fields: self.events.append({"type": type_, **fields}), lambda: self.now, PROGRAM)
+        self.top = stack.build(self.leaf, ctx, skills=SKILLS)
+        self.top.begin_episode(1)
+        self.top.run(Handback(START))
+        self.outputs: list[Output] = []
 
     def feed(self, state: np.ndarray) -> None:
         for row in state:
             self.now += 1 / FPS
-            self.layer.step(None, dict(zip(NAMES, map(float, row), strict=True)))
+            self.frame += 1
+            pose = dict(zip(NAMES, map(float, row), strict=True))
+            self.outputs.append(self.top.step(None, Tick(self.now, self.frame, pose, pose)))
 
-    def test_it_starts_on_the_first_skill_and_switches_once_at_the_handover(self) -> None:
+    def switches(self) -> list[tuple]:
+        return [(e["skill"], e["cause"]) for e in self.events if e["type"] == "skill"]
+
+
+class SequencerTest(unittest.TestCase):
+    def test_it_starts_on_the_first_skill_and_switches_once_at_the_carry(self) -> None:
+        h = Stack()
         state = trace()
         at = skills.events(state, NAMES, FPS, PROGRAM)
-        self.assertEqual(self.driver.engine.tasks, [SKILLS[0].prompt])
-        self.assertEqual(self.layer.values(), {"skill.pick": 1.0, "skill.place": 0.0})
-        self.feed(state[: at["carry"]])
-        self.assertEqual(self.layer.skill.name, "pick")
-        runs = self.driver.calls.count("run")
-        self.feed(state[at["carry"]:])
-        self.assertEqual(self.layer.skill.name, "place")
-        self.assertEqual(self.driver.engine.tasks, [SKILLS[0].prompt, SKILLS[1].prompt])
-        self.assertEqual(self.driver.calls.count("run"), runs + 1, "the switch clears the policy's queue")
-        self.assertEqual(self.layer.values(), {"skill.pick": 0.0, "skill.place": 1.0})
-        self.assertEqual([(e["skill"], e.get("previous"), e["cause"]) for e in self.logged],
-                         [("pick", None, "start"), ("place", "pick", "carry")])
+        h.feed(state[: at["carry"]])
+        self.assertEqual([c.prompt for c in h.leaf.conditions], [SKILLS[0].prompt])
+        self.assertEqual(h.leaf.conditions[0].values(), {"skill.pick": 1.0, "skill.place": 0.0})
+        h.feed(state[at["carry"]:])
+        self.assertEqual([c.prompt for c in h.leaf.conditions], [SKILLS[0].prompt, SKILLS[1].prompt])
+        self.assertEqual(h.leaf.conditions[1].values(), {"skill.pick": 0.0, "skill.place": 1.0})
+        self.assertEqual(h.switches(), [("pick", "start"), ("place", "carry")])
+        skills_seen = [o.skill for o in h.outputs]
+        self.assertEqual(skills_seen[: at["carry"]], [0] * at["carry"], "each Output names the current skill")
+        self.assertEqual(skills_seen[-1], 1)
 
-    def test_a_new_attempt_starts_on_the_first_skill_again(self) -> None:
-        self.feed(trace())
-        self.layer.begin_episode(2)
-        self.assertEqual(self.layer.skill.name, "pick")
-        self.assertEqual(self.driver.engine.tasks[-1], SKILLS[0].prompt)
+    def test_the_perception_logs_every_grasp_for_the_run(self) -> None:
+        h = Stack()
+        h.feed(trace())
+        grasps = [e["grasp"] for e in h.events if e["type"] == "grasp"]
+        self.assertEqual(grasps, ["close", "carry", "release"])
 
-    def test_the_one_hot_reaches_the_frame_lerobot_builds_for_the_policy(self) -> None:
-        from lerobot.utils.feature_utils import build_dataset_frame
+    def test_a_handback_after_the_arm_moved_with_the_jaws_open_goes_back_to_the_first_skill(self) -> None:
+        h = Stack()
+        state = trace()
+        at = skills.events(state, NAMES, FPS, PROGRAM)
+        h.feed(state[: at["carry"] + 10])  # on place now
+        h.top.pause()
+        h.top.run(Handback(LAYER, moved=True))  # a playback undid the grasp: the jaws are open again
+        h.feed(state[at["close"] - 5: at["close"] - 2])  # the reach before the close, jaws open
+        self.assertEqual(h.switches()[-1], ("pick", "reopened"))
+        self.assertEqual(h.leaf.conditions[-1].prompt, SKILLS[0].prompt)
 
-        observation = dict(zip(NAMES, map(float, trace()[0]), strict=True))
-        frame = build_dataset_frame(self.driver.dataset_features, self.driver.observation_processor(observation),
-                                    prefix="observation")
-        np.testing.assert_array_equal(frame[skills.STATE_KEY], [1.0, 0.0])
-        self.feed(trace())
-        frame = build_dataset_frame(self.driver.dataset_features, self.driver.observation_processor(observation),
-                                    prefix="observation")
-        np.testing.assert_array_equal(frame[skills.STATE_KEY], [0.0, 1.0])
+    def test_a_handback_with_the_block_still_held_keeps_the_skill(self) -> None:
+        h = Stack()
+        state = trace()
+        at = skills.events(state, NAMES, FPS, PROGRAM)
+        h.feed(state[: at["carry"] + 10])
+        h.top.pause()
+        h.top.run(Handback(PERSON, moved=True))
+        h.feed(state[at["carry"] + 10: at["carry"] + 15])  # still holding at 18.4
+        self.assertEqual(h.switches(), [("pick", "start"), ("place", "carry")])
+
+    def test_a_playback_that_undoes_the_grasp_sends_the_skill_back_to_pick(self) -> None:
+        """The gap the uniform design closes: the carry switches to place, then the after-close check
+        says the grasp was wrong, and the supervisor plays back to before the close."""
+        from test_supervisor import FakeModel, FakeEscalation, Pool
+
+        events, now = [], [0.0]
+        leaf = FakeLeaf()
+        pool = Pool(now=False)  # the after-close verdict arrives only after the carry has switched skills
+        made = J.Judges(PROGRAM, adapters={"jev": FakeModel({"after_close": 0.95}), "gemini-3.8-flash": FakeModel({}),
+                                           "claude-opus-5.5": FakeEscalation()}, pool=pool)
+        ctx = LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: now[0], PROGRAM)
+        top = stack.build(leaf, ctx, skills=SKILLS, judges=made, mode="act", cameras=("top", "wrist"))
+        top.begin_episode(1)
+        top.run(Handback(START))
+        frame = np.zeros((48, 64, 3), np.uint8)
+        robot = types.SimpleNamespace(goals=[], send_action=lambda goal: robot.goals.append(dict(goal)))
+        state = trace()
+        at = skills.events(state, NAMES, FPS, PROGRAM)
+        pose = None
+        for n, row in enumerate(state[: at["carry"] + 5]):
+            now[0] += 1 / FPS
+            pose = dict(zip(NAMES, map(float, row), strict=True))
+            top.step(robot, Tick(now[0], n, {**pose, "top": frame, "wrist": frame}, pose))
+        self.assertEqual(top.inner.skill.name, "place", "the carry switched to place first")
+        pool.run()  # the after-close check comes back: wrong
+        n = len(state)
+        for _ in range(6 * FPS):  # the playback runs, then the stack has the arm again
+            now[0] += 1 / FPS
+            n += 1
+            pose = robot.goals[-1] if top.doing != "pass" and robot.goals else pose
+            top.maintain()
+            top.step(robot, Tick(now[0], n, {**pose, "top": frame, "wrist": frame}, pose))
+            if top.doing == "pass" and any(e["type"] == "playback" for e in events):
+                break
+        top.step(robot, Tick(now[0] + 1 / FPS, n + 1, {**pose, "top": frame, "wrist": frame}, pose))
+        self.assertEqual([e["type"] for e in events if e["type"] == "playback"], ["playback"])
+        self.assertEqual([(e["skill"], e["cause"]) for e in events if e["type"] == "skill"],
+                         [("pick", "start"), ("place", "carry"), ("pick", "reopened")])
+        self.assertEqual(leaf.conditions[-1].prompt, SKILLS[0].prompt)
+
+
+class EngineConditioningTest(unittest.TestCase):
+    def test_the_model_gets_the_prompt_and_the_one_hot_in_the_frame_it_builds(self) -> None:
+        from fakes import make_engine
+
+        from so_101.policy.engine import EngineDriver
+
+        engine = make_engine([[0.0] * 6] * 10)
+        seen = []
+        get_action = engine.get_action
+        engine.get_action = lambda frame: (seen.append(frame), get_action(frame))[1]
+        driver = EngineDriver(engine, NAMES, dataset_features={
+            "observation.state": {"dtype": "float32", "shape": (6,), "names": NAMES}})
+        robot = types.SimpleNamespace(supports_hold=False, send_action=lambda goal: None)
+        driver.condition(Conditioning(SKILLS[0].prompt, ("pick", "place"), 0))
+        driver.run(Handback(START))
+        pose = dict(zip(NAMES, map(float, trace()[0]), strict=True))
+        driver.step(robot, Tick(0.0, 0, pose, pose))
+        self.assertEqual(engine.task, SKILLS[0].prompt)
+        np.testing.assert_array_equal(seen[-1][skills.STATE_KEY], [1.0, 0.0])
+        driver.condition(Conditioning(SKILLS[1].prompt, ("pick", "place"), 1))
+        driver.step(robot, Tick(0.03, 1, pose, pose))
+        self.assertEqual(engine.task, SKILLS[1].prompt)
+        np.testing.assert_array_equal(seen[-1][skills.STATE_KEY], [0.0, 1.0])
 
 
 class InServeTest(unittest.TestCase):
-    """The layer as serve's policy on the controller's fake arm, recording a run."""
+    """The stack as serve's policy on the controller's fake arm, recording a run."""
 
-    def test_serve_records_the_switch_and_the_engine_gets_the_new_prompt(self) -> None:
+    def test_serve_records_the_switch_and_each_frame_s_skill(self) -> None:
         from test_controller import START_POSE, Rig
 
         # Open the jaws, close them on the block at 18.4, and hold it there.
@@ -295,13 +424,20 @@ class InServeTest(unittest.TestCase):
         actions = [[a[k] for k in START_POSE] for a in opened + closed]
         with tempfile.TemporaryDirectory() as folder:
             rig = Rig(Path(folder) / "run", actions=actions,
-                      wrap=lambda driver, recorder, clock: SkillPolicy(driver, SKILLS, PROGRAM, log=recorder.event, clock=clock))
+                      wrap=lambda driver, recorder, clock: stack.build(driver, LayerContext(recorder.event, clock, PROGRAM),
+                                                                       skills=SKILLS))
             rig.start_policy(ticks=4 * FPS)
             rig.reset("failed")
             rig.close()
             switches = [(e["skill"], e["cause"]) for e in rig.events("skill")]
             self.assertEqual(switches, [("pick", "start"), ("place", "carry")])
             self.assertEqual(rig.engine.task, SKILLS[1].prompt)
+            self.assertEqual([e["grasp"] for e in rig.events("grasp")][:2], ["close", "carry"])
+            rows = table(rig.run_dir / "dataset").sort_values("frame_index")
+            skill = np.ravel(np.stack(rows["control.skill"]))
+            switch = next(e for e in rig.events("skill") if e["cause"] == "carry")["frame"]
+            self.assertTrue((skill[switch:][np.ravel(np.stack(rows["control.phase"]))[switch:] == 1] == 1).all())
+            self.assertTrue((skill[: switch - 1] <= 0).all())
 
 
 class CommandTest(unittest.TestCase):

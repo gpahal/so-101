@@ -5,6 +5,7 @@ sees, the status, command results and the files a run writes.
 """
 
 import contextlib
+import dataclasses
 import errno
 import io
 import itertools
@@ -24,7 +25,8 @@ from so_101 import rollout
 from so_101.control.commands import Result
 from so_101.control.controller import Controller
 from so_101.control.follower import pose_from_steps
-from so_101.control.policy import EngineDriver
+from so_101.policy.base import OTHER, POLICY, WAITING, Layer, LayerContext
+from so_101.policy.engine import EngineDriver
 from so_101.control.recorder import Phase, Recorder
 from so_101.control.terminal import KeyReader
 from so_101.data import Run
@@ -1403,35 +1405,38 @@ class ArmsTest(RigTest):
 
 
 
-class Asking:
-    """A layer over the driver, as the supervisor's is: it asks for a person on its `ask_at`th step, and
-    notes each episode it hears of."""
+class Asking(Layer):
+    """A layer over the driver: it asks for a person on its `ask_at`th step, says skill 1 from then on,
+    and notes each episode and handback it hears of."""
 
     def __init__(self, inner, ask_at: int) -> None:
-        self.inner, self.ask_at, self.steps, self.heard, self._asking = inner, ask_at, 0, [], None
-
-    def __getattr__(self, name):
-        return getattr(self.inner, name)
+        super().__init__(inner, LayerContext(lambda *args, **fields: None, lambda: 0.0, None), "asking")
+        self.ask_at, self.steps, self.heard, self.handbacks = ask_at, 0, [], []
 
     def begin_episode(self, number: int) -> None:
         self.heard.append(("begin", number))
+        self.inner.begin_episode(number)
 
     def end_episode(self) -> None:
         self.heard.append(("end",))
+        self.inner.end_episode()
 
-    def step(self, robot, observation):
+    def run(self, handback) -> None:
+        self.handbacks.append(handback)
+        self.inner.run(handback)
+
+    def step(self, robot, tick):
         self.steps += 1
+        out = self.inner.step(robot, tick)
+        if self.steps >= self.ask_at:
+            out = dataclasses.replace(out, skill=1)
         if self.steps == self.ask_at:
-            self._asking = "stuck: a person should look"
-        return self.inner.step(robot, observation)
-
-    def asks(self):
-        asking, self._asking = self._asking, None
-        return asking
+            out = dataclasses.replace(out, asks="stuck: a person should look")
+        return out
 
 
-class PolicyLayerTest(unittest.TestCase):
-    """What a layer over the policy, such as the supervisor's, gets from the controller."""
+class PolicyStackTest(unittest.TestCase):
+    """What the policy stack gets from the controller, and what the controller records from it."""
 
     def test_a_policy_that_asks_for_a_person_is_paused_like_a_lost_link(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -1450,13 +1455,41 @@ class PolicyLayerTest(unittest.TestCase):
             rig.close()
             self.assertEqual(rig.driver.heard, [("begin", 1), ("end",)])
 
-    def test_the_policy_is_asked_only_while_it_drives(self) -> None:
-        rig = Rig(wrap=lambda driver, recorder, clock: Asking(driver, ask_at=1))
-        rig.driver._asking = "too early"  # set before the policy drives: Starting never takes it
+    def test_each_handback_says_why_and_whether_the_arm_moved(self) -> None:
+        rig = Rig(wrap=lambda driver, recorder, clock: Asking(driver, ask_at=10**6))
+        rig.start_policy(ticks=5)
+        rig.command("pause")
         rig.command("resume")
         rig.tick_until("autonomous")
-        rig.tick()
-        self.assertEqual(rig.status()["state"], "paused", "asked on the first step it drove")
+        rig.teleop(0.5)
+        rig.command("resume")
+        rig.tick_until("autonomous")
+        self.assertEqual([(h.why, h.moved) for h in rig.driver.handbacks],
+                         [("start", False), ("person", False), ("person", True)])
+
+    def test_each_frame_records_the_skill_and_who_drove(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            rig = Rig(Path(folder) / "run", wrap=lambda driver, recorder, clock: Asking(driver, ask_at=5))
+            rig.start_policy(ticks=10)  # asks on its 5th step, saying skill 1 from then on
+            rig.tick(5)  # paused: the skill it was on is kept
+            rig.reset("failed")
+            rig.close()
+            [ep] = table_of(rig.run_dir).groupby("episode_index")
+            rows = ep[1].sort_values("frame_index")
+            phases = np.ravel(np.stack(rows["control.phase"]))
+            skills = np.ravel(np.stack(rows["control.skill"]))
+            drivers = np.ravel(np.stack(rows["control.driver"]))
+            autonomous = phases == Phase.AUTONOMOUS
+            self.assertTrue(set(drivers[autonomous]) <= {POLICY, WAITING})
+            self.assertTrue((drivers[~autonomous] == OTHER).all())
+            first_paused = int(np.argmax(phases == Phase.PAUSED))
+            self.assertEqual(skills[first_paused - 1], 1, "the step that asked said skill 1")
+            self.assertTrue((skills[first_paused:][phases[first_paused:] == Phase.PAUSED] == 1).all())
+            self.assertEqual(skills[0], -1, "no skill before the stack said one")
+
+
+def table_of(run_dir: Path) -> pd.DataFrame:
+    return pd.concat(pd.read_parquet(f) for f in sorted((run_dir / "dataset").glob("data/*/*.parquet")))
 
 
 if __name__ == "__main__":

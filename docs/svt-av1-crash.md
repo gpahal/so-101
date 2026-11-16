@@ -49,7 +49,7 @@ LeRobot encodes each camera's video with SVT-AV1, through PyAV, on one encoder t
   - `loaded()` asks dyld whether the library is in the process (`RTLD_NOLOAD`) and whether it came in through the variable, since only an inserted library's interposing takes effect.
 - **Where it's called.**
   - `cli.main` calls `ensure()` for `record`, `run`, `serve`, `build` and `train`, before the stderr filter starts its thread.
-  - `so101-control` and `so101-rollout` call `ensure()` then `require()`. `run_build` calls `require()`.
+  - `so101-control` calls `ensure()` then `require()`. `run_build` calls `require()`.
   - The preflight checks of `record`, its dry run, `run` and `serve` fail unless it's loaded, through `check.check_video`.
   - `tests/fakes.py` calls `ensure()`, so the recorder and build tests run with it.
 - **Why it can load at all.** uv's Python (`cpython-3.13.14`) is ad-hoc signed without the hardened runtime (`codesign -dv`: `flags=0x20002(adhoc,linker-signed)`), so dyld honours `DYLD_INSERT_LIBRARIES`. A hardened-runtime Python would ignore it, and the checks would then fail rather than run unprotected.

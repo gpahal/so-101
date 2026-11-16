@@ -241,7 +241,7 @@ class ControlShutdown(unittest.TestCase):
         from test_controller import POLICY_ACTIONS, REST_STEPS
 
         from so_101.control import main
-        from so_101.control.policy import EngineDriver
+        from so_101.policy.engine import EngineDriver
         from so_101.control.server import Bind
 
         order, robot, test = self.order, self.robot, self

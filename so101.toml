@@ -116,10 +116,10 @@ dir = "data"
 
 # `uv run so101 run <task>`: run a task's policy from tasks.toml on the follower.
 [run]
-# How many attempts each `so101 run` makes. Every run records to outputs/rollouts/.
+# How many attempts each `so101 run` makes: its autopilot starts each one, ends it at [control]
+# attempt_limit_s of policy time (or `--duration`), and resets between them. Runs record to
+# data/<task>/runs/, as serve's do.
 episodes = 1
-# Seconds per attempt. 0 runs until Esc or Ctrl+C.
-duration_s = 30
 # Torch device for the policy, here and when training locally: "mps" (Apple GPU), "cpu" or "cuda".
 device = "mps"
 
@@ -249,6 +249,9 @@ link_timeout_s = 3
 bind = "tailscale"
 # The control page's port: `serve` serves the page at http://<address>:<port>/.
 port = 8101
+# The reviewer's port: `review` and `review --runs` serve their page at http://<address>:<review_port>/,
+# where `bind` above says, so you can review while `serve` runs. It must differ from port.
+review_port = 8766
 # Frames per second of each camera preview on the page, 320 px wide. Enough to see what the robot
 # sees, at a sixth of the cameras' 30 fps, so previews over Tailscale stay light on a phone. When
 # the control loop falls under 95% of the task's fps, previews drop to half this rate, then stop.

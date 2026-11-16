@@ -11,7 +11,6 @@ from so_101.failbench import dataset, metrics, models, runner
 
 DATASET = Path("outputs/failbench/dataset")
 RUNS = Path("outputs/failbench/runs")
-ROLLOUTS = Path("outputs/rollouts")
 SERVE_RUNS = Path("data/block-container/runs")
 CANDIDATES = Path("outputs/failbench/candidates.csv")
 ENV_FILE = Path(".scratch/bench.env")
@@ -57,7 +56,7 @@ def available(ms: list[models.Model], log=print) -> list[models.Model]:
 
 
 def cmd_build(a) -> None:
-    n = dataset.build(Path(a.dataset), [Path(a.rollouts), Path(a.runs)], Path(a.labels))
+    n = dataset.build(Path(a.dataset), [Path(a.runs)], Path(a.labels))
     samples = dataset.load(Path(a.dataset))
     wrong = sum(s.wrong for s in samples)
     print(f"Built {n} samples in {a.dataset}: {wrong} wrong, {n - wrong} ok.")
@@ -163,13 +162,12 @@ def main(argv=None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build", help="decode the labelled frames from the recordings into the dataset folder")
-    b.add_argument("--rollouts", default=str(ROLLOUTS), help="so101 run recordings (default %(default)s)")
-    b.add_argument("--runs", default=str(SERVE_RUNS), help="so101 serve runs (default %(default)s)")
+    b.add_argument("--runs", default=str(SERVE_RUNS), help="so101 serve and run runs (default %(default)s)")
     b.add_argument("--labels", default=str(dataset.LABELS), help="the labels file (default: the one in the package)")
     b.set_defaults(fn=cmd_build)
 
     cd = sub.add_parser("candidates", help="pick frames to label from so101 serve runs, where the supervisor would check")
-    cd.add_argument("--runs", default=str(SERVE_RUNS), help="so101 serve runs (default %(default)s)")
+    cd.add_argument("--runs", default=str(SERVE_RUNS), help="so101 serve and run runs (default %(default)s)")
     cd.add_argument("--program", help="the supervisor's program file (default: the one in the package)")
     cd.add_argument("--out", default=str(CANDIDATES), help="where to write the rows (default %(default)s)")
     cd.set_defaults(fn=cmd_candidates)

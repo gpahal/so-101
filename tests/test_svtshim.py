@@ -76,7 +76,6 @@ class LoadedTest(unittest.TestCase):
 # The subprocess calls that start this venv's Python, which should inherit the fix: (file, function).
 PYTHON_CHILDREN = {
     ("console.py", "run_lerobot"),
-    ("review.py", "view"),
     ("dryrun.py", "smoke_train"),
     ("svtshim.py", "ensure"),
 }

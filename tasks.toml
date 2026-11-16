@@ -20,7 +20,7 @@
 #   cameras         Your cameras to record, named as in so101.toml (default: ["top", "wrist"]).
 #   props, setup    What to put on the table and where the cameras go.
 #   [<task>.skills] Optional: the task's parts, for one model trained on all of them (docs/skills.md).
-#                   `so101 skills` checks the cuts; `train --skills` and `serve --skills` use them.
+#                   `so101 skills` checks the cuts; `train --skills`, `serve --skills` and `run --skills` use them.
 # Copy a task's section and change the name, prompt and props to add another task.
 
 # The task every `so101` command uses when you don't name one.

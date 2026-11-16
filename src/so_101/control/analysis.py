@@ -22,8 +22,9 @@ the `rewind` event's.
 - **Segments:** each run of one `control.phase` in an attempt, with who drove: the policy
   (Autonomous), a human (Teleop), or the script (Starting, Paused, Handover, Rewinding, Returning,
   in which the controller moves or holds the arm itself).
-- **Waiting frames:** Autonomous frames whose `control.policy_action` is all NaN: the policy sent no
-  action that tick, as while a cloud GPU's next chunk is late. They are script time, not policy
+- **Waiting frames:** Autonomous frames the model didn't drive: `control.driver` WAITING (it sent no
+  action that tick, as while a cloud GPU's next chunk is late), PLAYBACK or HOLD (a layer of the policy
+  stack drove), or, in a run recorded before that column, `control.policy_action` all NaN. They are script time, not policy
   time, in no training cut, count toward no blame window, and the policy hasn't started driving
   until its first action. A Teleop frame with no leader pose (`control.leader` all NaN, the tick the
   leader was lost) is in no cut either.
@@ -40,8 +41,8 @@ the `rewind` event's.
   undid. Otherwise they are the last `blame_s` seconds of policy frames before it, counting back
   through pauses and waiting frames but not through anything else. The frames any other rewind
   undid, such as one from Teleop or after a lost link, are suspect too, and so are the frames each of
-  the supervisor's playbacks undid (its `supervisor` events of kind `rewind`). The playback's own
-  frames are waiting frames: the policy sent no action.
+  any layer's playbacks undid (`playback` events, from the policy stack). The playback's own
+  frames are waiting frames: `control.driver` says a layer drove, not the model.
 - **Corrections:** the Teleop segments after the policy had driven in the attempt (sent its first
   action), a human stepping in on the policy. Only their frames are interventions
   (`intervention_mask`). Teleop before the policy first drove, as in a human attempt, corrects no
@@ -79,6 +80,7 @@ import numpy as np
 
 from so_101.control.recorder import OUTCOMES, Phase
 from so_101.control.states import STEP_INS, Event
+from so_101.policy.base import HOLD, PLAYBACK, WAITING
 from so_101.data import LABELS_FILE, Run, whole
 from so_101.settings import ConfigError, replace_file
 UNLABELLED = "unlabelled"
@@ -197,6 +199,7 @@ class Attempt:
     # Per frame: an Autonomous frame where the policy sent no action, and a Teleop frame with no leader pose.
     waiting: np.ndarray = field(repr=False, compare=False)
     leaderless: np.ndarray = field(repr=False, compare=False)
+    skills: np.ndarray = field(repr=False, compare=False)  # control.skill per frame, -1 without one
     segments: tuple[Segment, ...]
     interruptions: tuple[Interruption, ...]
     rewinds: tuple[Range, ...]
@@ -420,16 +423,19 @@ def read_events(run: Run) -> list[dict]:
     return events
 
 
-def read_data(root: Path, columns: list[str]) -> tuple["pd.DataFrame | None", list[tuple[Path, str]]]:
-    """`columns` of every Parquet file of the dataset at `root`, and the files that couldn't be read,
-    each with why. Each file is read on its own, so one a hard kill left without its footer costs
-    only its own episodes. The table is None when no file could be read."""
+def read_data(root: Path, columns: list[str], optional: tuple[str, ...] = ()) -> tuple["pd.DataFrame | None", list[tuple[Path, str]]]:
+    """`columns` of every Parquet file of the dataset at `root`, plus each of `optional` the file has
+    (a column added after older runs were recorded), and the files that couldn't be read, each with
+    why. Each file is read on its own, so one a hard kill left without its footer costs only its own
+    episodes. The table is None when no file could be read."""
     import pandas as pd
+    import pyarrow.parquet as pq
 
     tables, skipped = [], []
     for f in sorted(Path(root).glob("data/*/*.parquet")):
         try:
-            tables.append(pd.read_parquet(f, columns=columns))
+            names = set(pq.read_schema(f).names) if optional else set()
+            tables.append(pd.read_parquet(f, columns=[*columns, *(c for c in optional if c in names)]))
         except Exception as e:  # pyarrow raises several types for a cut-off or malformed file
             reason = (str(e).strip().splitlines() or [""])[0]
             skipped.append((f, f"{e.__class__.__name__}: {reason}" if reason else e.__class__.__name__))
@@ -441,8 +447,18 @@ class Frames:
     """One episode's columns, in frame order."""
 
     phases: np.ndarray  # control.phase
-    waiting: np.ndarray  # an Autonomous frame whose control.policy_action is all NaN
+    # An Autonomous frame the model didn't drive: control.driver WAITING, PLAYBACK or HOLD, or, in a run
+    # recorded before that column, a control.policy_action that is all NaN.
+    waiting: np.ndarray
     leaderless: np.ndarray  # a Teleop frame whose control.leader is all NaN
+    skills: np.ndarray  # control.skill: the skill's index in run.json's policy.skills, -1 without one or the column
+
+
+def _ints(rows, name: str) -> np.ndarray | None:
+    """A one-value int column as an array, or None in a run recorded before it existed."""
+    if name not in rows or rows[name].isna().any():
+        return None
+    return np.array([int(np.ravel(v)[0]) for v in rows[name]], dtype=np.int8)
 
 
 def _no_values(column) -> np.ndarray:
@@ -468,15 +484,20 @@ def read_run(run: Run) -> RunRecord:
     if (info := run.info()) is None:
         return RunRecord(run, events, None, {}, ())
     table, skipped = read_data(run.dataset_root, ["episode_index", "frame_index", "control.phase",
-                                                  "control.policy_action", "control.leader"])
+                                                  "control.policy_action", "control.leader"],
+                               optional=("control.driver", "control.skill"))
     episodes = {}
     for episode, rows in () if table is None else table.groupby("episode_index"):
         rows = rows.sort_values("frame_index")
         phases = np.array([int(np.ravel(p)[0]) for p in rows["control.phase"]], dtype=np.int8)
+        driver = _ints(rows, "control.driver")
+        idle = np.isin(driver, (WAITING, PLAYBACK, HOLD)) if driver is not None else _no_values(rows["control.policy_action"])
+        skills = _ints(rows, "control.skill")
         episodes[int(episode)] = Frames(
             phases,
-            (phases == Phase.AUTONOMOUS) & _no_values(rows["control.policy_action"]),
+            (phases == Phase.AUTONOMOUS) & idle,
             (phases == Phase.TELEOP) & _no_values(rows["control.leader"]),
+            skills if skills is not None else np.full(len(phases), -1, dtype=np.int8),
         )
     return RunRecord(run, events, float(info["fps"]), episodes, tuple(skipped))
 
@@ -535,7 +556,8 @@ def analyse_record(record: RunRecord, labels: Labels, blame_s: float) -> RunAnal
             notes.append(f"attempt {number}'s episode {episode} isn't in the dataset")
             episode = None
         if frames is None:
-            frames = Frames(np.zeros(0, dtype=np.int8), np.zeros(0, dtype=bool), np.zeros(0, dtype=bool))
+            frames = Frames(np.zeros(0, dtype=np.int8), np.zeros(0, dtype=bool), np.zeros(0, dtype=bool),
+                            np.zeros(0, dtype=np.int8))
         if episode is not None and (dropped := (end or {}).get("dropped_frames")):
             counts = ", ".join(f"{camera} {n}" for camera, n in dropped.items())
             notes.append(f"attempt {number} dropped video frames when it was recorded ({counts}), so its video and "
@@ -558,7 +580,7 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
     segments = segments_of(phases)
     starts = {s.start: i for i, s in enumerate(segments)}
     rewinds = [e for e in events if e["type"] == "rewind" and "start_frame" in e]
-    playbacks = [e for e in events if e["type"] == "supervisor" and e.get("kind") == "rewind" and "start_frame" in e]
+    playbacks = [e for e in events if e["type"] == "playback" and "start_frame" in e]
     states = [e for e in events if e["type"] == "state" and e.get("previous") == "autonomous"]
     reasons = [e for e in events if e["type"] == "label"]
 
@@ -633,7 +655,7 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
 
     return Attempt(
         number=number, episode=episode, ended_by=end.get("ended_by") if end else None,
-        recorded_outcome=recorded, outcome=outcome, phases=phases, waiting=frames.waiting,
+        recorded_outcome=recorded, outcome=outcome, phases=phases, waiting=frames.waiting, skills=frames.skills,
         leaderless=frames.leaderless, segments=segments,
         interruptions=tuple(interruptions),
         rewinds=tuple((e["start_frame"], e["end_frame"]) for e in rewinds + playbacks),

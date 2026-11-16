@@ -18,6 +18,13 @@ started, on the control loop's clock) and `wall` (Unix time). During an attempt 
 be recorded. A `state` event's `frame` is the first frame recorded in the new state, so events line
 up with the `control.phase` column. No other field can replace these.
 
+Besides the robot's columns, each frame has `intervention`, `control.phase`, `control.policy_action`
+(NaN when the model's action didn't reach the arm), `control.leader` (NaN when the leader wasn't read),
+`control.skill` (the index, in `run.json`'s `policy.skills`, of the skill the model was conditioned on;
+-1 without skills; a playback, a hold or a person's Teleop keeps the skill they interrupted) and
+`control.driver` (`policy.base`'s OTHER, POLICY, WAITING, PLAYBACK or HOLD: who drove in Autonomous;
+OTHER in every other phase, where `control.phase` already says).
+
     attempt_start  attempt
     command        command, accepted, reason (None when accepted), its options (outcome, label, for_attempt),
                    source (terminal, page or signal), who (a page's caller, for page commands
@@ -59,13 +66,20 @@ up with the `control.phase` column. No other field can replace these.
     recording_failed  error: saving or finishing an attempt's file failed (its attempt_end says saved
                    false), or the dataset couldn't be reopened after a saved attempt. Either way no new
                    attempt can be recorded in this run
-    supervisor     what the supervisor's layer saw, asked and did (`supervisor.layer`): kind (start, attempt,
-                   close, carry, regrasp, release, rule, check, decision, rewind, escalation, attempt_end
-                   or error), mode (shadow or act), for_attempt (the attempt it's about, which a late
-                   check's event may name after the next attempt opened) and policy_t, then the kind's
-                   own fields. A decision has acted (false in shadow mode, or while serve has the arm). A
-                   rewind is one of its playbacks, with the `rewind` event's start_frame, end_frame,
-                   seconds, cause, farthest and gap
+    grasp          the perception's (`policy.perception`): grasp (close, carry, regrasp or release),
+                   policy_t (seconds the model had driven), and the detector's fields (gripper, close,
+                   regrasps, elbow_travel, held_at); name for a carry: how it was seen (hold or elbow)
+    rule           the perception's: name (a stuck rule), policy_t, progress, closes, regrasps
+    skill          the skill sequencer's (`policy.skills`): skill, index, cause (start, the handover
+                   event, or reopened after a handback with the gripper open) and previous
+    playback       a layer's playback of the model's motion: layer, and the `rewind` event's start_frame,
+                   end_frame, seconds, cause, farthest and gap
+    supervisor     what the supervisor saw, asked and did (`supervisor.layer`): kind (start, attempt,
+                   check, decision, escalation, attempt_end or error), mode (shadow or act), for_attempt
+                   (the attempt it's about, which a late check's event may name after the next attempt
+                   opened) and policy_t, then the kind's own fields. A decision has acted (false in
+                   shadow mode, or while the stack doesn't have the arm)
+    <layer>        kind error: a layer's own error, after which it passes everything through
     run_end        the last event of a run that ended with a quit: finished (local time,
                    YYYY-mm-ddTHH:MM:SS), attempts (opened) and episodes (saved)
 
@@ -164,6 +178,8 @@ def features(robot) -> dict[str, dict]:
         "control.phase": {"dtype": "int8", "shape": (1,), "names": None},
         "control.policy_action": {"dtype": "float32", "shape": (len(joints),), "names": joints},
         "control.leader": {"dtype": "float32", "shape": (len(joints),), "names": joints},
+        "control.skill": {"dtype": "int8", "shape": (1,), "names": None},
+        "control.driver": {"dtype": "int8", "shape": (1,), "names": None},
     }
 
 
@@ -247,6 +263,8 @@ class Recorder:
         intervention: bool = False,
         policy_action: dict[str, float] | None = None,
         leader: dict[str, float] | None = None,
+        skill: int = -1,
+        driver: int = 0,
     ) -> None:
         """One frame of the open attempt. `action` is the goal sent this tick, after the step cap.
         `intervention` is set in Teleop once the policy has driven in the attempt (an action of its
@@ -266,6 +284,8 @@ class Recorder:
             "control.phase": np.array([phase], dtype=np.int8),
             "control.policy_action": self._joints(policy_action),
             "control.leader": self._joints(leader),
+            "control.skill": np.array([skill], dtype=np.int8),
+            "control.driver": np.array([driver], dtype=np.int8),
             "task": self.task,
         }
         self.dataset.add_frame(frame)

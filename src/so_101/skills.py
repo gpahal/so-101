@@ -24,15 +24,12 @@ sides of the switch.
 prompt as LeRobot's `task` (for policies that read text, such as pi0.5) and the skill as a one-hot
 `observation.environment_state` (for ACT, which takes no text but reads an environment state).
 
-`SkillPolicy` runs a skills model in `so101 serve`: a layer over the policy driver with the driver's
-methods, like the supervisor's. It starts each attempt on the first skill and switches at each handover:
-the new prompt (`set_task`), the new one-hot, and the policy's queue cleared, so no action of the last
-skill reaches the arm after the switch.
+`policy.skills.SkillSequencer` runs a skills model: a layer of the policy stack that starts each attempt
+on the first skill and switches at each handover, conditioning the model on the next skill's prompt and
+one-hot. The recording writes the skill on each frame as control.skill (`policy-layers.md`).
 """
 
 import re
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -215,110 +212,3 @@ def cut_demos(s, task, program) -> tuple[list[DemoCuts], list[str]]:
         except SkillError as error:
             out.append(DemoCuts(p, None, None, str(error)))
     return out, notes
-
-
-# --- Running a skills model ------------------------------------------------------------------------
-
-
-class SkillPolicy:
-    def __init__(self, inner, skills: tuple[Skill, ...], program, *, log: Callable,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        """`inner` is the policy driver it wraps; `log(type, **fields)` writes an event (the recorder's)."""
-        from so_101.supervisor.detector import Detector
-
-        self.inner, self.skills, self.program = inner, skills, program
-        self._log, self.clock = log, clock
-        self._detector_type = Detector
-        self.detector = Detector(program)
-        self.current = 0
-        self._resumed = False
-        # A local engine builds the policy's frame from the driver's features and processed observation
-        # (`EngineDriver.step`): add the one-hot to both, so ACT reads which skill it's on. A remote
-        # engine builds its frame from its own features, and pi0.5 reads the prompt instead.
-        feature = state_feature(skills)
-        if hasattr(inner, "dataset_features"):
-            inner.dataset_features = {**inner.dataset_features, STATE_KEY: feature}
-        if hasattr(inner, "observation_processor"):
-            process = inner.observation_processor
-            inner.observation_processor = lambda observation: {**process(observation), **self.values()}
-
-    @property
-    def skill(self) -> Skill:
-        return self.skills[self.current]
-
-    def values(self) -> dict[str, float]:
-        """The one-hot, keyed as `state_feature` names it."""
-        return {f"skill.{s.name}": float(n == self.current) for n, s in enumerate(self.skills)}
-
-    def _set_task(self) -> None:
-        engine = getattr(self.inner, "engine", None)
-        if engine is not None and hasattr(engine, "set_task"):
-            engine.set_task(self.skill.prompt)
-
-    # --- The driver's interface ---------------------------------------------------------------------
-
-    def start(self) -> None:
-        self.inner.start()
-
-    def stop(self) -> None:
-        self.inner.stop()
-
-    def maintain(self) -> str | None:
-        return self.inner.maintain()
-
-    def asks(self) -> str | None:
-        return self.inner.asks()
-
-    def begin_episode(self, number: int) -> None:
-        self.current, self._resumed = 0, False
-        self.detector = self._detector_type(self.program)
-        self.inner.begin_episode(number)
-        self._set_task()
-        self._log("skill", skill=self.skill.name, cause="start")
-
-    def end_episode(self) -> None:
-        self.inner.end_episode()
-
-    def pause(self) -> None:
-        self.inner.pause()
-
-    def run(self) -> None:
-        self.inner.run()
-        self._resumed = True
-
-    def hold(self, robot) -> None:
-        self.inner.hold(robot)
-
-    @property
-    def failure(self) -> str | None:
-        return self.inner.failure
-
-    @property
-    def raised(self) -> str | None:
-        return self.inner.raised
-
-    @raised.setter
-    def raised(self, value: str | None) -> None:
-        self.inner.raised = value
-
-    @property
-    def retrying(self) -> str | None:
-        return self.inner.retrying
-
-    def step(self, robot, observation: dict) -> dict | None:
-        """The current skill's action, then the detector on this tick's pose: at the next skill's
-        handover, switch. The switch takes effect from the next tick's inference."""
-        action = self.inner.step(robot, observation)
-        if self._resumed:  # something else held or moved the arm since the last tick: restart the timers
-            self.detector.resumed()
-            self._resumed = False
-        pose = {k: float(v) for k, v in observation.items() if k.endswith(".pos")}
-        nxt = self.current + 1
-        for signal in self.detector.step(self.clock(), pose, action is not None):
-            if nxt < len(self.skills) and signal.kind == self.skills[nxt].handover:
-                previous, self.current = self.skill.name, nxt
-                self._set_task()
-                self.inner.run()  # a clean slate: no queued action of the last skill reaches the arm
-                self._log("skill", skill=self.skill.name, previous=previous, cause=signal.kind)
-                break
-        return action
