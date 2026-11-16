@@ -75,7 +75,8 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
   `rule` event when a stuck rule fires. After a handback, on the next tick it feeds, it calls
   `Detector.resumed(moved, pose)`: the detector's timers start again, and after a move with the jaws open
   it forgets the open close, the carry and the release, so a close a playback undid is no regrasp and a
-  second grasp is seen in full. The detector (`grasp/detector.py`) counts hover and frozen time only on
+  second grasp is seen in full; forgetting a carry or release also gives `no_carry` its full 14 s of
+  driving again, from the handback, since the time spent carrying was never counted. The detector (`grasp/detector.py`) counts hover and frozen time only on
   ticks the model's action reached the arm.
 - **`SkillSequencer`** (`policy/skills.py`): starts each attempt on the first skill; at the next skill's
   handover signal it conditions the model on that skill and logs a `skill` event. Deciding to switch runs

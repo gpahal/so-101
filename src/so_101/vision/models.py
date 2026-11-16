@@ -41,9 +41,10 @@ class Model:
     def has_key(self) -> bool:
         return bool(os.environ.get(self.env))
 
-    def adapter(self):
+    def adapter(self, timeout_s: float | None = None):
+        """This model's adapter: with failbench's long request timeout, or `timeout_s` (the supervisor's)."""
         from so_101.vision import providers
-        return providers.adapter_for(self)
+        return providers.adapter_for(self, timeout_s)
 
     def cost(self, tokens_in: int | None, tokens_out: int | None) -> float:
         return ((tokens_in or 0) * self.price_in + (tokens_out or 0) * self.price_out) / 1e6

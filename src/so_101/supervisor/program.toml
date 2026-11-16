@@ -7,7 +7,7 @@
 # (docs/supervisor.md), and scored on the same attempts. Those recordings are deleted, and the policies
 # trained on the new demos fail in their own ways: refit every number on new serve runs before trusting it.
 # The time limits below are unmeasured: no judge has answered from the arm yet.
-version = 4
+version = 5
 
 [timing]
 after_close_s = 1.0        # the event check looks this long after a close
@@ -30,7 +30,10 @@ escalation = "claude-opus-5.5"    # reads the attempt's closes and log when the 
 sure_ok_below = 0.2               # p_wrong under this is a sure ok
 sure_wrong_above = 0.8            # and over this a sure wrong
 success_p_wrong = 0.1             # after a release, the task counts as done only when both judges answer under this
-answer_within_s = 5.0             # a judge that hasn't answered a check by then counts as no answer
+# A judge that hasn't answered a check by then counts as no answer. It is also each judge's request
+# timeout (failbench's is 180 s): the layer no longer waits after it, so a longer request would only keep
+# a worker busy and bill for an answer nothing acts on, and a slow provider would fill the pool.
+answer_within_s = 5.0
 max_cost_usd = 2.0                # per run; the checks stop once the run has spent this
 
 [responses]

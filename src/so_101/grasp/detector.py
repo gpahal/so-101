@@ -9,7 +9,8 @@ clock, but counts toward neither the hover and frozen rules nor the policy's dri
 with whether the arm may have moved meanwhile and where it is now: the speed window and the rules'
 running timers start again, because the pose jumped. After a move with the jaws open, whatever was
 closed, carried or released is undone (a playback opened the jaws, or a person put the block back), so
-the next close starts a new grasp and nothing is inferred across the gap.
+the next close starts a new grasp and nothing is inferred across the gap. When that undid a carry or
+release, `no_carry` counts the policy's driving time from the handback, as from a new start.
 
 The signals, in the order they can happen in one attempt:
 - `close`: the gripper fell below `closed_below`.
@@ -46,6 +47,7 @@ class Detector:
         self.closes = self.regrasps = 0
         self.carried = self.released = False
         self.policy_s = 0.0  # seconds the policy's action reached the arm
+        self._no_carry_from = 0.0  # policy_s when no_carry began counting: 0, or a handback that undid a carry
         self._start: dict[str, float] | None = None  # the attempt's first pose
         self._last_t: float | None = None
         self._last_g: float | None = None
@@ -64,7 +66,13 @@ class Detector:
         """The policy drives again after something else held the arm, or moved it (`moved`), leaving
         it at `pose`. With the jaws open after a move, the open close, the carry and the release are
         forgotten, and the gripper's last reading is this one, so reopened jaws aren't a regrasp. With
-        them closed, the last reading stays the policy's: jaws a person closed count as a close."""
+        them closed, the last reading stays the policy's: jaws a person closed count as a close.
+
+        Forgetting a carry or a release also starts `no_carry` again, from the policy's driving time now:
+        the block is back to be picked, as at the attempt's start, and the time before the handback was
+        spent carrying, which the rule never counted, so it would otherwise fire on the first tick. A
+        handback that undid only a close (a playback of a miss) leaves it counting from the start, or a
+        policy that keeps missing would never trip it."""
         self._last_t = None
         self._window.clear()
         self._crossings.clear()
@@ -72,6 +80,8 @@ class Detector:
         self._hover_s = self._frozen_s = 0.0
         g = pose[GRIPPER]
         if moved and g >= self.p.gripper.closed_below:
+            if self.carried or self.released:
+                self._no_carry_from = self.policy_s
             self.carried = self.released = False
             self._close = self._carry_hold = None
             self._last_g = g
@@ -179,7 +189,7 @@ class Detector:
                 "hover": self._hover_s / r.hover_s,
                 "chatter": len(self._crossings) / r.chatter_crossings,
                 "frozen": self._frozen_s / r.frozen_s,
-                "no_carry": self.policy_s / r.no_carry_s,
+                "no_carry": (self.policy_s - self._no_carry_from) / r.no_carry_s,
             }
         return {name: value for name, value in values.items() if name not in self.fired}
 

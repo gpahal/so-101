@@ -15,7 +15,9 @@ Every call is counted against the program's `max_cost_usd`; once a run has spent
 with an error instead of calling. Nothing here raises: a failed call is a verdict with `error` set.
 
 The calls run on `DaemonPool`'s threads, so a call that hangs never keeps the process from exiting, and
-closing the pool cancels the calls still queued.
+closing the pool cancels the calls still queued. Each judge's request times out at `answer_within_s`,
+when the layer stops waiting for it, so a slow provider frees its worker rather than keep it for
+failbench's 180 s, and the layer cancels a settled check's calls that haven't started.
 """
 
 import queue
@@ -198,8 +200,10 @@ class Judges:
     def __init__(self, program: Program, *, adapters=None, pool=None) -> None:
         """`adapters` maps a model key to an object with the shared adapters' `predict(images, moment)` (and,
         for the escalation model, `escalate(sheet, log)`), for tests; without it, `so_101.vision`'s own
-        adapters, which `so101-failbench` scores too, are made for the models whose key and SDK are there. `pool` runs the calls: a `DaemonPool` by default, with
-        a worker for every call one attempt can have out at once and spares for calls that hang."""
+        adapters, which `so101-failbench` scores too, are made for the models whose key and SDK are there,
+        with a request timeout of `answer_within_s` rather than failbench's 180 s. `pool` runs the calls: a
+        `DaemonPool` by default, with a worker for every call one attempt can have out at once and spares
+        for calls that hang."""
         from so_101.vision.models import MODELS
 
         self.p = program
@@ -219,8 +223,8 @@ class Judges:
             if key == self.p.judges.escalation:
                 adapters[key] = None  # called through `escalate`, which makes its own client
                 continue
-            try:
-                adapters[key] = model.adapter()
+            try:  # the layer stops waiting at answer_within_s, so a request outlasting it would only bill
+                adapters[key] = model.adapter(timeout_s=self.p.judges.answer_within_s)
             except Exception as error:  # the SDK isn't installed, or its client refused the key
                 self.missing[key] = f"{type(error).__name__}: {error}"
         if self.p.judges.escalation in adapters:

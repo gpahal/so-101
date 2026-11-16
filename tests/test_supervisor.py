@@ -209,6 +209,43 @@ class DetectorTest(unittest.TestCase):
             out += detector.step(t0 + i / FPS, p, drove)
         self.assertEqual(kinds(out), ["close", "carry", "release", "close", "carry", "release"])
 
+    def test_undoing_a_carry_gives_no_carry_its_full_time_again(self) -> None:
+        cases = {
+            "carried": Trace().to(2, pan=20).to(1, gripper=18).to(2, elbow=40).to(13, pan=60),  # held past 14 s
+            "released": grasp().to(12, pan=60),  # released, then drove on past 14 s
+        }
+        for name, trace in cases.items():
+            with self.subTest(name):
+                detector = Detector(GRASP)
+                out = trace.run(detector)
+                self.assertNotIn("rule:no_carry", kinds(out))
+                self.assertGreater(detector.policy_s, GRASP.rules.no_carry_s)
+                opened = pose(gripper=40.0, pan=20.0)  # a Teleop or Rewind opened the jaws and moved the arm
+                detector.resumed(True, opened)
+                t0 = len(trace.poses) / FPS
+                first = detector.step(t0, opened)
+                self.assertEqual(kinds(first), [], "no rule for time it wasn't counting")
+                later = []
+                for i in range(1, int((GRASP.rules.no_carry_s + 1) * FPS)):  # 14 deg/s: never slow enough to hover
+                    later += detector.step(t0 + i / FPS, pose(gripper=40.0, pan=20.0 + 14 * i / FPS))
+                [rule] = later
+                self.assertEqual(rule.name, "no_carry")
+                self.assertAlmostEqual(rule.t - t0, GRASP.rules.no_carry_s, delta=0.1,
+                                       msg="14 s of driving from the handback")
+
+    def test_a_handback_that_undid_only_a_close_keeps_counting_no_carry(self) -> None:
+        detector = Detector(GRASP)
+        trace = Trace().to(2, pan=20).to(0.5, gripper=10).to(8, pan=110)  # a close on nothing, 10.5 s in
+        out = trace.run(detector)
+        opened = pose(gripper=40.0, pan=20.0)  # a playback undid the close
+        detector.resumed(True, opened)
+        t0 = len(trace.poses) / FPS
+        for i in range(int(5 * FPS)):
+            out += detector.step(t0 + i / FPS, pose(gripper=40.0, pan=20.0 + 14 * i / FPS))
+        [rule] = [s for s in out if s.kind == "rule"]
+        self.assertEqual(rule.name, "no_carry")
+        self.assertAlmostEqual(rule.t, GRASP.rules.no_carry_s, delta=0.1, msg="a playback never restarts it")
+
     def test_a_handback_that_moved_nothing_keeps_what_was_seen(self) -> None:
         detector = Detector(GRASP)
         trace = grasp()
@@ -290,6 +327,8 @@ class Pool:
         return future
 
     def _answer(self, future, fn, args) -> None:
+        if not future.set_running_or_notify_cancel():  # cancelled while it waited, as `DaemonPool` skips it
+            return
         try:
             future.set_result(fn(*args))
         except Hang:
@@ -354,6 +393,26 @@ class JudgesTest(unittest.TestCase):
         j = J.Judges(program, adapters={"jev": Failing()}, pool=Pool())
         j.ask("jev", [("top", b"x")], "end")
         self.assertAlmostEqual(j.spent, estimate, msg="a failed call may still have been billed")
+
+    def test_the_judges_own_adapters_time_out_when_the_layer_stops_waiting(self) -> None:
+        from test_failbench import SDKs
+
+        from so_101.vision import models, providers
+
+        keys = {name: "test-key" for name in set(models.KEYS.values())}
+        sdks = SDKs()
+        with mock.patch.dict(os.environ, keys), sdks.installed():
+            providers._cache.clear()
+            providers._timed.clear()
+            self.addCleanup(providers._cache.clear)
+            self.addCleanup(providers._timed.clear)
+            failbench = models.MODELS["jev"].adapter()  # made first, with failbench's long timeout
+            j = J.Judges(PROGRAM, pool=Pool())
+            self.assertEqual(j.missing, {})
+            self.assertIsNot(j._adapters["jev"], failbench)
+        clients = [kw for name, kw in sdks.calls if name in ("typesafe.Client", "openai.OpenAI")]
+        self.assertEqual([kw.get("timeout") for kw in clients], [None, PROGRAM.judges.answer_within_s,
+                                                                PROGRAM.judges.answer_within_s])
 
     def test_a_missing_judge_answers_with_an_error_not_an_exception(self) -> None:
         j = J.Judges(PROGRAM, adapters={}, pool=Pool())
@@ -780,6 +839,49 @@ class LayerTest(unittest.TestCase):
         self.assertEqual(h.ask_kinds, ["stuck"])
         self.assertAlmostEqual(h.kinds("decision")[1]["policy_t"], h.kinds("decision")[0]["policy_t"])
         self.assertAlmostEqual(h.now - held, PROGRAM.hold_deadline_s, delta=0.1)
+
+    def test_a_pause_during_a_hold_ends_it(self) -> None:
+        pool = Pool(now=False)  # the watch check takes its time, and would call it stuck
+        h = Harness("act", {"stuck": 0.95}, pool=pool)
+        h.feed(Trace().to(2, pan=20).to(4.5), until=h.holding)  # frozen: holds, its watch check asked
+        h.layer.pause()  # a person presses Pause: they have the arm now
+        h.paused = True
+        for _ in range(int(2 * PROGRAM.hold_deadline_s * FPS)):  # serve keeps calling maintain while paused
+            h.now += 1 / FPS
+            h.said.extend(h.layer.maintain())
+        pool.run()  # the watch check's answer comes in late
+        for _ in range(3):
+            h.now += 1 / FPS
+            h.said.extend(h.layer.maintain())
+        pool.run()
+        self.assertEqual(h.decisions(), ["hold: frozen"], "no ask for a person who already has the arm")
+        self.assertEqual(h.judges._adapters["claude-opus-5.5"].calls, 0, "no escalation call")
+        self.assertEqual((h.asked, [line for line in h.said if "advice" in line]), ([], []))
+        self.assertEqual([e["rule"] for e in h.kinds("hold_ended")], ["frozen"])
+        self.assertEqual([c.get("stale") for c in h.kinds("check") if c["moment"] == "watch"], ["hold_ended"])
+        h.resume()
+        steps = h.driver.steps
+        h.feed(h.here().to(1, pan=30))
+        self.assertEqual(h.layer.doing, "pass")
+        self.assertEqual(h.driver.steps - steps, FPS + 1, "the policy drives every tick")
+        self.assertEqual(h.decisions(), ["hold: frozen"], "frozen fired once this attempt and stays spent")
+
+    def test_a_check_it_stops_waiting_for_cancels_the_calls_not_yet_sent(self) -> None:
+        pool = Pool(now=False)  # every call queued behind slow ones, none answered
+        h = Harness("act", {"after_close": 0.95, "after_release": 0.02}, pool=pool)
+        h.feed(grasp().to(1.5 + PROGRAM.judges.answer_within_s + 0.5))  # past both checks' time
+        checks = {c["moment"]: c for c in h.kinds("check")}
+        self.assertEqual(checks["after_close"]["stale"], "carried_or_released")
+        self.assertEqual(checks["after_close"]["cancelled"], ["decision", "chat"])
+        self.assertEqual(checks["after_release"]["cancelled"], ["decision", "chat"])
+        self.assertNotIn("pending", checks["after_release"])
+        self.assertTrue(all(future.cancelled() for future, _, _ in pool.waiting))
+        pool.run()
+        h.layer.maintain()
+        self.assertEqual([h.judges._adapters[key].asked for key in ("jev", "gemini-3.8-flash")], [[], []],
+                         "no call sent, none billed")
+        self.assertEqual(h.kinds("late_answer"), [])
+        self.assertEqual(h.layer._inflight, [], "nothing left to wait for")
 
     def test_no_watch_check_is_asked_while_a_rule_is_only_near(self) -> None:
         h = Harness("act", {"stuck": 0.95})

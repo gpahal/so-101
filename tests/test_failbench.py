@@ -201,7 +201,8 @@ class SDKs:
         openai.OpenAI = OpenAI
         typesafe = types.ModuleType("typesafe_sdk")
         typesafe.TypeSafeClient = TypeSafeClient
-        typesafe.Image, typesafe.Noul, typesafe.Choice = (record(f"typesafe.{n}") for n in ("Image", "Noul", "Choice"))
+        typesafe.Image, typesafe.Noul, typesafe.Choice, typesafe.RetryPolicy = (
+            record(f"typesafe.{n}") for n in ("Image", "Noul", "Choice", "RetryPolicy"))
         self.modules = {"openai": openai, "google": google, "google.genai": genai, "google.genai.types": genai_types,
                         "typesafe_sdk": typesafe}
 
@@ -227,7 +228,9 @@ class AdapterTest(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
         self.addCleanup(providers._cache.clear)
+        self.addCleanup(providers._timed.clear)
         providers._cache.clear()
+        providers._timed.clear()
 
     def predict(self, key: str, sdks: SDKs, images=FOUR, moment="stuck") -> dict:
         with sdks.installed():
@@ -250,6 +253,28 @@ class AdapterTest(unittest.TestCase):
                 self.predict(key, sdks)
                 [client] = [kw for name, kw in sdks.calls if name == "genai.Client"]
                 self.assertEqual(client["http_options"]["timeout"], providers.TIMEOUT_S * 1000, "milliseconds")
+
+    def test_a_short_timeout_reaches_every_client_and_is_kept_apart(self):
+        clients = {"gemini-3.8-flash": "openai.OpenAI", "gemini-robotics-er-2": "genai.Client",
+                   "gemini-decision-1": "genai.Client", "openai-decisions-luna": "openai.OpenAI", "jev": "typesafe.Client"}
+        for key, client in clients.items():
+            with self.subTest(key):
+                providers._cache.clear()
+                providers._timed.clear()
+                sdks = SDKs()
+                with sdks.installed():
+                    long = models.MODELS[key].adapter()
+                    short = models.MODELS[key].adapter(timeout_s=5.0)
+                    self.assertIsNot(long, short, "failbench's adapter keeps its own timeout")
+                    self.assertIs(models.MODELS[key].adapter(timeout_s=5.0), short, "made once and kept")
+                    short.predict(FOUR, "stuck")
+                [_, made] = [kw for name, kw in sdks.calls if name == client]
+                timeout = made["http_options"]["timeout"] if client == "genai.Client" else made["timeout"]
+                self.assertEqual(timeout, 5000 if client == "genai.Client" else 5.0)
+                if key == "jev":
+                    [retry] = [kw for name, kw in sdks.calls if name == "typesafe.RetryPolicy"]
+                    self.assertEqual(retry["max_retries"], 0, "no retry inside a window that short")
+                    self.assertIs(made["retry"].max_retries, 0)
 
     def test_an_answer_without_usage_has_no_cost(self):
         for key in ADAPTED:

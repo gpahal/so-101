@@ -16,6 +16,11 @@ lazily, so every other module and the tests run without the `failbench` dependen
   answered with a probability and a choice over the categories. `wrong` is the probability ≥ 0.5.
 - Jev: `typesafe-sdk` `system_one`, with TypeSafe's opt-in image header.
 
+Every adapter takes a request timeout, `TIMEOUT_S` (180 s) unless `timeout_s` says otherwise:
+`so101-failbench` waits for slow answers, while the supervisor passes its `answer_within_s`, after which
+it no longer waits, so a call never runs on billing for an answer nothing reads. With a timeout given,
+Jev's client also makes no retries. `adapter_for` keeps one adapter per model and timeout.
+
 `openrouter_json` is the supervisor's escalation call, and `sdk_missing` says whether a provider's SDK
 is installed.
 """
@@ -31,10 +36,15 @@ from so_101.vision import prompt
 from so_101.vision.models import (GEMINI, GEMINI_DECISIONS, OPENAI_DECISIONS, OPENROUTER, TYPESAFE, Model)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
-TIMEOUT_S = 180
-# Preview models such as Robotics-ER 2 are only on v1beta (the SDK's default, v1, answers 404), and
-# google-genai takes its timeout in milliseconds; without one a request can wait forever.
-_GEMINI_HTTP = {"api_version": "v1beta", "timeout": TIMEOUT_S * 1000}
+TIMEOUT_S = 180  # failbench's: it waits for a slow answer rather than score it as none
+
+
+def _gemini_http(timeout_s: float) -> dict:
+    """Preview models such as Robotics-ER 2 are only on v1beta (the SDK's default, v1, answers 404), and
+    google-genai takes its timeout in whole milliseconds; without one a request can wait forever. Its
+    client makes no retries unless asked."""
+    return {"api_version": "v1beta", "timeout": round(timeout_s * 1000)}
+
 _RETRYABLE = ("RateLimit", "Timeout", "Connection", "InternalServer", "Overloaded", "ServiceUnavailable", "ServerError")
 
 
@@ -90,10 +100,10 @@ def parse_answer(text: str) -> dict:
 
 
 class OpenRouterChat:
-    def __init__(self, m: Model):
+    def __init__(self, m: Model, timeout_s: float | None = None):
         from openai import OpenAI
         self.m = m
-        self.client = OpenAI(base_url=OPENROUTER_URL, api_key=os.environ["OPENROUTER_API_KEY"], timeout=TIMEOUT_S,
+        self.client = OpenAI(base_url=OPENROUTER_URL, api_key=os.environ["OPENROUTER_API_KEY"], timeout=timeout_s or TIMEOUT_S,
                              max_retries=0, default_headers={"X-Title": "so101-failbench"})
 
     def predict(self, images: list[tuple[str, bytes]], moment: str | None) -> dict:
@@ -144,10 +154,10 @@ class OpenRouterChat:
 class GeminiChat:
     """Gemini Robotics-ER 2 through `google-genai`."""
 
-    def __init__(self, m: Model):
+    def __init__(self, m: Model, timeout_s: float | None = None):
         from google import genai
         self.m = m
-        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options=_GEMINI_HTTP)
+        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options=_gemini_http(timeout_s or TIMEOUT_S))
 
     def predict(self, images, moment):
         from google.genai import types
@@ -187,10 +197,10 @@ def _category_criteria() -> dict[str, str]:
 
 
 class GeminiDecisions:
-    def __init__(self, m: Model):
+    def __init__(self, m: Model, timeout_s: float | None = None):
         from google import genai
         self.m = m
-        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options=_GEMINI_HTTP)
+        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options=_gemini_http(timeout_s or TIMEOUT_S))
 
     def predict(self, images, moment):
         inputs = [{"type": "text", "text": prompt.decision_context(moment, images) + "\n"}]
@@ -215,10 +225,10 @@ class GeminiDecisions:
 
 
 class OpenAIDecisions:
-    def __init__(self, m: Model):
+    def __init__(self, m: Model, timeout_s: float | None = None):
         from openai import OpenAI
         self.m = m
-        self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=TIMEOUT_S, max_retries=0)
+        self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=timeout_s or TIMEOUT_S, max_retries=0)
 
     def predict(self, images, moment):
         content = [{"type": "input_text", "text": prompt.decision_context(moment, images)}]
@@ -251,10 +261,13 @@ class OpenAIDecisions:
 
 
 class TypeSafeJev:
-    def __init__(self, m: Model):
-        from typesafe_sdk import TypeSafeClient
+    def __init__(self, m: Model, timeout_s: float | None = None):
+        """Without `timeout_s`, the SDK's own: 10 s a request, two retries within 30 s. With it, one
+        request of at most `timeout_s`: a retry couldn't answer within it."""
+        from typesafe_sdk import RetryPolicy, TypeSafeClient
         self.m = m
-        self.client = TypeSafeClient(model=m.model_id)
+        self.client = TypeSafeClient(model=m.model_id) if timeout_s is None else \
+            TypeSafeClient(model=m.model_id, timeout=timeout_s, retry=RetryPolicy(max_retries=0))
 
     def predict(self, images, moment):
         from typesafe_sdk import Choice, Image, Noul
@@ -281,23 +294,26 @@ class TypeSafeJev:
 
 _ADAPTERS = {OPENROUTER: OpenRouterChat, GEMINI: GeminiChat, GEMINI_DECISIONS: GeminiDecisions,
              OPENAI_DECISIONS: OpenAIDecisions, TYPESAFE: TypeSafeJev}
-_cache: dict[str, object] = {}
+_cache: dict[str, object] = {}  # model key -> adapter with `TIMEOUT_S`
+_timed: dict[tuple[str, float], object] = {}  # (model key, timeout_s) -> adapter with that timeout
 _lock = threading.Lock()
 
 
-def adapter_for(m: Model):
-    """`m`'s adapter, made once and kept. A failure to make it is a non-retryable `ProviderError`, and
-    isn't kept: the next call tries again."""
+def adapter_for(m: Model, timeout_s: float | None = None):
+    """`m`'s adapter with a request timeout of `timeout_s`, or `TIMEOUT_S` without one, made once per
+    timeout and kept. A failure to make it is a non-retryable `ProviderError`, and isn't kept: the next
+    call tries again."""
+    cache, key = (_cache, m.key) if timeout_s is None else (_timed, (m.key, timeout_s))
     with _lock:
-        if m.key not in _cache:
+        if key not in cache:
             try:
-                _cache[m.key] = _ADAPTERS[m.provider](m)
+                cache[key] = _ADAPTERS[m.provider](m) if timeout_s is None else _ADAPTERS[m.provider](m, timeout_s)
             except ImportError as e:
                 raise ProviderError(f"{e}. The provider SDKs are in the failbench group: "
                                     "`uv run --group failbench so101-failbench ...`") from e
             except Exception as e:  # a missing key (KeyError) or a client that refused its settings
                 raise ProviderError(f"{m.key}'s client couldn't be made: {type(e).__name__}: {e}"[:400]) from e
-        return _cache[m.key]
+        return cache[key]
 
 
 def sdk_missing(provider: str) -> str | None:

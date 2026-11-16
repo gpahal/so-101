@@ -7,7 +7,8 @@ the tick down or drives the arm itself:
   program's moments the judges look at the camera frames, on their own worker pool: each judge is one
   future, sent from the loop's thread, collected on later ticks, so a step never waits for one. A check
   is settled as soon as the answers in can't be overturned (`judges.decided`), and a judge that hasn't
-  answered by `answer_within_s` counts as no answer.
+  answered by `answer_within_s` counts as no answer. Settling cancels the check's calls still queued,
+  and each request times out at `answer_within_s` too, so a stale check neither bills nor holds a worker.
 - **Rewind and retry.** A miss (an after_close check that both judges call wrong) plays back
   `miss_rewind_s[n]` of the model's own measured motion, newest first (`control.rewind`, the same
   playback as serve's Rewind), then hands the arm back with `Handback(LAYER, moved=True)`, so the layers
@@ -16,7 +17,8 @@ the tick down or drives the arm itself:
   is left to it.
 - **Hold and check.** A stuck rule holds the arm and asks the watch check. A sure ok hands it back with
   `Handback(LAYER, moved=False)`; anything else, or no answer within `hold_deadline_s`, asks for a person
-  (`Output.asks`), and the escalation model's advice for them follows as a message (`maintain`).
+  (`Output.asks`), and the escalation model's advice for them follows as a message (`maintain`). A
+  `pause` ends a hold: whoever paused has the arm, so its deadline asks nobody and its verdict is stale.
 - **Done.** A release that both judges are sure put the block in the container is logged, and the
   policy drives on until the arm is at rest (`Tick.at_rest`) or `home_within_s` of its time has passed;
   then the layer asks for a person with kind `done`: only a person, or `run`'s autopilot, ends or labels
@@ -156,9 +158,11 @@ class Supervisor(Layer):
         self.inner.end_episode()
 
     def pause(self) -> None:
-        """The runner takes the arm: no action from the model or from a playback reaches it after this."""
+        """The runner takes the arm: no action from the model or from a playback reaches it after this. A
+        hold ends here: whoever paused has the arm, so its deadline asks nobody and its watch check is stale."""
         self._active, self._wants, self._asking, self._last = False, [], None, None
         self.generation += 1
+        self.safely(self._end_hold)
         if self._rewind is not None:
             self.safely(self._finish_rewind, "paused")
         self.doing, self._rewind = PASS, None
@@ -430,6 +434,17 @@ class Supervisor(Layer):
         future = self.judges.submit(lambda: self.judges.escalate(J.contact_sheet(columns), sheet_log))
         self._send("escalation", a, {"escalation": future})
 
+    def _end_hold(self) -> None:
+        """A pause took the arm while a stuck rule held it: the hold is over, with no ask and no escalation.
+        The rule stays spent for the attempt (the detector fires each once), so after Resume the policy
+        drives and only the other rules and the miss ladder still watch: the person saw it stuck and handed
+        it back."""
+        if (a := self.attempt) is None or a.stuck is None:
+            return
+        self.log("hold_ended", rule=a.stuck, why="paused")
+        self._note(f"hold on {a.stuck} ended: paused")
+        a.stuck = None
+
     def _finish_rewind(self, cause: str) -> None:
         running, self._rewind = self._rewind, None
         if running is not None:
@@ -459,11 +474,18 @@ class Supervisor(Layer):
                               f"{self.p.hold_deadline_s:g} s")
 
     def _settle(self, check: _Check, **fields) -> None:
+        """Log the check as settled. A call it no longer waits for that hasn't started is cancelled, so it
+        neither bills nor keeps a worker; one already running finishes, and is logged as a late answer."""
         check.settled = True
+        cancelled = [role for role, future in check.futures.items() if role not in check.answers and future.cancel()]
+        for role in cancelled:
+            check.answers[role] = _result(check.futures[role], role)
         check.pending = tuple(role for role in check.futures if role not in check.answers)
         pending = {"pending": list(check.pending)} if check.pending else {}
+        dropped = {"cancelled": cancelled} if cancelled else {}
         fields = {key: value for key, value in fields.items() if value is not None}
-        self.log("check" if check.moment != "escalation" else "escalation", moment=check.moment, **fields, **pending)
+        self.log("check" if check.moment != "escalation" else "escalation", moment=check.moment, **fields, **pending,
+                 **dropped)
 
     def _stale(self, check: _Check, a: _Attempt | None) -> str | None:
         """Why a check's answer no longer applies, or None."""
