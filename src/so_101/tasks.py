@@ -7,6 +7,7 @@ A task with `[<task>.skills]` also has a skills dataset and models, with `_skill
 """
 
 import json
+import math
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -171,7 +172,8 @@ def load() -> dict[str, Task]:
                 fps=t.get("fps", 30),
                 episodes=t.get("episodes", 100),
                 episode_time_s=t.get("episode_time_s", 20),
-                reset_time_s=t.get("reset_time_s", 10),
+                reset_time_s=_seconds(t, "reset_time_s", 10, "the seconds between demos, and between `so101 run`'s "
+                                                             "attempts, to put the props back"),
                 props=t.get("props", []),
                 setup=t.get("setup", []),
                 skills=skills.parse(t["skills"], name) if "skills" in t else (),
@@ -182,6 +184,15 @@ def load() -> dict[str, Task]:
             problem = f"the setting {e.args[0]!r} is missing" if isinstance(e, KeyError) else e
             raise ConfigError(f"{tasks_path()}: task {name!r}: {problem}") from e
     return catalog
+
+
+def _seconds(table: dict, key: str, default: float, what: str) -> float:
+    """`key` in a task's table: a finite number of seconds, 0 or more. NaN or infinity would reach `so101 run`'s
+    autopilot, whose wait the control page's strict JSON status can't hold."""
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{key} is {value!r}: set it to {what}, a finite number 0 or more, such as {default:g}.")
+    return value
 
 
 def get_task(name: str | None) -> Task:

@@ -22,6 +22,11 @@ so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--operator NAME
 - `--duration`: seconds of policy time per attempt; overrides `[control] attempt_limit_s` for this run.
   `[run] duration_s` is removed: one setting for both commands.
 - `--reset-time`: seconds between attempts to reset the scene (default the task's `reset_time_s`).
+- `run` stops before its checks, naming the option, on a `--duration` or `--reset-time` that isn't a finite
+  number 0 or more, and every command stops on such a `reset_time_s` in tasks.toml (`tasks.load`). NaN passes
+  a `< 0` check, and a NaN or infinite reset time made the autopilot's `next_in_s` one too, which the page's
+  strict JSON status can't hold: every `/status` failed once the arm reached rest. `--duration 0` runs until
+  you end the attempt, as an infinite one would, so infinity is refused too.
 - `--display` is removed: the control page shows both cameras.
 - Everything else as `serve`, `--supervisor` included (it sets `[supervisor] mode` for one run). `run.json`
   records `"mode": "run"`, the supervisor's mode and the autopilot's settings.
@@ -38,6 +43,12 @@ ask's kind; the control page's link was lost; a move stopped short; or a person)
 that tick, whether a person is answering how the attempt went, and why Resume would be refused. It reads
 no event log and runs no thread of its own, and it has one command in flight at a time, so a slow tick
 never makes it send a Resume twice.
+
+Its command is taken in at the start of the next tick, after any a person sent meanwhile, and was decided
+before them. So once a person's command, or their start at answering how the attempt went, is accepted in a
+tick, the autopilot's command in that tick is refused, and it decides again from the facts the tick after.
+Without this, a person's Resume as the grace period ran out was followed by the autopilot's Reset, ending
+the attempt they had just taken over, and a person's Resume after the last attempt by the autopilot's Quit.
 
 1. **Between attempts**, resting at the rest pose with no attempt open: `reset_time_s` after the arm
    arrived at rest (none before the first attempt) it submits Resume, which opens an attempt, moves to the
@@ -85,6 +96,10 @@ hand it over; the terminal's outcome question and the page's Reset sheet keep th
 label; a lost link and a move to the start pose that stopped short are ended after the grace; a person's
 Pause on the way to rest hands that attempt over; a fault on the last attempt waits for a Reset and quits
 only at rest; resting away from rest starts nothing; Esc stops it; a refused start is said once; Hold
-keeps the next attempt from starting, even one the autopilot already sent. `tests/test_process.py` runs
+keeps the next attempt from starting, even one the autopilot already sent; a person's Resume in the same
+tick as the autopilot's grace Reset or last Quit keeps their attempt, as does their start at answering in the
+tick of the grace Reset, and a command the autopilot dropped for a person's is decided again the tick after.
+`tests/test_cli.py` checks that `run` refuses a NaN, infinite or negative `--duration` or `--reset-time` before
+its checks and takes 0 for both, and `tests/test_settings.py` that `tasks.load` refuses such a `reset_time_s`. `tests/test_process.py` runs
 `so101-control` in run mode and checks `run.json` and `--duration 0`'s strict JSON status. `run` and
 `serve` share `commands/policy.py`'s setup, so their preflight tests cover both.

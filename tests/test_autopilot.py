@@ -64,6 +64,21 @@ class Session:
     def commands(self, source: str = "autopilot") -> list[str]:
         return [e["command"] for e in self.events("command") if e["source"] == source]
 
+    def front_run(self, command: str, person: str, **given) -> None:
+        """When the autopilot submits `command`, a person's `person` from the terminal, with the options `given`,
+        is queued just before it:
+        it arrived during the tick, after the commands were taken in and before the autopilot stepped."""
+        submit = self.rig.controller.submit
+        fronted = [False]
+
+        def wrapped(name, source, **options):
+            if source == "autopilot" and name == command and not fronted[0]:
+                fronted[0] = True
+                submit(person, source="terminal", **given)
+            return submit(name, source=source, **options)
+
+        self.pilot._submit = wrapped
+
     def page(self, name: str, **options):
         return self.rig.command(name, source="page", client=PHONE, who="100.64.0.2", **options)
 
@@ -284,6 +299,52 @@ class AutopilotTest(unittest.TestCase):
         self.assertTrue(held.result(timeout=0).accepted)
         self.assertFalse(resumed.result(timeout=0).accepted)
         self.assertEqual(s.state(), "resting")
+
+    def test_a_persons_resume_in_the_same_tick_keeps_the_grace_reset_off_their_attempt(self) -> None:
+        s = Session(self, episodes=2, ask_at=5, limit_s=60.0)
+        s.front_run("reset", "resume")
+        s.until(lambda: s.events("command") and s.events("command")[-1]["command"] == "reset", limit_s=ASK_GRACE_S + 5)
+        attempt = s.rig.controller.attempt_number
+        s.tick(round((ASK_GRACE_S + 2) * FPS))
+        commands = [(e["command"], e["source"], e["accepted"]) for e in s.events("command")]
+        self.assertEqual(commands, [("resume", "autopilot", True), ("resume", "terminal", True),
+                                    ("reset", "autopilot", False)], "nothing ends the attempt the person resumed")
+        self.assertEqual(s.state(), "autonomous")
+        self.assertEqual(s.rig.controller.attempt_number, attempt)
+        self.assertTrue(any("came first" in line for line in s.said), s.said[-3:])
+
+    def test_a_persons_resume_in_the_same_tick_as_the_last_quit_gets_its_attempt(self) -> None:
+        s = Session(self, episodes=1)
+        s.front_run("quit", "resume")
+        s.until(lambda: len(s.starts()) == 2, limit_s=30)
+        self.assertFalse(s.rig.controller.done, "the autopilot's Quit gave way to the person's Resume")
+        s.until(lambda: s.rig.controller.done, limit_s=30)  # it quits once the person's attempt has ended at rest
+        commands = [(e["command"], e["source"], e["accepted"]) for e in s.events("command")]
+        self.assertEqual(commands, [("resume", "autopilot", True), ("resume", "terminal", True),
+                                    ("quit", "autopilot", False), ("quit", "autopilot", True)])
+
+    def test_a_person_starting_to_answer_in_the_same_tick_keeps_the_grace_reset_off_the_label(self) -> None:
+        s = Session(self, episodes=1, ask_at=5, limit_s=60.0)
+        s.front_run("reset", "answering", for_attempt=1)  # the terminal's right arrow, as the grace runs out
+        s.until(lambda: "reset" in s.commands(), limit_s=ASK_GRACE_S + 5)
+        s.tick(round(2 * FPS))
+        self.assertEqual(s.state(), "paused", "the attempt waits for the person's answer")
+        self.assertEqual([(e["command"], e["accepted"]) for e in s.events("command") if e["source"] == "autopilot"],
+                         [("resume", True), ("reset", False)])
+        s.rig.reset("succeeded")
+        s.until(lambda: s.state() == "resting")
+        self.assertEqual([e["outcome"] for e in s.events("outcome")], ["succeeded"])
+
+    def test_a_command_refused_after_a_persons_one_is_decided_again_on_the_next_tick(self) -> None:
+        s = Session(self, episodes=1, ask_at=5, limit_s=60.0)
+        s.front_run("reset", "pose")  # Check pose doesn't take the attempt over
+        s.until(lambda: s.state() == "returning", limit_s=ASK_GRACE_S + 5)
+        commands = [(e["command"], e["source"], e["accepted"]) for e in s.events("command")]
+        self.assertEqual(commands, [("resume", "autopilot", True), ("pose", "terminal", True),
+                                    ("reset", "autopilot", False), ("reset", "autopilot", True)])
+        [refused, sent] = [e["t"] for e in s.events("command") if e["command"] == "reset"]
+        self.assertAlmostEqual(sent - refused, 2 / FPS, delta=0.5 / FPS,
+                               msg="one command in flight: its answer comes a tick later, then it decides again")
 
     def test_after_the_autopilot_fails_hold_says_it_stopped_not_that_there_is_none(self) -> None:
         s = Session(self)

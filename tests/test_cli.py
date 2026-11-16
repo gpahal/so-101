@@ -154,6 +154,23 @@ class AllowListTest(unittest.TestCase):
                     command(s, ns, ["--display_data=true"])
                 self.assertIn("--display_data", str(stop.exception.code))
 
+    def test_run_refuses_a_reset_time_or_duration_that_is_not_finite_seconds_before_its_checks(self) -> None:
+        # A nan or inf reset time made the autopilot's next_in_s nan or inf, which the page's strict JSON
+        # status can't hold: every /status failed once the arm reached rest.
+        task = types.SimpleNamespace(name="test", prompt="test", fps=30, reset_time_s=10)
+        s = mock.Mock(run=mock.Mock(episodes=1))
+        cases = [("reset_time", "--reset-time", value) for value in (float("nan"), float("inf"), -1.0)] + \
+                [("duration", "--duration", value) for value in (float("nan"), float("inf"), float("-inf"), -1.0)]
+        for key, flag, value in cases:
+            ns = argparse.Namespace(task="test", episodes=None, duration=None, reset_time=None, supervisor=None)
+            setattr(ns, key, value)
+            with self.subTest(flag=flag, value=value), \
+                    mock.patch.object(serve, "policy_task", return_value=task), \
+                    mock.patch.object(serve, "policy_setup", side_effect=AssertionError("checked first")), \
+                    self.assertRaises(SystemExit) as stop:
+                serve.cmd_run(s, ns, [])
+            self.assertIn(flag, str(stop.exception.code))
+
 
 class LaunchTest(ConfigTest):
     """What `run` and `serve` hand `so101-control` and write in run.json's manifest."""
@@ -188,6 +205,12 @@ class LaunchTest(ConfigTest):
             sent = json.loads(os.environ[RUN_ENV])
         self.get_task_calls = get_task.call_count
         return sent
+
+    def test_run_takes_a_duration_and_reset_time_of_0(self) -> None:
+        self.config.write_text(ARMS)
+        sent = self.launch("run", settings.load(), duration=0.0, reset_time=0.0)
+        self.assertEqual(sent["manifest"]["autopilot"]["duration_s"], 0.0, "0 runs until you end it")
+        self.assertEqual(sent["manifest"]["autopilot"]["reset_s"], 0.0)
 
     def test_the_supervisor_flag_overrides_the_file_for_the_checks_and_the_control_process(self) -> None:
         self.config.write_text(ARMS + '\n[supervisor]\nmode = "shadow"\n')

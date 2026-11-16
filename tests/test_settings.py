@@ -5,7 +5,7 @@ import unittest
 from lerobot.robots.utils import ensure_safe_goal_position
 from test_serve_preflight import ARMS, ConfigTest
 
-from so_101 import settings
+from so_101 import settings, tasks
 
 
 class TeleopTest(ConfigTest):
@@ -51,6 +51,25 @@ class RunTest(ConfigTest):
                 self.config.write_text(ARMS + f"\n[run]\nepisodes = {value}\n")
                 with self.assertRaisesRegex(settings.ConfigError, r"\[run\] episodes"):
                     settings.load()
+
+
+class TasksTest(ConfigTest):
+    TASK = '[test]\nprompt = "Put the block in the jar"\n'
+
+    def test_a_reset_time_that_is_not_finite_seconds_of_0_or_more_is_refused(self) -> None:
+        # `so101 run` waits reset_time_s between attempts: nan or inf broke the control page's status.
+        for value in ("nan", "inf", "-1", '"ten"', "true"):
+            with self.subTest(value):
+                (self.root / "tasks.toml").write_text(self.TASK + f"reset_time_s = {value}\n")
+                with self.assertRaisesRegex(settings.ConfigError, "reset_time_s"):
+                    tasks.load()
+
+    def test_a_reset_time_of_0_or_more_is_kept(self) -> None:
+        for value, expected in (("0", 0), ("12.5", 12.5)):
+            (self.root / "tasks.toml").write_text(self.TASK + f"reset_time_s = {value}\n")
+            self.assertEqual(tasks.load()["test"].reset_time_s, expected)
+        (self.root / "tasks.toml").write_text(self.TASK)
+        self.assertEqual(tasks.load()["test"].reset_time_s, 10, "the default")
 
 
 class RemoteTest(ConfigTest):

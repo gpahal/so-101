@@ -3,7 +3,10 @@
 It is another operator, like the terminal and the page: it submits commands with source `autopilot`,
 so the state machine still decides what's allowed and every safety rule holds. The controller steps
 it once a tick, after publishing the status, with the tick's `Facts`; it never reads the event log,
-and it has one command in flight at a time, so a slow tick can't make it send a command twice.
+and it has one command in flight at a time, so a slow tick can't make it send a command twice. Its
+command is taken in on the next tick, after any a person sent meanwhile; once a person's is accepted
+there, `commands.intake` refuses the autopilot's (GAVE_WAY), which was decided before it, and the
+autopilot decides again from the tick after's facts.
 
 - **Between attempts,** resting at the rest pose with no attempt open, it waits `reset_s` from the
   arm's arrival at rest or a person's last command (none before the first attempt), then submits
@@ -37,6 +40,9 @@ UNOWNED = {
     "stopped_short": "the move stopped short",
 }
 DONE = "done"  # `policy.base.DONE`: the policy stack judged the task done
+# Why `commands.intake` refuses the autopilot's command once a person's was accepted in the same tick.
+GAVE_WAY = ("A person's command came first in this tick, and the autopilot decided this one before it: it decides "
+            "again from the next tick's facts.")
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,7 @@ class Autopilot:
         self.paused_at: float | None = None  # when the pause it didn't ask for began
         self.held = False  # held from the page: no attempt starts until Continue
         self.done = False
+        self._person_quit = False  # a person's Quit was accepted: it stops for good
         self.waiting: str | None = None  # why it waits, said once and shown on the page
         self._pending: Future | None = None
         self._resting: bool | None = None  # resting at the rest pose with no attempt open, at the last step
@@ -93,7 +100,14 @@ class Autopilot:
             if not self._pending.done():
                 return
             result, self._pending = self._pending.result(), None
-            if not result.accepted:
+            if result.accepted:
+                pass
+            elif result.reason == GAVE_WAY:  # decide again, below, from this tick's facts
+                if result.command == "quit" and not self._person_quit:
+                    self.done = False
+                self._say(f"Autopilot: a person's command came first, so its {result.command.capitalize()} was "
+                          "dropped. It decides again from here.")
+            else:
                 self._wait(f"{result.command.capitalize()} was refused: {result.reason}")
         if self.done:
             return
@@ -112,10 +126,12 @@ class Autopilot:
             self.ended += 1
         self.open = current
         people = set(f.people)
-        if "quit" in people and not self.done:
+        if "quit" in people and not self._person_quit:
+            self._person_quit = True
+            if not self.done:
+                self.waiting = None
+                self._say("Autopilot: stopped, after your Quit.")
             self.done = True
-            self.waiting = None
-            self._say("Autopilot: stopped, after your Quit.")
         if current is not None and people & HANDS_OVER:
             self.handed = current
         if current is None and people:  # a person at the arm between attempts: the scene may not be ready

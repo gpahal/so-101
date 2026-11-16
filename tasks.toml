@@ -16,7 +16,8 @@
 #   fps             Control rate to record and run at (default 30).
 #   episodes        Demos to keep (default 100). ~100 for one pick-and-place, spread over 5+ start positions.
 #   episode_time_s  Seconds per demo (default 20); press Right arrow or n to finish one early.
-#   reset_time_s    Seconds between demos to put the props back (default 10).
+#   reset_time_s    Seconds between demos, and between `so101 run`'s attempts, to put the props back (default 10).
+#                   A finite number, 0 or more: every command stops on anything else, naming it.
 #   cameras         Your cameras to record, named as in so101.toml (default: ["top", "wrist"]).
 #   props, setup    What to put on the table and where the cameras go.
 #   [<task>.skills] Optional: the task's parts, for one model trained on all of them (docs/skills.md).

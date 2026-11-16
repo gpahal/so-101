@@ -20,6 +20,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from so_101.control import autopilot
 from so_101.control.link import NOT_IN_CONTROL, ONLY_PAGES
 from so_101.control.recorder import OUTCOMES
 from so_101.control.states import Command, Event, State, Tool, step
@@ -157,7 +158,10 @@ def intake(controller, name: str, source: str, client: str | None, who: str | No
     """Take in one command on the loop's thread: check its options, then page control, then carry
     it out, and log it as a `command` event (page_hidden is logged only as the link's `page_hidden` event,
     when it loses the link, and answering not at all). A person's command that's accepted goes on the
-    controller's `people` for this tick, which `so101 run`'s autopilot reads.
+    controller's `people` for this tick, which `so101 run`'s autopilot reads, and an answering one too.
+    Once one is, the autopilot's commands are refused for the rest of the tick: the autopilot decided
+    them from the last tick's facts, which that command may have changed, and it decides again from
+    the next tick's.
 
     Options are checked before anything else, and only known ones are logged: an option named like a
     field of the event (accepted, type, id) must neither crash the loop nor rewrite the log. A Quit
@@ -172,8 +176,13 @@ def intake(controller, name: str, source: str, client: str | None, who: str | No
     elif name == PAGE_HIDDEN:
         return _hidden(controller, name, source, client)
     elif name == ANSWERING:
-        return _answering(controller, name, source, client, who, options)
-    elif name == Command.RESUME and source == "autopilot" and controller.autopilot is not None \
+        result = _answering(controller, name, source, client, who, options)
+        if result.accepted:
+            controller.people.append(name)
+        return result
+    elif source == autopilot.SOURCE and controller.people:  # decided from facts a person's command changed
+        result = Result(name, False, autopilot.GAVE_WAY)
+    elif name == Command.RESUME and source == autopilot.SOURCE and controller.autopilot is not None \
             and controller.autopilot.held:  # a Hold taken earlier in this tick, after the autopilot sent it
         result = Result(name, False, "The autopilot is held: Continue on the page lets the next attempt start.")
     elif name == Command.QUIT and source == "page":

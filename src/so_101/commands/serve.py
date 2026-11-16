@@ -8,6 +8,7 @@ the safety rules and the recording into data/<task>/runs/, is the same.
 import argparse
 import dataclasses
 import json
+import math
 import os
 import signal
 import sys
@@ -58,8 +59,13 @@ def cmd_serve(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
 
 def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> None:
     task = policy_task(ns)
-    if ns.duration is not None and ns.duration < 0:
-        sys.exit("--duration is seconds of policy time per attempt: 0 or more (0 runs until you end it).")
+    # NaN passes a `< 0` check, and a NaN or infinite wait would reach the control page's strict JSON status.
+    for flag, value, what in (("--duration", ns.duration, "the seconds of policy time per attempt, a finite number "
+                                                          "0 or more (0 runs until you end it)"),
+                              ("--reset-time", ns.reset_time, "the seconds between attempts to reset the scene, a "
+                                                              "finite number 0 or more")):
+        if value is not None and not (math.isfinite(value) and value >= 0):
+            sys.exit(f"{flag} is {value:g}: give {what}.")
     autopilot = {
         "episodes": s.run.episodes if ns.episodes is None else ns.episodes,
         "reset_s": task.reset_time_s if ns.reset_time is None else ns.reset_time,
