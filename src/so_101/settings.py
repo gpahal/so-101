@@ -157,8 +157,7 @@ def cameras_arg(specs: list[str]) -> str:
 
 @dataclass(frozen=True)
 class Run:
-    duration_s: float
-    episodes: int
+    episodes: int  # how many attempts `so101 run`'s autopilot makes
     device: str
 
 
@@ -205,8 +204,8 @@ FINGERPRINT_DIGITS = 12
 
 @dataclass(frozen=True)
 class ControlSetting:
-    """What `load()` uses when so101.toml leaves a `[control]` setting out, and what `serve`'s
-    preflight (`check.check_control`) allows for it."""
+    """What `load()` uses when so101.toml leaves a `[control]` setting out, and what the preflight of
+    `serve` and `run` (`check.check_control`) allows for it."""
 
     default: float | str
     minimum: float | None = None  # the lowest a number may be
@@ -215,7 +214,8 @@ class ControlSetting:
     choices: tuple[str, ...] = ()  # the strings it may be
 
 
-# Every `[control]` setting but the rest pose. `check_control` also checks `port` is a port number.
+# Every `[control]` setting but the rest pose. `check_control` also checks `port` and `review_port`
+# are port numbers, and different ones.
 CONTROL_SETTINGS = {
     "rewind_s": ControlSetting(2.5, minimum=0, why="each Rewind has to go back some time"),
     "attempt_limit_s": ControlSetting(45, minimum=0, why="at 0 s every attempt would end as it starts"),
@@ -229,17 +229,18 @@ CONTROL_SETTINGS = {
     ),
     "bind": ControlSetting("tailscale", choices=("tailscale", "127.0.0.1")),
     "port": ControlSetting(8101),
+    "review_port": ControlSetting(8766),
     "preview_fps": ControlSetting(5, minimum=0, inclusive=True, why="0 turns the camera previews off"),
 }
 
 
 @dataclass(frozen=True)
 class Control:
-    """The `[control]` section of so101.toml: settings for `so101 serve`, the control center.
+    """The `[control]` section of so101.toml: settings for the control center, `so101 serve` and `so101 run`.
 
     `load()` keeps each value as the file writes it, without checking it, so a bad value never stops
-    the commands that fix it, such as `pose --save-rest`. `serve`'s preflight (`check.check_control`)
-    checks every value before the control center starts. Only `blame_s` is read elsewhere: by `runs`,
+    the commands that fix it, such as `pose --save-rest`. The preflight of `serve` and `run`
+    (`check.check_control`) checks every value before the control center starts. Only `blame_s` is read elsewhere: by `runs`,
     `build --with` and `review --runs`, which check it as they read runs (`analysis.check_blame_s`)."""
 
     # Each motor's raw position in encoder steps (0-4095), independent of calibration and units, so it
@@ -257,7 +258,30 @@ class Control:
     link_timeout_s: float
     bind: str
     port: int
+    review_port: int  # the reviewer page's (`so101 review`), which follows `bind` too
     preview_fps: float
+
+
+SUPERVISOR_MODES = ("off", "shadow", "act")
+
+
+@dataclass(frozen=True)
+class Supervisor:
+    """The `[supervisor]` section of so101.toml: whether `so101 serve` and `so101 run` run the supervisor,
+    and its program. `--supervisor` on either command overrides `mode` for one run."""
+
+    # off; shadow (decides and logs, never drives); or act (plays back a missed grasp, holds the arm on a
+    # stuck rule, and asks for a person through the policy stack, never with a command)
+    mode: str
+    program: Path | None  # the program file, or None for the one in the package (`supervisor/program.toml`)
+
+
+@dataclass(frozen=True)
+class Perception:
+    """The `[perception]` section of so101.toml: the gripper and stuck-rule thresholds every run's
+    perception, `so101 skills` and `build --skills` read."""
+
+    thresholds: Path | None  # the thresholds file, or None for the one in the package (`grasp/grasp.toml`)
 
 
 @dataclass(frozen=True)
@@ -273,6 +297,8 @@ class Settings:
     sim: dict
     data_dir: Path
     path: Path
+    supervisor: Supervisor = Supervisor("off", None)
+    perception: Perception = Perception(None)
 
     @property
     def outputs_dir(self) -> Path:
@@ -305,6 +331,32 @@ def _remote(policy: str, section: dict, path: Path) -> Remote:
     if not isinstance(pin, bool):
         raise ConfigError(f"[remote.{policy}] pin_unused_actions in {path} is {pin!r}: set it to true or false.")
     return Remote(job_target=section["job_target"], job_timeout=section["job_timeout"], pin_unused_actions=pin)
+
+
+def _file(section: dict, key: str, where: str, path: Path) -> Path | None:
+    value = section.get(key, "")
+    if not isinstance(value, str):
+        raise ConfigError(f"[{where}] {key} in {path} is {value!r}: give a file's path, or leave it out.")
+    file = Path(value).expanduser() if value else None
+    return None if file is None else file if file.is_absolute() else path.parent / file
+
+
+def _run(section: dict, path: Path) -> Run:
+    if "duration_s" in section:
+        # `so101 run` once took its attempts' length from here; left in, it would change nothing.
+        raise ConfigError(f"[run] duration_s in {path} is no longer read: an attempt lasts [control] attempt_limit_s "
+                          "of policy time, and `so101 run --duration` sets another for one run. Remove the line.")
+    episodes = section.get("episodes", 1)
+    if type(episodes) is not int or episodes < 1:  # not int(episodes), which takes 1.5 and true
+        raise ConfigError(f"[run] episodes in {path} is {episodes!r}: set it to a whole number, 1 or more.")
+    return Run(episodes=episodes, device=section.get("device", "mps"))
+
+
+def _supervisor(section: dict, path: Path) -> Supervisor:
+    mode = section.get("mode", "off")
+    if mode not in SUPERVISOR_MODES:
+        raise ConfigError(f"[supervisor] mode in {path} is {mode!r}: use {', '.join(SUPERVISOR_MODES)}.")
+    return Supervisor(mode=mode, program=_file(section, "program", "supervisor", path))
 
 
 def load() -> Settings:
@@ -368,17 +420,15 @@ def _parse(path: Path) -> Settings:
         teleop=Teleop(fps=teleop.get("fps", 60),
                       max_relative_target=step_cap(teleop.get("max_relative_target", 0), f"[teleop] max_relative_target in {path}")),
         cameras={name: camera(name, section) for name, section in data.get("cameras", {}).items()},
-        run=Run(
-            duration_s=run.get("duration_s", 30),
-            episodes=run.get("episodes", 1),
-            device=run.get("device", "mps"),
-        ),
+        run=_run(run, path),
         train={policy: recipe(policy, section) for policy, section in train.items()},
         remote={policy: _remote(policy, section, path) for policy, section in data.get("remote", {}).items()},
         control=_control(data.get("control", {})),
         sim=data.get("sim", {}),
         data_dir=data_dir if data_dir.is_absolute() else path.parent / data_dir,
         path=path,
+        supervisor=_supervisor(data.get("supervisor", {}), path),
+        perception=Perception(_file(data.get("perception", {}), "thresholds", "perception", path)),
     )
 
 
@@ -450,7 +500,8 @@ def save_rest_pose(pose: dict[str, int], path: Path | None = None, *, calibratio
     result parses to the same values, before writing.
     """
     path = path or config_path()
-    # The same rule `serve`'s preflight applies, checked first: a bad value written here would stop `serve`.
+    # The same rule the preflight of `serve` and `run` applies, checked first: a bad value written here
+    # would stop both.
     for motor, steps in pose.items():
         if isinstance(steps, bool) or not isinstance(steps, int) or not 0 <= steps < MOTOR_STEPS:
             raise ConfigError(

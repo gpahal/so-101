@@ -75,19 +75,21 @@ class ServePreflightTest(ConfigTest):
         check_control(report, s, "FAIL")
         return [f"{r.group}: {r.detail}" for r in report.results if r.status == "FAIL"]
 
-    def serve(self, s: settings.Settings) -> None:
-        """Run `serve` up to where it would download the policy, with the checks that open a device or
-        ask the Hub stubbed out. Raises SystemExit when the preflight fails."""
+    def serve(self, s: settings.Settings, supervisor: str | None = None, task_name: str = "test") -> None:
+        """Run `serve` on `task_name`, with `--supervisor` when given, up to where it would download the
+        policy, with the checks that open a device or ask the Hub stubbed out. Raises SystemExit when the
+        preflight fails, and AssertionError when it passes."""
 
-        def download_policy(revision=None):
+        def download_policy(revision=None, skills=False, *, folder):
             raise AssertionError("serve passed its preflight")
 
-        task = types.SimpleNamespace(name="test", prompt="test", cameras=(), fps=30,
-                                     policy_config=lambda revision, policy: {"chunk_size": 10, "input_features": {}},
-                                     policy_for=lambda policy: "x/y",
+        task = types.SimpleNamespace(name=task_name, prompt="test", cameras=(), fps=30,
+                                     policy_config=lambda revision, policy, skills=False: {"chunk_size": 10, "input_features": {}},
+                                     policy_for=lambda policy, skills=False: "x/y",
+                                     policy_commit=lambda revision, policy, skills=False: "c" * 40,
                                      download_policy=download_policy)
         ns = argparse.Namespace(task="test", policy="act", remote=False, revision=None, checkpoint=None, action_steps=None,
-                                operator=None)
+                                operator=None, supervisor=supervisor)
         out = io.StringIO()
         with mock.patch.object(serve, "policy_task", return_value=task), \
                 mock.patch("so_101.check.check_system"), \
@@ -130,6 +132,58 @@ class ServePreflightTest(ConfigTest):
         self.assertIn("1 FAIL", str(stopped.exception.code))
         [line] = [line for line in self.printed.splitlines() if line.strip().startswith("FAIL")]
         self.assertIn("link_timeout_s", line)
+
+    def test_run_s_duration_0_starts_and_lasts_until_a_person_ends_the_attempt(self) -> None:
+        import math
+
+        from so_101.control import main
+
+        s = self.write(self.valid_pose())
+        # The real check and `run_settings`, in the order `main.control` runs them.
+        ran = main.run_settings(s, {"manifest": {"autopilot": {"duration_s": 0}}}, "test")
+        self.assertEqual(ran.control.attempt_limit_s, math.inf)
+        self.assertEqual(main.run_settings(s, {"manifest": {"autopilot": {"duration_s": 12.5}}}).control.attempt_limit_s,
+                         12.5)
+        for duration in (math.inf, math.nan, -1, True, "10"):
+            with self.subTest(duration=duration), self.assertRaises(SystemExit) as exited:
+                main.run_settings(s, {"manifest": {"autopilot": {"duration_s": duration}}})
+            self.assertIn("--duration", str(exited.exception.code))
+        with self.assertRaises(SystemExit) as exited:  # the file's own settings are still checked
+            main.run_settings(self.write(self.valid_pose() + "link_timeout_s = nan\n"),
+                              {"manifest": {"autopilot": {"duration_s": 0}}})
+        self.assertIn("link_timeout_s", str(exited.exception.code))
+
+    def test_the_supervisor_runs_only_on_the_task_its_prompt_describes(self) -> None:
+        from so_101.control import main
+        from so_101.vision.prompt import TASK_NAME
+
+        pose = self.valid_pose()
+        for mode in ("shadow", "act"):
+            with self.subTest(mode=mode):
+                # --supervisor sets the mode the preflight checks, over [supervisor] mode's off.
+                with self.assertRaises(SystemExit) as stopped:
+                    self.serve(self.write(pose), supervisor=mode)
+                self.assertIn("1 FAIL", str(stopped.exception.code))
+                [line] = [line for line in self.printed.splitlines() if line.strip().startswith("FAIL")]
+                self.assertIn("can't supervise test", line)
+                self.assertIn("--supervisor off", self.printed)
+                with self.assertRaises(SystemExit):
+                    self.serve(self.write(pose + f'\n[supervisor]\nmode = "{mode}"\n'))
+                # so101-control re-reads the file and refuses too, with the mode serve passed it.
+                with self.assertRaises(SystemExit) as exited:
+                    main.run_settings(self.write(pose), {"manifest": {}, "supervisor": mode}, "test")
+                self.assertIn("--supervisor off", str(exited.exception.code))
+                # `so101 check` warns.
+                report = Report()
+                check_control(report, self.write(pose + f'\n[supervisor]\nmode = "{mode}"\n'), "WARN", "test")
+                [warning] = [r for r in report.warnings if r.group == "supervisor"]
+                self.assertIn("can't supervise test", warning.detail)
+                self.assertEqual(report.failures, [])
+        with self.assertRaisesRegex(AssertionError, "passed its preflight"):  # off for this run: it starts
+            self.serve(self.write(pose + '\n[supervisor]\nmode = "act"\n'), supervisor="off")
+        with self.assertRaisesRegex(AssertionError, "passed its preflight"):
+            self.serve(self.write(pose), supervisor="shadow", task_name=TASK_NAME)
+        main.run_settings(self.write(pose), {"manifest": {}, "supervisor": "act"}, TASK_NAME)
 
 
 if __name__ == "__main__":

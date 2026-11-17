@@ -2,8 +2,11 @@
 
 Other threads (the terminal reader and the control page's web server) only
 `submit` commands, report page polls with `heartbeat`, and read `status`. Each `tick` first applies
-the commands waiting since the last tick, then reads the arm and sends exactly one goal: the
-policy's action, the leader's pose in Teleop, the next step of a scripted move, or the hold target.
+the commands people sent since the last tick, in the order they came, and checks the page's link. In
+`so101 run` it then steps the `autopilot` with that tick's facts, and carries out the autopilot's command
+at once (`pilot_command`), so the autopilot never acts on facts a person's command has since changed.
+Then it reads the arm and sends exactly one goal: the policy's action, the leader's pose in Teleop, the
+next step of a scripted move, or the hold target.
 
 The controller keeps the loop, the commands and how the state machine's transitions are carried
 out. Its public attributes without a leading underscore, such as `state`, `open_attempt`, `follower`
@@ -22,6 +25,7 @@ sit beside it, and are used only through it:
 - `tools`: Run checks and Check pose.
 - `status`: the status the page and the terminal read, built from the controller's state.
 - `wording`: what the operator is told as the arm moves between states.
+- `autopilot`: `so101 run`'s operator that starts and ends attempts, when one is set.
 
 The follower, the policy driver and the clock are passed in, so tests run the controller on
 LeRobot's motor code over a fake bus, with a scripted engine. The recorder is passed in too, so
@@ -42,11 +46,13 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import NamedTuple
 
+from lerobot.utils.robot_utils import precise_sleep
+
 from so_101 import rollout
 from so_101.check import DISK_FAIL_GB, DISK_WARN_GB
 from so_101.report import Report
 from so_101.settings import Control
-from so_101.control import rewind, status, wording
+from so_101.control import autopilot, rewind, status, wording
 from so_101.control.attempt import COUNTS, LIMITED, Attempt
 from so_101.control.commands import LABELS, Result, Toggle, intake, stale_prompt
 from so_101.control.follower import Failure, Follower
@@ -55,10 +61,11 @@ from so_101.control.link import Link
 from so_101.control.previews import Previews
 from so_101.control.recorder import OUTCOMES, Phase, Recorder
 from so_101.control.rewind import DRIVEN, Rewind
+from so_101.policy.base import HOLD, OTHER, PERSON, PLAYBACK, POLICY, START, WAITING, Handback, Output, Tick
 from so_101.control.shedding import Pace
 from so_101.control.states import (
+    ASKED_OR_STEPPED_IN,
     CONFIRM_S,
-    STEP_INS,
     Action,
     Command,
     Event,
@@ -82,6 +89,7 @@ class Driven(NamedTuple):
     policy_action: dict | None = None  # the policy's raw action, if one reached the arm this tick
     leader_pose: dict | None = None  # the leader's pose, if it was read
     event: Event | None = None  # what became of a scripted move, applied once the frame is recorded
+    output: Output | None = None  # what the policy stack returned, in Autonomous
 
 
 def _move_event(arrived: bool | None) -> Event | None:
@@ -114,9 +122,12 @@ class Controller:
         presence: Callable[[], dict[str, str | None]],
         notify: Callable[[str, str], None] | None = None,
         operator: str | None = None,
+        command: str = "so101 serve",
     ) -> None:
-        """`robot` is LeRobot's robot wrapper (ThreadSafeRobot) with hold configured. `policy` is an
-        EngineDriver. Poses are in the arm's units, keyed like its actions. `rest_pose` is the
+        """`robot` is LeRobot's robot wrapper (ThreadSafeRobot) with hold configured. `policy` is the
+        policy stack (`policy.stack.build`, `policy.base.Policy`): it hears each attempt open and close
+        (`begin_episode`, `end_episode`), gets the arm with a `Handback` saying why, is stepped with a
+        `Tick` in Autonomous, and its `Output` may ask for a person, which pauses it like a lost link. Poses are in the arm's units, keyed like its actions. `rest_pose` is the
         `[control]` rest pose, already converted from raw steps with `pose_from_steps`. Without
         `start_pose` (no build), attempts start from wherever the arm is. `notify(message,
         state)` hears every message, with the new state when it announces one. `recorder` records the
@@ -127,8 +138,10 @@ class Controller:
         is called whenever the leader is to be connected: while the arm rests or is paused, the watch
         reports it present (or doesn't watch it) and its calibration file exists.
 
-        `operator` is the name given with `so101 serve --operator`, or None. It is recorded on every
-        event a person's action causes: command, label, outcome, control_taken, check and pose.
+        `operator` is the name given with `--operator` to `so101 serve` or `so101 run`, or None. It is
+        recorded on every event a person's action causes: command, label, outcome, control_taken, check
+        and pose. `command` is the command this process runs for, `so101 serve` or `so101 run`
+        (`main.command_name`), which the operator's messages name.
 
         `presence()` returns the device watch's latest answer: for each watched device, None when it
         is connected, or why it is missing and the fix. It must not block. The follower and every
@@ -142,6 +155,8 @@ class Controller:
         it left out: `check.check_control` refuses any other before `so101-control` connects."""
         self.recorder = recorder
         self.operator = operator
+        self.command = command
+        self._autopilot_failed = False  # `so101 run`'s autopilot raised and was stopped (`_step_autopilot`)
         self.policy = policy
         self.fps = fps
         self.rest_pose = rest_pose
@@ -183,6 +198,19 @@ class Controller:
         # The last fault saved an attempt (`_closed`), until Reset leaves Fault: an outcome given with
         # that Reset labels it.
         self._faulted = False
+        self._ask = None  # the last `policy.base.Ask` the stack made, whose kind its `state` event logs
+        # The kind of the ask the arm paused on, for the autopilot (`autopilot.Facts.ask`): set as it enters Paused,
+        # None when something other than the policy stack's ask paused it.
+        self.pause_ask: str | None = None
+        # The arm was in Fault since the last attempt opened: `so101 run`'s autopilot leaves the next start to a
+        # person (`autopilot.Facts.after_fault`). Set as the state becomes Fault, cleared as an attempt opens.
+        self.fault_since_attempt = False
+        # `so101 run`'s, stepped every tick after people's commands and the link check (`_step_autopilot`).
+        self.autopilot: autopilot.Autopilot | None = None
+        # The commands a person sent this tick from the terminal, a signal or the page in control, accepted or
+        # refused, a Quit only when accepted, and never page_hidden (`commands.intake`), each with the attempt open
+        # when it arrived, or None.
+        self.people: list[tuple[str, int | None]] = []
         self._checks = checks
         # The follower's step cap, which caps the leader's goals too.
         self.leader = Leader(leader, clock, self._say, inner.config.max_relative_target, log=self.recorder.event)
@@ -201,11 +229,14 @@ class Controller:
     def submit(self, command: str, source: str, *, client: str | None = None,
                who: str | None = None, **options) -> Future:
         """Queue a command for the next tick. The future resolves to its Result once applied.
-        `source` (terminal, page or signal) is recorded with it. A page's command needs `client`, the
-        id the page made for itself, and `who`, how the status and events name its caller (a
-        Tailscale login, "this Mac" or an IP address). The commands, their options, page control and
+        `source` (terminal, page or signal) is recorded with it. The autopilot's commands never come
+        here: the tick carries them out as the autopilot decides them (`pilot_command`). A page's
+        command needs `client`, the id the page made for itself, and `who`, how the status and events
+        name its caller (a Tailscale login, "this Mac" or an IP address). The commands, their options, page control and
         `toggle` are in `commands`; when a Reset's outcome is refused is `states._reset`'s.
         """
+        if source == autopilot.SOURCE:
+            raise ValueError("The autopilot's commands go through Controller.pilot_command, in the tick, not submit.")
         future: Future = Future()
         self._commands.put((command, source, client, who, options, future))
         return future
@@ -226,13 +257,15 @@ class Controller:
         built, controller = self._status
         return status.seen_by(built, controller, client)
 
-    def run(self, sleep: Callable[[float], None] = time.sleep) -> None:
+    def run(self, sleep: Callable[[float], None] | None = None) -> None:
         """Tick at `fps` until a quit finishes.
 
-        Ticks are due on fixed deadlines, so a sleep that overshoots (about 7 ms on macOS) is taken
-        out of the next wait instead of slowing every tick: sleeping for the period minus the tick's
-        own time would run the loop at about 24 Hz instead of 30. A loop more than one period behind (a
-        slow tick, or Run checks) starts counting again from now rather than ticking in a burst."""
+        It waits with LeRobot's `precise_sleep` (`sleep` replaces it), which on macOS sleeps to 5 ms
+        before the deadline and spins the rest, where a plain sleep overshoots by about 7 ms. Ticks are
+        due on fixed deadlines too, so what overshoot is left is taken out of the next wait instead of
+        slowing every tick. A loop more than one period behind (a slow tick, or Run checks) starts
+        counting again from now rather than ticking in a burst."""
+        sleep = sleep or precise_sleep
         period = 1 / self.fps
         due = self.clock()
         while not self.done:
@@ -271,6 +304,7 @@ class Controller:
         so a page's reply sees its command's effect. The answers go out whatever happens in the tick,
         so no command's caller is left waiting."""
         answers: list[tuple[Future, Result]] = []
+        self.people = []
         try:
             try:
                 self._tick(answers)
@@ -286,11 +320,7 @@ class Controller:
         self._guard(self._watch_leader)
         self._guard(self._maintain_policy)
         self._guard(self._read_disk)
-        while True:
-            try:
-                command, source, client, who, options, future = self._commands.get_nowait()
-            except queue.Empty:
-                break
+        for command, source, client, who, options, future in self._take_commands():
             try:
                 result = intake(self, command, source, client, who, options)
             except Exception as error:  # carrying out the command failed: as any failure, a fault
@@ -299,6 +329,8 @@ class Controller:
             answers.append((future, result))
         if not self.done:
             self._guard(self._check_link)  # may pause the policy
+        if not self.done:
+            self._step_autopilot()
         previous, now = self._last_tick, self.clock()
         self._last_tick = now
         if not self.done:
@@ -307,6 +339,51 @@ class Controller:
             else:
                 self._guard(lambda: self._drive_tick(now - previous))
             self._guard(self.pace.tick)
+
+    def _take_commands(self) -> list[tuple]:
+        """Every command queued since the last tick, all people's, in the order they arrived."""
+        taken = []
+        while True:
+            try:
+                taken.append(self._commands.get_nowait())
+            except queue.Empty:
+                break
+        return taken
+
+    def _step_autopilot(self) -> None:
+        """Step `so101 run`'s autopilot with this tick's facts, after people's commands and the link check.
+        Its own error never faults the arm: it stops, and the operator is told to carry on by hand. An error
+        carrying out its command is a fault, as any command's (`pilot_command`)."""
+        pilot = self.autopilot
+        if pilot is None or self.done:
+            return
+        try:
+            pilot.step(self._pilot_facts())
+        except Exception as error:
+            self.autopilot, self._autopilot_failed = None, True
+            with contextlib.suppress(Exception):
+                self._say(f"The autopilot stopped: {type(error).__name__}: {error}. Run the attempts from the page "
+                          "or the keys.")
+
+    def pilot_command(self, name: str) -> Result:
+        """Carry out `so101 run`'s autopilot's command now, in this tick, after people's: as any command, an
+        error carrying it out is a fault."""
+        try:
+            return intake(self, name, autopilot.SOURCE, None, None, {})
+        except Exception as error:
+            self._fault(error)
+            return Result(name, False, f"{name.capitalize()} failed, so the arm holds in Fault: {self.fault_error}")
+
+    def _pilot_facts(self) -> autopilot.Facts:
+        return autopilot.Facts(
+            now=self.clock(), state=self.state.value, at_rest=self.at_rest, attempt=self.attempt_number,
+            attempt_open=self.open_attempt is not None,
+            ask=self.pause_ask if self.state is State.PAUSED else None, people=tuple(self.people),
+            unwatched=self._unwatched_cause(),
+            resume_refusal=step(self.state, Command.RESUME, self.facts(autopilot.SOURCE)).refused,
+            fault=self.fault_error if self.state is State.FAULT else None,
+            after_fault=self.fault_since_attempt,
+        )
 
     def _guard(self, step: Callable[[], object]) -> None:
         """Run one step of the tick. An error in it is a fault."""
@@ -339,9 +416,10 @@ class Controller:
             self.apply(Event.LEADER_LOST)
 
     def _maintain_policy(self) -> None:
-        """Let the policy driver reconnect a failed remote engine; announce what it says."""
+        """Let the policy stack do its housekeeping (a remote model's reconnecting, the supervisor's
+        verdicts); announce what it says."""
         try:
-            if (message := self.policy.maintain()) is not None:
+            for message in self.policy.maintain():
                 self._say(message)
         except Exception as error:  # reconnecting must never stop the loop
             self._say(f"Reconnecting the policy failed: {type(error).__name__}: {error}")
@@ -379,15 +457,29 @@ class Controller:
         observation = self.follower.observe(self.open_attempt is not None)
         state, arm = self.state, self.follower.arm
         try:
-            policy_action, leader_pose, event = self._drive(observation, seconds)
+            policy_action, leader_pose, event, output = self._drive(observation, seconds)
         except LeaderLost as lost:
             self.leader.drop(str(lost))
             if state is State.TELEOP:  # in Handover, `_drive` already held the follower this tick
                 self.policy.hold(arm)  # the follower holds rather than chase a stale pose
-            policy_action, leader_pose, event = Driven(event=Event.LEADER_LOST)
-        if state is State.AUTONOMOUS and (failure := self.policy.failure):
+            policy_action, leader_pose, event, output = Driven(event=Event.LEADER_LOST)
+        if state is State.AUTONOMOUS and (failure := self.policy.health().failure):
             raise Failure(f"The policy failed: {_last_line(failure)}", detail=failure)
+        if state is State.AUTONOMOUS and event is None and output is not None and output.asks:
+            self._say(output.asks.text)
+            self._ask = output.asks  # its kind goes in the `state` event that applies it
+            event = Event.POLICY_ASKED  # applied once this tick's frame is recorded, like a scripted move's end
         if (attempt := self.open_attempt) is not None:
+            driver = output.driver if output is not None else OTHER
+            if output is not None and output.skill is not None:
+                attempt.skill = output.skill
+            if state in (State.TELEOP, State.REWINDING, State.RETURNING) or driver == PLAYBACK:
+                attempt.moved = True  # the stack's next handback says the arm may have moved
+            elif state is State.AUTONOMOUS and driver in (POLICY, WAITING):
+                # The model drives again after a layer's playback: the layer handed the arm back itself and
+                # told the stack below it moved, so the next handback mustn't say so again. A playback that
+                # stopped short holds instead, and its handback still says the arm moved.
+                attempt.moved = False
             if leader_pose is None and self.leader.connected:
                 leader_pose = self.leader.pose_for_frame()
             # The policy drove only on a tick its action reached the arm: one waiting for an action (a
@@ -395,8 +487,13 @@ class Controller:
             attempt.policy_drove |= policy_action is not None
             frame = self.recorder.frames
             self.recorder.add_frame(observation, arm.goal, Phase[state.name], policy_action=policy_action,
-                                    intervention=state is State.TELEOP and attempt.policy_drove, leader=leader_pose)
-            if state in DRIVEN:
+                                    intervention=state is State.TELEOP and attempt.policy_drove, leader=leader_pose,
+                                    skill=attempt.skill, driver=driver)
+            # One history, which a person's Rewind plays back: a layer's playback takes back what it
+            # undoes, and a layer's hold adds nothing, so a Rewind never replays either.
+            if driver == PLAYBACK:
+                self._undo_playback(attempt.history, output.goal_frame)
+            elif state in DRIVEN and driver != HOLD:
                 attempt.history.add(seconds, dict(self.follower.present), frame)
             attempt.extend_timeline(state, 1 / self.fps)
         if event is None and (limit := LIMITED.get(state)):
@@ -411,17 +508,33 @@ class Controller:
         if self.quitting and self.state is State.RESTING and self.leader.to_rest is None:
             self.apply(Event.LEADER_RESTED)  # a quit at rest waited for the leader: it's there, or gone
 
+    @staticmethod
+    def _undo_playback(history: rewind.History, goal_frame: int | None) -> None:
+        """A layer played back the model's motion this tick, to the pose measured in episode frame
+        `goal_frame`: drop every moment of the history after that frame, however the path turned on the way
+        and however many moments the playback passed this tick. The arm is going back to the newest moment
+        left, so its own action is undone too. Its first moment always stays."""
+        if goal_frame is None:
+            return
+        moments = history.moments
+        while len(moments) > 1 and moments[-1].frame > goal_frame:
+            history.pop()
+        history.rewound = True  # the arm went back to the newest moment, with no driving since
+
     def _drive(self, observation: dict, seconds: float) -> Driven:
         """Send this tick's goal, `seconds` after the last tick's. Raises LeaderLost when the leader
         fails in Handover or Teleop."""
         arm, present = self.follower.arm, self.follower.present
         if self.state is State.AUTONOMOUS:
+            tick = Tick(self.clock(), self.recorder.frames if self.open_attempt is not None else -1, observation,
+                        dict(present), self.at_rest)
             try:
-                return Driven(policy_action=self.policy.step(arm, observation))
+                out = self.policy.step(arm, tick)
             except Exception as error:
                 if self.follower.blame(error) is None:  # the policy's side failed, not a goal to the arm
-                    self.policy.raised = traceback.format_exc()  # Resume is refused from now on
+                    self.policy.record_failure(traceback.format_exc())  # Resume is refused from now on
                 raise
+            return Driven(policy_action=out.action if out.driver == POLICY else None, output=out)
         if self.state is State.TELEOP:
             pose = self.leader.read()
             arm.send_action(pose)  # through max_relative_target, like every goal
@@ -461,6 +574,8 @@ class Controller:
                 detail = error.detail if isinstance(error, Failure) else "".join(traceback.format_exception(error))
                 self.recorder.event("fault", error=message, device=device, **({"traceback": detail} if detail else {}))
             self.apply(Event.FAULT)
+            if self.state is State.FAULT:
+                self.fault_since_attempt = True
         except Exception as failure:
             self._force_fault(error, failure)
 
@@ -473,6 +588,7 @@ class Controller:
             with contextlib.suppress(Exception):
                 self.policy.pause()
             self.state = State.FAULT
+            self.fault_since_attempt = True
             self.fault_error = self.fault_error or f"{type(error).__name__}: {error}"
             # The arm can't be driven to rest now, so a quit waits for y at the terminal.
             self._confirm_until = self.clock() + CONFIRM_S if self.quitting else None
@@ -519,7 +635,29 @@ class Controller:
             outcome=outcome is not None,
             fault_saved=self._faulted,
             fault_labelled=self.closed_attempt.outcome if self._faulted and self.closed_attempt is not None else None,
+            unwatched=self._unwatched(),
         )
+
+    def _unwatched(self) -> str | None:
+        """Why no page watches the arm, as the state machine refuses the autopilot's Resume and Reset with it, or
+        None when a page is in control and its link is live. `Link.lost` is set whatever on_link_loss says: with
+        "continue" a lost link leaves the policy running, but the autopilot still moves nothing."""
+        cause = self._unwatched_cause()
+        if cause is None:
+            return None
+        if self.link.client is None:
+            return ("No control page is in control, so the autopilot moves nothing unwatched. Take control on the "
+                    "page, and the next attempt starts the run's reset time (--reset-time), at least link_timeout_s "
+                    "+ 0.5 s, after that; r at the robot's terminal starts it now.")
+        return (f"The controlling page ({self.link.who}) is out of reach, so the autopilot starts nothing unwatched. "
+                "Bring the page back or take control on another, and the next attempt starts the run's reset time "
+                "(--reset-time), at least link_timeout_s + 0.5 s, after that; r at the robot's terminal starts it now.")
+
+    def _unwatched_cause(self) -> str | None:
+        """Why no page watches the arm, as the autopilot says it hands an attempt over, or None."""
+        if self.link.client is None:
+            return "no control page is in control"
+        return "the control page's link was lost" if self.link.lost else None
 
     def devices(self) -> dict[str, str | None]:
         """Each required device: None when it is ok, or why it is missing and the fix."""
@@ -545,18 +683,20 @@ class Controller:
     def _policy_reason(self) -> str | None:
         """Why the policy can't run now: it failed, for good when it's local, or until it has
         reconnected when it's remote. None when it can run."""
-        if not (failure := self.policy.failure):
+        health = self.policy.health()
+        if not (failure := health.failure):
             return None
-        if retrying := self.policy.retrying:
+        if retrying := health.retrying:
             return f"The policy failed: {_last_line(failure)}. {retrying}"
-        return f"The policy failed and can't run again until so101 serve restarts: {_last_line(failure)}"
+        return f"The policy failed and can't run again until {self.command} restarts: {_last_line(failure)}"
 
     def label_reason(self) -> str | None:
         """Why `label` is refused now, or None when it would be accepted."""
         if self.open_attempt is None:
             return "No attempt is open to label."
         if self.open_attempt.step_ins == 0:
-            return "Nothing to label: nobody has stepped in on the policy in this attempt."
+            return ("Nothing to label: nobody has stepped in on the policy, nor has it asked for a person, in "
+                    "this attempt.")
         if self.state is State.AUTONOMOUS:
             return "The policy is driving again. Label a step-in while the arm is paused, rewinding or in Teleop."
         return None
@@ -601,6 +741,29 @@ class Controller:
         self.prompt = None
         return Result("outcome", True)
 
+    def hold_refusal(self) -> str | None:
+        """Why the page's Hold or Continue for `so101 run`'s autopilot is refused now, or None."""
+        if self.autopilot is None:
+            if self._autopilot_failed:
+                return "The autopilot stopped after an error: run the attempts from the page or the keys."
+            return "No autopilot runs here: only so101 run has one."
+        if self.autopilot.done:
+            return "The autopilot has stopped: it starts no more attempts."
+        return None
+
+    def hold_autopilot(self, options: dict) -> Result:
+        """Hold the autopilot's next attempt back, or let it start."""
+        hold = options.get("hold")
+        if type(hold) is not bool:
+            return Result("autopilot_hold", False, f"autopilot_hold's hold must be true or false, not {hold!r}.")
+        if reason := self.hold_refusal():
+            return Result("autopilot_hold", False, reason)
+        self.autopilot.hold(hold)
+        running = "" if self.open_attempt is None else f" Attempt {self.attempt_number} runs on as before."
+        self._say(f"Autopilot held: the next attempt doesn't start until Continue.{running}" if hold else
+                  "Autopilot continues: the next attempt starts after the reset time.")
+        return Result("autopilot_hold", True)
+
     def label_step_in(self, options: dict) -> Result:
         """Record why the operator stepped in last: a `label` event."""
         label = options.get("label")
@@ -628,8 +791,10 @@ class Controller:
         before, shortfall = self.state, wording.shortfall(self) if given is Event.STOPPED_SHORT else None
         no_attempt = self.open_attempt is None  # asked before the actions, which may close the one open
         self.state = transition.state
-        if before is State.AUTONOMOUS and given in STEP_INS:
+        if before is State.AUTONOMOUS and given in ASKED_OR_STEPPED_IN:
             self.open_attempt.step_in()
+        if self.state is State.PAUSED and before is not State.PAUSED:
+            self.pause_ask = self._ask.kind if given is Event.POLICY_ASKED and self._ask is not None else None
         if transition.state is not before:
             self._confirm_until = None  # the arm moves on, or faults: a pending confirmation lapses
         if self.state not in (State.RETURNING, State.RESTING):
@@ -648,14 +813,15 @@ class Controller:
         ended_by = self.open_attempt.ended_by if self.open_attempt is not None else None
         if self.state is not before:
             ending = {"ended_by": ended_by} if self.state is State.RETURNING and ended_by else {}
+            asked = {"ask": self._ask.kind} if given is Event.POLICY_ASKED and self._ask is not None else {}
             self.recorder.event("state", state=self.state.value, previous=before.value, cause=given.value,
-                                **ending, **({"note": shortfall} if shortfall else {}))
+                                **ending, **asked, **({"note": shortfall} if shortfall else {}))
         if shortfall:
             self._say(shortfall)
         if self.state is not before:
             self._say(wording.announcement(self, ended_by, no_attempt), self.state.value)
         if self.quitting and given is Event.ARRIVED and Action.EXIT not in transition.actions:
-            self._say(wording.WAIT_FOR_LEADER)
+            self._say(wording.WAIT_FOR_LEADER.format(command=self.command))
         if self.prompt is not None and Action.CLOSE_ATTEMPT in transition.actions:
             self._say(wording.ASK_OUTCOME.format(attempt=self.prompt))
         if Action.CONFIRM_QUIT in transition.actions:
@@ -669,8 +835,10 @@ class Controller:
             case Action.OPEN_ATTEMPT:
                 self.attempt_number += 1
                 self.open_attempt = Attempt(self.attempt_number, self.clock())
+                self.fault_since_attempt = False
                 self.prompt = None  # a new attempt leaves the last one unlabelled
                 self.recorder.start_attempt(self.attempt_number)
+                self.policy.begin_episode(self.attempt_number)
             case Action.MOVE_TO_REST:
                 self.scripted_move = rollout.Move(self.rest_pose, self.fps, self.clock)
                 self._leader_to_rest()
@@ -681,8 +849,10 @@ class Controller:
                 self.scripted_move = rollout.Move(self.start_pose or dict(self.follower.present), self.fps, self.clock)
                 self.open_attempt.teleop_next = transition.then_teleop
             case Action.RUN_POLICY:
-                self.policy.run()
-                self.open_attempt.underway = True
+                attempt = self.open_attempt
+                # START until the stack has had the arm in this attempt, even when a person drove it first.
+                self.policy.run(Handback(PERSON if attempt.policy_ran else START, moved=attempt.moved))
+                attempt.underway, attempt.policy_ran, attempt.moved = True, True, False
             case Action.PAUSE_POLICY:
                 self.policy.pause()
             case Action.START_REWIND:
@@ -713,7 +883,7 @@ class Controller:
             case Action.QUIT_AT_REST:
                 self.quitting = True
                 if self.state is State.RESTING:
-                    self._say(wording.WAIT_FOR_LEADER)
+                    self._say(wording.WAIT_FOR_LEADER.format(command=self.command))
             case Action.CONFIRM_QUIT:
                 self.quitting = False
                 self._confirm_until = self.clock() + CONFIRM_S  # asked again: CONFIRM_S from now
@@ -723,7 +893,7 @@ class Controller:
                 # No attempt is open here: it was saved at rest, where the arm stopped short, or at a fault.
                 if action is Action.EXIT_LEAVING_MOTORS:
                     self.leaves_motors = True
-                    self._say(wording.LEAVING_MOTORS)
+                    self._say(wording.LEAVING_MOTORS.format(command=self.command))
                 self.done = True
                 try:
                     self.policy.pause()
@@ -775,6 +945,8 @@ class Controller:
             if attempt is not None:
                 self.open_attempt, self.closed_attempt = None, attempt
                 attempt.history = None  # nothing rewinds a closed attempt
+                with contextlib.suppress(Exception):  # the policy's bookkeeping never stops a close
+                    self.policy.end_episode()
             self._held_up()
 
     def _save_attempt(self, attempt: Attempt) -> None:
@@ -825,7 +997,10 @@ class Controller:
     # --- Status (built in `status`) ----------------------------------------------------------------
 
     def _build_status(self) -> dict:
-        return status.build(self, allowed(self.state, self.facts()))
+        refusals = allowed(self.state, self.facts())
+        if self.autopilot is not None:
+            refusals["autopilot_hold"] = self.hold_refusal()
+        return status.build(self, refusals)
 
     def _publish(self) -> None:
         self._status = (self._build_status(), self.link.client)

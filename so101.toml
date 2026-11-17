@@ -51,25 +51,28 @@ usb_id = "32e6:9221"
 [cameras.top.controls]
 # Anti-flicker for 50 Hz mains (India). 0 = off, 1 = 50 Hz, 2 = 60 Hz.
 power-line-frequency = 1
-# Fixed 20 ms exposure: two whole cycles of the lights' 10 ms flicker, so no banding (0.2%
-# measured). 30 ms looked a little richer but smeared the arm in the first recorded demos when it
-# moved fast; 20 ms cuts that blur by a third. Gamma 150 puts the mat at about 40/255 and the white
-# wall and arm near 211/255, with 0.16% of pixels clipped. Contrast 36 crushes the mat to 13/255;
-# gamma 220 washes the picture out.
+# Tuned for the room's daylight, which is brighter and warmer than the tube lights the first
+# settings were tuned under: in it the old 20 ms and gamma 150 clipped 41% of the picture.
+# Fixed 10 ms exposure: one whole cycle of the tube lights' 10 ms flicker, so they can't band it,
+# and half the motion blur of 20 ms. Gamma 80 and brightness -16 average the picture 83/255 with
+# 0.2% of pixels clipped (0.3% on the arm). Gamma 90 clips 0.6% of the arm, brightness -8 1.1% and
+# contrast 36 2%, with less room left if the light brightens. 20 ms with gamma 60 and brightness
+# -32 clips nothing, turns the wall neutral and has 30% less noise, at twice the motion blur.
 # The camera gives 20 frames/s at every exposure from 10 to 30 ms.
-# Fixed exposure doesn't adapt to light: if the room gets brighter, lower gamma first.
+# Fixed exposure doesn't adapt to light: if the room gets brighter, lower brightness or gamma first.
 auto-exposure-mode = 1
-exposure-time-abs = 200
-gamma = 150
-# Fixed white balance, so colours don't shift as the arm and props move through the picture.
-# 4000 K turns the white wall neutral. Auto must be off before the temperature takes effect, so it
-# comes first.
+exposure-time-abs = 100
+gamma = 80
+brightness = -16
+# Fixed white balance, so colours don't shift as the arm and props move through the picture. At
+# 10 ms every value from 2800 to 6500 K, and auto, leaves the white wall cream (194/164/138 at
+# 2800 K, 218/170/125 at 6500 K); 2800 K, the lowest, tints it least. Auto must be off before the
+# temperature takes effect, so it comes first.
 auto-white-balance-temp = 0
-white-balance-temp = 4000
+white-balance-temp = 2800
 # Saturation 64, up from the default 57, so the red block and amber container stand out more.
 saturation = 64
-# The camera's defaults, listed so applying this config also undoes any other values left set.
-brightness = 0
+# The camera's default, listed so applying this config also undoes any other value left set.
 contrast = 32
 
 # Camera on the gripper.
@@ -86,24 +89,26 @@ usb_id = "32e6:9005"
 # its picture. A fixed exposure of a whole number of flicker cycles avoids them (auto measured 5.3%
 # flicker), but this camera's exposure units run about 12% off: the band-free values are 114,
 # about 228 and 285. Values between them band (140 to 185 measured 3-8% flicker).
-# 228 with gamma 120 gives a black mat, a white wall and a saturated red block, with 0.5-1% of
-# pixels clipped and none on the gripper fingers. 114 needed gamma 200 to be bright enough, which
-# turned the mat milky grey and kept the brightest 1% under 195/255: a pale, flat picture. Higher
-# gamma at 228 clips the fingers (25% of their pixels at gamma 180).
-# Fixed exposure doesn't adapt to light: if images get too dark or bright, adjust gamma first.
+# In the room's daylight 228 with gamma 120 clipped 27% of the picture, so it uses 114 with gamma 80
+# and brightness -24: a black mat, a white wall with a pink tint and a saturated red block, with
+# 0.9% to 4.7% of pixels clipped as the light changed (up to 1.6% on the gripper fingers). At
+# brightness -16 clipping moved from 1.8% to 8.5% between two tries, so -24 leaves room. Contrast 28
+# at brightness -16 clips about as little (0.6%). 228 with gamma 50 and brightness -56 clips 0.4%,
+# none of it on the gripper, and keeps the wall neutral, at twice the motion blur.
+# Fixed exposure doesn't adapt to light: if images get too dark or bright, adjust brightness first.
 auto-exposure-mode = 1
-exposure-time-abs = 228
-gamma = 120
-brightness = 0
-# Auto white balance stays on: every fixed temperature from 3600 to 6500 K tinted this camera's
-# whites green or yellow, while auto keeps them neutral.
+exposure-time-abs = 114
+gamma = 80
+brightness = -24
+# Auto white balance stays on: in the daylight a fixed 2800 K tinted this camera's whites blue and
+# 4000 to 6500 K green or yellow, while auto keeps them nearest neutral.
 auto-white-balance-temp = 1
 # Contrast 32 and saturation 40, up from the defaults 27 and 25, which looked washed out.
 contrast = 32
 saturation = 40
 
-# Where `so101 record` saves demos (<dir>/<task>/sessions/) and `so101 serve` its runs
-# (<dir>/<task>/runs/), plus edits and the training dataset.
+# Where `so101 record` saves demos (<dir>/<task>/sessions/) and `so101 serve` and `so101 run` their
+# runs (<dir>/<task>/runs/), plus edits and the training datasets.
 # Relative to this file; git-ignored. Back it up with `uv run so101 backup <task>`.
 # The environment variable SO101_DATA_DIR overrides it.
 [data]
@@ -111,10 +116,10 @@ dir = "data"
 
 # `uv run so101 run <task>`: run a task's policy from tasks.toml on the follower.
 [run]
-# How many attempts each `so101 run` makes. Every run records to outputs/rollouts/.
+# How many attempts each `so101 run` makes: its autopilot starts each one, ends it at [control]
+# attempt_limit_s of policy time (or `--duration`), and resets between them. Runs record to
+# data/<task>/runs/, as serve's do. A whole number, 1 or more.
 episodes = 1
-# Seconds per attempt. 0 runs until Esc or Ctrl+C.
-duration_s = 30
 # Torch device for the policy, here and when training locally: "mps" (Apple GPU), "cpu" or "cuda".
 device = "mps"
 
@@ -192,22 +197,22 @@ job_timeout = "1h"
 # other value, so stop and start the server after changing it.
 pin_unused_actions = true
 
-# `uv run so101 serve [task]`: the control center, a web page for supervising the follower from a
-# phone or laptop over Tailscale. `serve` checks every setting here before it starts, and refuses to
-# start on a missing or partial rest pose or a value out of its range; `so101 check` warns about the
-# same problems. Only blame_s is used elsewhere: `runs`, `build --with` and `review --runs` read it to
+# `uv run so101 serve [task]` and `uv run so101 run [task]`: the control center, a web page for
+# supervising the follower from a phone or laptop over Tailscale. Both check every setting here before
+# they start, and refuse to start on a missing or partial rest pose or a value out of its range;
+# `so101 check` warns about the same problems. Only blame_s is used elsewhere: `runs`, `build --with` and `review --runs` read it to
 # find the suspect frames, and stop if it isn't a number of 0 or more.
 [control]
+rest_pose = { shoulder_pan = 2037, shoulder_lift = 836, elbow_flex = 3029, wrist_flex = 2873, wrist_roll = 2037, gripper = 859 }
+rest_pose_calibration = "3aceb365a7e9"
 # Where Reset sends the follower at the end of every attempt: each of the six motors' raw position in
 # encoder steps (0-4095), the same for every task. Pick a folded pose that stays put with the power
-# off, move the arm there by hand, and save it with `uv run so101 pose --save-rest`, which replaces
-# the rest_pose and rest_pose_calibration lines below with the ones it saves.
-rest_pose = { shoulder_pan = 2026, shoulder_lift = 853, elbow_flex = 3032, wrist_flex = 2725, wrist_roll = 2026, gripper = 870 }
-# The first 12 hex digits of the follower calibration file's SHA-256 when rest_pose was saved, which
-# `pose --save-rest` writes. Recalibrating changes where each step count puts a joint, so `serve`
-# refuses to start when the calibration file no longer matches, or when this line is missing:
-# save the rest pose again. `so101 check` only warns about either.
-rest_pose_calibration = "3aceb365a7e9"
+# off, move the arm there by hand, and save it with `uv run so101 pose --save-rest`, which writes
+# rest_pose and rest_pose_calibration right under [control], replacing any saved before.
+# rest_pose_calibration is the first 12 hex digits of the follower calibration file's SHA-256 when
+# rest_pose was saved. Recalibrating changes where each step count puts a joint, so `serve` and `run`
+# refuse to start when the calibration file no longer matches, or when the line is missing: save the rest
+# pose again. `so101 check` only warns about either.
 # Seconds of the arm's actual motion each Rewind plays back, newest first, in real time. Short
 # enough to undo only the mistake; press Rewind again to go back another rewind_s, never past the
 # start of the attempt.
@@ -216,9 +221,11 @@ rewind_s = 2.5
 # Teleop. Demos record for up to 30 s (episode_time_s in tasks.toml), so 45 s gives a policy half as
 # long again to finish or retry, while a forgotten attempt still ends. Only policy time counts because
 # the backstop limits how long the policy gets: a pause to look closer or step away never ends an
-# attempt. At the limit the arm returns to rest, the attempt is saved, and `serve` asks how it went.
-# The right arrow or Reset is the normal way an attempt ends. `so101 run` keeps [run] duration_s for
-# comparable evaluations.
+# attempt. At the limit the arm returns to rest, the attempt is saved, and `serve` asks how it went;
+# `run` leaves it unlabelled.
+# The right arrow or Reset is the normal way an attempt ends. `so101 run` ends its attempts here too;
+# `so101 run --duration` sets another limit for one run, and `so101 sim eval` gives each simulated
+# attempt this long unless its own --duration says otherwise.
 attempt_limit_s = 45
 # Backstop of Teleop seconds in one attempt. 3 minutes is six times a 30 s demo, so it doesn't cut
 # a slow correction or demo short, but a forgotten one stops recording.
@@ -232,7 +239,11 @@ teleop_from_rest = "start-pose"
 # undone.
 blame_s = 2.5
 # What a running policy does when the controlling page stops polling for link_timeout_s seconds:
-# "pause" holds the arm, so a policy never runs unsupervised; "continue" keeps it running.
+# "pause" holds the arm, so a policy never runs unsupervised; "continue" keeps it running, for
+# `so101 serve` only. `so101 run` refuses "continue", since an attempt its autopilot started would
+# keep driving with nobody watching. Its autopilot starts motion only while a page in control polls:
+# it starts and ends nothing while the link is lost, leaves the attempt then open to you, and once a
+# page watches again waits --reset-time, at least link_timeout_s + 0.5 s, before the next attempt.
 on_link_loss = "pause"
 # The page polls 4 times a second, so 3 s is 12 missed polls: a real dropout, not a slow phone. At
 # least 1 s, so a few slow polls never count as a lost link.
@@ -242,12 +253,41 @@ link_timeout_s = 3
 # running. "127.0.0.1" allows only this computer's browser. It never listens on 0.0.0.0. The checks of
 # Tailscale's routes are in the README, under The control page.
 bind = "tailscale"
-# The control page's port: `serve` serves the page at http://<address>:<port>/.
+# The control page's port: `serve` and `run` serve the page at http://<address>:<port>/.
 port = 8101
+# The reviewer's port: `review` and `review --runs` serve their page at http://<address>:<review_port>/,
+# where `bind` above says, so you can review while `serve` or `run` runs. It must differ from port.
+review_port = 8766
 # Frames per second of each camera preview on the page, 320 px wide. Enough to see what the robot
 # sees, at a sixth of the cameras' 30 fps, so previews over Tailscale stay light on a phone. When
 # the control loop falls under 95% of the task's fps, previews drop to half this rate, then stop.
 preview_fps = 5
+
+# The supervisor in `so101 serve` and `so101 run` (docs/supervisor.md), a policy over the policy: rules
+# on the arm's readings catch stuck attempts, and vision models check the cameras after each close and
+# release.
+[supervisor]
+# "off" runs none. "shadow" decides and logs every decision as a `supervisor` event in the run's
+# events.jsonl, and leaves every tick to the policy: run it first, to measure what it would catch and
+# its false alarms. "act" plays back a grasp both judges call missed and retries, holds the arm on a
+# stuck rule, and pauses for you when the cameras don't clear the hold within 5 s, with advice, or when
+# the task looks done and the arm is home. It never ends or labels an attempt, and acts on nothing while
+# you have the arm; in `so101 run` the autopilot ends an attempt it calls done. Its vision checks bill the keys in
+# .scratch/bench.env (TYPESAFE_API_KEY for Jev, OPENROUTER_API_KEY for Gemini 3.8 Flash and the
+# escalation), up to max_cost_usd per run in the program, and need `uv sync --group failbench`.
+# Without them it runs the rules alone. `--supervisor off|shadow|act` on `so101 serve` and `so101 run`
+# sets the mode for one run instead, and each run's run.json records the mode it ran with.
+mode = "off"
+# The program: when it checks, its judges, its responses and its budget, with where each number came
+# from. Leave it out to use src/so_101/supervisor/program.toml. A path is relative to this file.
+# program = "supervisor-program.toml"
+
+# The perception every run has, whatever [supervisor] mode says: it marks each close, carry and release
+# in the run's events, and `so101 skills` and `build --skills` cut demos at the same events.
+[perception]
+# The gripper and stuck-rule thresholds, with where each number came from. Leave it out to use
+# src/so_101/grasp/grasp.toml. A path is relative to this file.
+# thresholds = "grasp.toml"
 
 # `uv sync --extra sim`, then `uv run so101 sim build`: a simulated twin of the default task, worked out
 # from its demos. Rebuild after recording new demos, or after changing anything here. Every setting is

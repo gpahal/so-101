@@ -44,16 +44,16 @@ class ExecutionTest(unittest.TestCase):
         self.assertEqual(execution.supported_modes, ["rtc_guided"])
         self.assertTrue(execution.rtc.enabled)
         self.assertEqual(execution.rtc.mode, "guided")
-        # Steered over the 1 s the arm can play while a request is out, not LeRobot's default 10 steps.
-        self.assertEqual(execution.rtc.execution_horizon, 30)
+        # Steered over 0.65 s, just past the turnaround, not the whole 1 s queue nor LeRobot's 10 steps.
+        self.assertEqual(execution.rtc.execution_horizon, 20)
         self.assertIsNone(execution.n_action_steps)  # LeRobot refuses a fixed slice with RTC
         client = parse_client("pi05")
         self.assertEqual((client.mode, client.chunk_merge), ("rtc_guided", "append"))
-        # Asks with 1 s left, all of it steered, and holds up to 2 s for a late chunk before failing.
+        # Asks with 1 s left, and holds up to 2 s for a late chunk before failing.
         self.assertEqual((client.refill_seconds, client.action_starvation_grace_s), (1.0, 2.0))
 
     def test_the_steered_horizon_never_exceeds_what_the_model_predicts(self) -> None:
-        self.assertEqual(parse_server("pi05", 20).execution.rtc.execution_horizon, 20)
+        self.assertEqual(parse_server("pi05", 10).execution.rtc.execution_horizon, 10)
 
     def test_act_keeps_plain_aligned_chunks_of_its_action_steps(self) -> None:
         execution = parse_server("act", 100).execution
@@ -140,35 +140,312 @@ class PolicySetupTest(unittest.TestCase):
     def test_run_and_serve_refuse_action_steps_for_pi05_before_asking_for_a_server(self) -> None:
         ns = argparse.Namespace(task="task", policy="pi05", remote=True, revision=None, checkpoint=None,
                                 action_steps=30)
-        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy: {"chunk_size": 50})
+        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy, skills=False: {"chunk_size": 50})
         with mock.patch.object(remote, "active_server") as active, contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as exited:
                 policy.policy_setup(types.SimpleNamespace(), ns, task)
         self.assertIn("takes no --action-steps", str(exited.exception.code))
         active.assert_not_called()
 
+    SERVED = "b" * 40  # the commit the running server loaded
+
     def setup(self, s: types.SimpleNamespace) -> mock.Mock:
         """Run `policy_setup` for pi0.5 on the cloud GPU up to where it asks for the server."""
         ns = argparse.Namespace(task="task", policy="pi05", remote=True, revision=None, checkpoint=None,
                                 action_steps=None)
-        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy: {"chunk_size": 50})
-        with mock.patch.object(remote, "require_server", side_effect=SystemExit("asked")) as require:
+        self.read_at = []
+
+        def policy_config(revision, policy, skills=False):
+            self.read_at.append(revision)
+            return {"chunk_size": 50}
+
+        task = types.SimpleNamespace(name="task", policy_config=policy_config)
+        running = server({**remote._labels("task", "pi05", "main", 50, True), "commit": self.SERVED})
+        with mock.patch.object(remote, "active_server", return_value=running), \
+                mock.patch.object(remote, "require_server", side_effect=SystemExit("asked")) as require:
             with self.assertRaises(SystemExit) as exited:
                 policy.policy_setup(s, ns, task)
         self.exited = str(exited.exception.code)
         return require
+
+    def test_a_remote_run_reads_the_model_at_the_commit_its_server_loaded(self) -> None:
+        section = settings.Remote(job_target="l4x1", job_timeout="1h", pin_unused_actions=True)
+        self.setup(types.SimpleNamespace(path="so101.toml", remote={"pi05": section}))
+        self.assertEqual(self.read_at, [self.SERVED], "never main, which may name a newer model")
+
+    def test_a_server_from_before_the_commit_label_is_refused_with_how_to_restart_it(self) -> None:
+        old = server(remote._labels("task", "pi05", "main", 50, True))
+        with self.assertRaises(SystemExit) as exited:
+            remote.served_commit(old, "task", "pi05", "main")
+        message = str(exited.exception.code)
+        self.assertIn("started before so101 recorded the commit it serves", message)
+        self.assertIn("uv run so101 server stop", message)
+        self.assertIn("uv run so101 server start task --policy pi05 --revision main", message)
+
+    def test_a_server_that_changed_during_the_checks_stops_the_run(self) -> None:
+        ns = argparse.Namespace(task="task", policy="pi05", remote=True, revision=None, checkpoint=None,
+                                action_steps=None)
+        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy, skills=False: {"chunk_size": 50})
+        labels = remote._labels("task", "pi05", "main", 50, True)
+        first, second = server({**labels, "commit": "b" * 40}), server({**labels, "commit": "d" * 40})
+        section = settings.Remote(job_target="l4x1", job_timeout="1h", pin_unused_actions=True)
+        with mock.patch.object(remote, "active_server", return_value=first), \
+                mock.patch.object(remote, "require_server", return_value=second):
+            with self.assertRaises(SystemExit) as exited:
+                policy.policy_setup(types.SimpleNamespace(path="so101.toml", remote={"pi05": section}), ns, task)
+        self.assertIn("changed while the run was being checked", str(exited.exception.code))
+
+    def test_a_local_run_reads_and_downloads_the_model_at_one_commit(self) -> None:
+        ns = argparse.Namespace(task="task", policy="act", remote=False, revision=None, checkpoint=None,
+                                action_steps=None)
+        calls = []
+
+        def download_policy(revision, skills=False, *, folder):
+            calls.append(("download", revision, folder))
+            raise SystemExit("downloaded")
+
+        task = types.SimpleNamespace(
+            name="task", cameras=(), policy_for=lambda policy, skills=False: "me/act_so101_task",
+            policy_commit=lambda revision, policy, skills=False: calls.append(("commit", revision)) or "c" * 40,
+            policy_config=lambda revision, policy, skills=False: calls.append(("config", revision)) or {"chunk_size": 10, "input_features": {}},
+            download_policy=download_policy)
+        s = types.SimpleNamespace(leader=types.SimpleNamespace(resolve_port=mock.Mock(side_effect=policy.PortNotFoundError(types.SimpleNamespace(name="leader", port=None, serial_number=None)))))
+        with mock.patch.object(policy, "preflight", return_value=([], None)), \
+                mock.patch.object(policy, "cameras_arg", return_value=""), \
+                self.assertRaises(SystemExit) as exited:
+            policy.policy_setup(s, ns, task)
+        self.assertEqual(str(exited.exception.code), "downloaded")
+        self.assertEqual(calls, [("commit", None), ("config", "c" * 40), ("download", "c" * 40, None)],
+                         "one commit for the config and the checkpoint, in the folder of the revision asked for")
+
+    def test_the_skills_check_reads_the_models_build_at_the_commit_checked(self) -> None:
+        from so_101.skills import STATE_KEY
+
+        ns = argparse.Namespace(policy="act", revision=None)
+        task = types.SimpleNamespace(name="task", skills=("pick", "place"),
+                                     policy_for=lambda policy, skills=False: "me/act_so101_task_skills")
+        config = {"input_features": {STATE_KEY: {"shape": [2]}}}
+        s = types.SimpleNamespace(perception=types.SimpleNamespace(thresholds="grasp.toml"))
+        gripper = types.SimpleNamespace()
+        with mock.patch("so_101.grasp.thresholds.load", return_value=types.SimpleNamespace(gripper=gripper)), \
+                mock.patch.object(policy, "skills_build", return_value={"inputs": {}}) as build, \
+                mock.patch.object(policy, "require_skills_contract"), \
+                mock.patch("so_101.skills.gripper_hash", return_value="h"):
+            self.assertEqual(policy.check_skills_model(s, ns, task, config, None, True, "b" * 40), "h")
+        # `s` first: a local model's build is read from the copy `train` kept under s.outputs_dir.
+        build.assert_called_once_with(s, None, "me/act_so101_task_skills", "b" * 40)
+
+    def test_start_server_loads_and_labels_the_commit_its_revision_names(self) -> None:
+        api = mock.Mock()
+        api.model_info.return_value = types.SimpleNamespace(sha="a" * 40)
+        api.run_job.return_value = types.SimpleNamespace(id="job", url="https://x")
+        configs = []
+        real = remote.server_config
+
+        def config(*args, **kwargs):
+            configs.append(real(*args, **kwargs))
+            return configs[-1]
+
+        with mock.patch("huggingface_hub.HfApi", return_value=api), mock.patch("huggingface_hub.get_token", return_value="t"), \
+                mock.patch.object(remote, "check_ssh_key"), mock.patch.object(remote, "active_server", return_value=None), \
+                mock.patch.object(remote, "server_config", side_effect=config), \
+                mock.patch.object(remote, "wait_until_ready"), contextlib.redirect_stdout(io.StringIO()):
+            remote.start_server(repo="me/act_so101_task", task="task", policy_type="act", revision="main",
+                                image_sizes=SIZES, action_steps=100, fps=30, target="l4x1", timeout="1h",
+                                pin_unused_actions=False)
+        api.model_info.assert_called_once_with("me/act_so101_task", revision="main")
+        labels = api.run_job.call_args.kwargs["labels"]
+        self.assertEqual((labels["revision"], labels["commit"]), ("main", "a" * 40))
+        self.assertEqual(configs[0]["model"]["revision"], "a" * 40, "the server loads the commit it's labelled with")
+        self.assertIn("commit aaaaaaaaaaaa", remote.describe(server(labels)))
 
     def test_run_and_serve_ask_for_a_server_with_so101_tomls_pin_setting(self) -> None:
         for pin in (True, False):
             with self.subTest(pin=pin):
                 section = settings.Remote(job_target="l4x1", job_timeout="1h", pin_unused_actions=pin)
                 require = self.setup(types.SimpleNamespace(path="so101.toml", remote={"pi05": section}))
-                require.assert_called_once_with("task", "pi05", "main", 50, pin)
+                require.assert_called_once_with("task", "pi05", "main", 50, pin, "whole")
 
     def test_run_and_serve_stop_without_a_remote_section_for_the_policy(self) -> None:
         require = self.setup(types.SimpleNamespace(path="so101.toml", remote={}))
         self.assertEqual(self.exited, "No [remote.pi05] section in so101.toml.")
         require.assert_not_called()
+
+
+SKILL_NAMES = ("pick", "place", "return")
+
+
+def skill_list(names=SKILL_NAMES) -> tuple:
+    return tuple(types.SimpleNamespace(name=name) for name in names)
+
+
+def checkpoint_inputs(policy_type: str, skills: int = 0) -> dict:
+    """A trained checkpoint's input_features, as LeRobot's server reads them: the joints, the two
+    cameras (and pi0.5's empty slot), and with `skills` the one-hot a skills dataset adds."""
+    from lerobot.configs import FeatureType, PolicyFeature
+
+    inputs = {"observation.state": PolicyFeature(FeatureType.STATE, (6,)),
+              **{f"observation.images.{c}": PolicyFeature(FeatureType.VISUAL, (3, 480, 640)) for c in SIZES}}
+    if policy_type == "pi05":
+        inputs["observation.images.empty_camera_0"] = PolicyFeature(FeatureType.VISUAL, (3, 224, 224))
+    if skills:
+        inputs["observation.environment_state"] = PolicyFeature(FeatureType.ENV, (skills,))
+    return inputs
+
+
+def served_features(policy_type: str, skills: tuple = ()) -> tuple:
+    from lerobot.remote_inference.configs import ServerConfig
+
+    config = remote.server_config("x/y", policy_type, "main", SIZES, 50, 30, skills)
+    return tuple(draccus.decode(ServerConfig, config).features)
+
+
+class SkillsServerTest(unittest.TestCase):
+    """LeRobot's server serves a checkpoint only when the inputs its config names equal the checkpoint's:
+    a skills checkpoint has the one-hot too, which the server must name and the client must send."""
+
+    def validators(self) -> dict:
+        from lerobot.policies.pretrained import PreTrainedPolicy
+
+        _, pi05, _ = run_server_script("pi05", True)
+        return {"act": PreTrainedPolicy.validate_chunk_input_features, "pi05": pi05.validate_chunk_input_features}
+
+    def test_each_policys_validator_accepts_a_skills_checkpoint_served_with_the_one_hot(self) -> None:
+        for policy_type, validate in self.validators().items():
+            with self.subTest(policy_type):
+                model = types.SimpleNamespace(config=types.SimpleNamespace(input_features=checkpoint_inputs(policy_type, 3)))
+                validate(model, served_features(policy_type, skill_list()))
+                # Without it, as before: the job loads the model, fails validation and exits, billed.
+                with self.assertRaises(ValueError):
+                    validate(model, served_features(policy_type))
+                whole = types.SimpleNamespace(config=types.SimpleNamespace(input_features=checkpoint_inputs(policy_type)))
+                validate(whole, served_features(policy_type))
+
+    def test_the_server_names_the_one_hot_only_for_a_checkpoint_that_reads_it(self) -> None:
+        reads = {"input_features": {"observation.environment_state": {"shape": [3]}}}
+        self.assertEqual(remote.skill_inputs(reads, skill_list(), "me/m"), skill_list())
+        self.assertEqual(remote.skill_inputs({"input_features": {}}, skill_list(), "me/m"), ())
+        with self.assertRaises(SystemExit) as stop:
+            remote.skill_inputs(reads, skill_list(("pick", "place")), "me/m")
+        self.assertIn("reads a one-hot of 3 skills, and the task lists 2", str(stop.exception.code))
+
+    def test_the_client_admits_the_one_hot_exactly_as_the_server_names_it(self) -> None:
+        from lerobot.remote_inference.client import _compare_feature
+        from lerobot.rollout import context
+
+        from so_101.control import main
+
+        robot = {"observation.state": {"dtype": "float32", "shape": (6,), "names": remote.JOINTS}}
+        with mock.patch.object(context, "_aggregate_rollout_features", return_value=dict(robot)):
+            with main._skill_features(SKILL_NAMES):
+                features = context._aggregate_rollout_features(None, {}, {}, use_videos=True)
+            self.assertEqual(context._aggregate_rollout_features(None, {}, {}, use_videos=True), robot, "put back after")
+        served = {f.name: f for f in served_features("act", skill_list())}
+        key = "observation.environment_state"
+        _compare_feature(context._feature_spec(key, features[key], served[key].semantics), served[key])
+        with main._skill_features(()):
+            self.assertIs(context._aggregate_rollout_features, context._aggregate_rollout_features)
+
+    def test_the_frame_the_remote_engine_submits_carries_the_one_hot_from_the_first_tick(self) -> None:
+        from lerobot.remote_inference import RemoteInferenceEngine
+
+        from so_101.policy.base import Conditioning, Handback, Tick, START
+        from so_101.policy.engine import EngineDriver
+
+        served = served_features("act", skill_list())
+        client = types.SimpleNamespace(capabilities=types.SimpleNamespace(
+            features=served, action_interval=1 / 30, training_max_delay=None), blend_indices=(), session_id="")
+        names = [f"skill.{n}" for n in SKILL_NAMES]
+        features = {"observation.state": {"dtype": "float32", "shape": (6,), "names": remote.JOINTS},
+                    "observation.environment_state": {"dtype": "float32", "shape": (3,), "names": names}}
+        engine = RemoteInferenceEngine(client=client, config=parse_client("act"), dataset_features=features)
+        sent = []
+        engine.submit_observation = lambda frame, capture_time=None: sent.append(dict(frame))
+        driver = EngineDriver(engine, remote.JOINTS, dataset_features=features)
+        robot = types.SimpleNamespace(supports_hold=False)
+        pose = dict.fromkeys(remote.JOINTS, 0.0)
+        driver._step(robot, pose)  # before the sequencer's first conditioning, as at the start of a run
+        torch.testing.assert_close(torch.as_tensor(sent[-1]["observation.environment_state"]), torch.tensor([1.0, 0, 0]))
+        # The worker that would ask the server isn't running: only the frame the control thread builds counts.
+        with mock.patch.object(engine, "set_task", return_value=True), mock.patch.object(engine, "reset"), \
+                mock.patch.object(engine, "resume"):
+            driver.run(Handback(START))
+            driver.condition(Conditioning("Put it in", SKILL_NAMES, 1))
+        driver.step(robot, Tick(0.0, 0, pose, pose))
+        torch.testing.assert_close(torch.as_tensor(sent[-1]["observation.environment_state"]), torch.tensor([0.0, 1, 0]))
+        self.assertEqual(set(sent[-1]), {"observation.state", "observation.environment_state"})
+
+
+class ReconnectTest(unittest.TestCase):
+    def test_a_new_session_is_admitted_with_the_servers_own_contract(self) -> None:
+        from so_101.control import main
+
+        caps = types.SimpleNamespace(features=served_features("act", skill_list()), action_feature="action")
+        client = mock.Mock(capabilities=caps)
+        main.admit(client, types.SimpleNamespace(semantics=remote.SEMANTICS, mode="chunk"), 30)
+        client.admit.assert_called_once_with(features=caps.features, action_feature="action", semantics=remote.SEMANTICS,
+                                             action_interval=1 / 30, mode="chunk")
+
+    def test_remote_context_wraps_no_client_method_and_adds_the_one_hot_only_for_a_skills_run(self) -> None:
+        import json
+        import os
+
+        from lerobot.remote_inference import RemoteClient
+        from lerobot.rollout import context
+
+        from so_101.control import main
+
+        admit = RemoteClient.admit
+        for skills in ((), [{"name": n} for n in SKILL_NAMES]):
+            with self.subTest(skills=bool(skills)):
+                seen = {}
+
+                def build(cfg, event):
+                    seen["admit"] = RemoteClient.admit
+                    seen["features"] = context._aggregate_rollout_features(None, {}, {}, use_videos=True)
+                    inference = types.SimpleNamespace(client=types.SimpleNamespace(artifact_identity="sha"), task="t")
+                    return types.SimpleNamespace(policy=types.SimpleNamespace(inference=inference))
+
+                run = json.dumps({"manifest": {"policy": {"skills": skills}}})
+                cfg = types.SimpleNamespace(inference=parse_client("act"), fps=30, rename_map={})
+                with mock.patch.dict(os.environ, {main.RUN_ENV: run}), mock.patch("lerobot.rollout.build_rollout_context", build), \
+                        mock.patch.object(context, "_aggregate_rollout_features", return_value={}), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    main.remote_context(cfg)
+                self.assertIs(seen["admit"], admit)
+                self.assertEqual("observation.environment_state" in seen["features"], bool(skills))
+
+    def test_a_reconnected_engine_is_told_the_skill_the_run_was_on(self) -> None:
+        from fakes import make_engine
+
+        from so_101.policy.base import Conditioning
+        from so_101.policy.engine import EngineDriver
+
+        first, second = make_engine([[0.0] * 6]), make_engine([[0.0] * 6])
+        driver = EngineDriver(first, remote.JOINTS, reconnect=lambda: second)
+        driver.condition(Conditioning("Put the red block in the cylindrical container", SKILL_NAMES, 1))
+        first.error = "the server went away"
+        messages = []
+        for _ in range(200):
+            messages += driver.maintain()
+            if driver.engine is second:
+                break
+            import time
+
+            time.sleep(0.01)
+        self.assertIs(driver.engine, second)
+        self.assertEqual(second.task, "Put the red block in the cylindrical container")
+        self.assertIn("Reconnected to the cloud GPU's policy server: Resume works again.", messages)
+
+
+class ReadyTest(unittest.TestCase):
+    def test_a_ready_server_names_run_and_serve_for_either_model(self) -> None:
+        for dataset, skills in (("whole", ""), ("skills", " --skills")):
+            with self.subTest(dataset):
+                lines = remote.ready_lines("block-container", "pi05", "main", 50, dataset)
+                self.assertIn(f"uv run so101 run block-container --policy pi05 --remote --revision main{skills}\n", lines)
+                self.assertIn(f"uv run so101 serve block-container --policy pi05 --remote --revision main{skills}\n", lines)
+        self.assertIn("--revision main --action-steps 100\n", remote.ready_lines("t", "act", "main", 100))
 
 
 USED, COLUMNS, STEPS = 3, 8, 4

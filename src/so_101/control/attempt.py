@@ -31,9 +31,13 @@ class Attempt:
     waited_s: float = 0.0  # of the seconds toward attempt_limit_s, those where the policy sent no action
     limit_hit: str | None = None  # the limit it used up last, which a time_limit ending names
     underway: bool = False  # the policy or a human has driven in it
+    policy_ran: bool = False  # the policy stack has had the arm in it: its handbacks say PERSON, not START
     policy_drove: bool = False  # it has recorded a frame where the policy's action reached the arm
     teleop_next: bool = False  # the move to the start pose hands over to the leader, not the policy
     history: History | None = field(default_factory=History)  # what Rewind plays back; None once closed
+    skill: int = -1  # the skill the policy stack last said the model was conditioned on, recorded on each frame
+    moved: bool = False  # Teleop, a Rewind, a return to rest or a layer's playback moved the arm since the
+    # policy stack last had it; a playback the layer handed back itself, and the model drove after, doesn't count
     # Runs of one phase, each {"phase", "s", "stepped_in"}.
     timeline: list[dict] = field(default_factory=list)
     stepped_in: bool = False  # the next run of the timeline starts with a step-in

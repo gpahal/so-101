@@ -132,6 +132,12 @@
       <p id="state-sentence"></p>
     </div>
 
+    <!-- so101 run's autopilot: how far it is, and Hold or Continue, which stop or let the next attempt start. Hidden in serve. -->
+    <div class="card row between" id="autopilot-box" hidden>
+      <div><div class="title" style="font-size:14px" id="autopilot-made"></div><div class="small" id="autopilot-text"></div></div>
+      <button class="take" id="autopilot-hold">Hold</button>
+    </div>
+
     <div class="cams" id="cams"></div>
 
     <div class="card" id="prompt" hidden>
@@ -286,6 +292,19 @@ let toastTimer = null;
 let camsBuilt = false;
 let previewsOn = true;
 let sheetAttempt = null;  // the attempt the Reset sheet was opened for
+// As the Reset sheet opens, the page tells the control center once that a person started saying how the
+// attempt went (commands.ANSWERING): so101 run's autopilot hands that attempt over to them, as a Pause
+// does, whether they then answer or cancel. Only a click sends it, never a timer.
+function tellAnswering() {
+  fetch("/command", {
+    method: "POST", headers: { ...HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify({ command: "answering", for_attempt: sheetAttempt }),
+  }).catch(() => {});
+}
+
+function closeSheet() {
+  $("reset-sheet").hidden = true;
+}
 
 function deviceName(device) {
   return DEVICE_NAMES[device] || device.charAt(0).toUpperCase() + device.slice(1) + " cam";
@@ -302,7 +321,10 @@ function wallTime(wall) {
 
 function sentence(st) {
   const policy = st.policy ? `Policy ${st.policy}` : "The policy";
-  const policyTime = st.policy_s != null ? ` ${Math.round(st.policy_s)} of ${st.limit_s} s policy time used.` : "";
+  // limit_s is null when attempts have no time limit (so101 run --duration 0).
+  const policyTime = st.policy_s == null ? "" : st.limit_s == null
+    ? ` ${Math.round(st.policy_s)} s of policy time used, with no limit.`
+    : ` ${Math.round(st.policy_s)} of ${st.limit_s} s policy time used.`;
   switch (st.state) {
     case "resting": return `At the rest pose. Ready to start attempt ${st.attempt + 1}.`;
     case "starting": return "Moving to the demos' start pose.";
@@ -385,6 +407,7 @@ function render(st, ms) {
 
   renderTimeline(st);
   renderReasons(st);
+  renderAutopilot(st);
 
   $("rewind-label").textContent = `Rewind ${st.rewind_s} s`;
   for (const button of document.querySelectorAll("[data-command]")) {
@@ -403,9 +426,29 @@ function render(st, ms) {
   renderTools(st);
 
   // The sheet ends only the attempt it was opened for; the server refuses it for any other.
-  if (!$("reset-sheet").hidden && (!st.allowed.reset || st.attempt !== sheetAttempt)) $("reset-sheet").hidden = true;
+  if (!$("reset-sheet").hidden && (!st.allowed.reset || st.attempt !== sheetAttempt)) closeSheet();
   $("sheet-pause").hidden = !st.allowed.pause;
   if (st.last_event > lastSeen) loadEvents();
+}
+
+function renderAutopilot(st) {
+  const pilot = st.autopilot;
+  $("autopilot-box").hidden = !pilot;
+  if (!pilot) return;
+  $("autopilot-made").textContent = `Autopilot: ${pilot.made} of ${pilot.of} attempts made`;
+  let text = pilot.waiting || "";
+  if (!text && pilot.held) text = st.attempt_open ? "Held: this attempt runs on as before, and the next doesn't start until Continue." : "Held: the next attempt doesn't start until Continue.";
+  else if (!text && pilot.next_in_s != null) text = pilot.next_in_s > 0 ? `The next attempt starts in ${Math.ceil(pilot.next_in_s)} s.` : "The next attempt is starting.";
+  // limit_s is null with no time limit (so101 run --duration 0): then only you or a done verdict ends it.
+  else if (!text && st.attempt_open) text = (st.limit_s == null
+    ? "This attempt has no time limit: the autopilot ends it only when the supervisor judges it done. Any other pause waits for you."
+    : "It ends this attempt at its time limit, or when the supervisor judges it done. Any other pause waits for you.")
+    + " Your Pause, Resume, Rewind, Teleop or Reset takes it over.";
+  $("autopilot-text").textContent = text;
+  const button = $("autopilot-hold");
+  button.textContent = pilot.held ? "Continue" : "Hold";
+  button.disabled = !st.allowed.autopilot_hold;
+  button.title = st.refusals.autopilot_hold || (pilot.held ? "Let the next attempt start after the reset time." : "Keep the next attempt from starting. An attempt running now carries on as before.");
 }
 
 const TOOL_NAMES = { check: "Run checks", pose: "Check pose" };
@@ -672,6 +715,7 @@ function describe(e) {
       };
       let text = names[e.state] || e.state;
       if (e.ended_by) text += ` (ended by ${e.ended_by.replace("_", " ")})`;
+      if (e.cause === "policy_asked") text += ": the supervisor asks for you";
       if (e.note) text += `. ${e.note}`;
       return text;
     }
@@ -683,6 +727,10 @@ function describe(e) {
       return `Attempt ${e.attempt} ${e.saved ? "saved" : "not saved"} (${Math.round(seconds)} s, ended by ${String(e.ended_by).replace("_", " ")})`;
     }
     case "rewind": return `Rewound ${e.seconds} s`;
+    case "playback": return `${e.layer ? e.layer.charAt(0).toUpperCase() + e.layer.slice(1) : "A layer"} played back ${e.seconds} s of the policy's motion`;
+    case "supervisor":
+      if (e.kind === "rewind") return `Supervisor played back ${e.seconds} s`;
+      return e.kind === "decision" && e.acted ? `Supervisor: ${e.decision}` : null;
     case "handover": return "The leader lined up with the follower: Teleop";
     case "fault": return `Fault: ${e.error}`;
     case "control_taken": return e.previous ? `A page (${e.who}) took control from ${e.previous}` : `A page (${e.who}) has control`;
@@ -730,6 +778,7 @@ for (const button of document.querySelectorAll("[data-command]")) {
       sheetAttempt = status.attempt;
       $("sheet-attempt").textContent = status.attempt;
       $("reset-sheet").hidden = false;
+      tellAnswering();
       return;
     }
     send({ command });
@@ -737,11 +786,12 @@ for (const button of document.querySelectorAll("[data-command]")) {
 }
 for (const button of document.querySelectorAll("[data-reset]")) {
   button.onclick = () => {
-    $("reset-sheet").hidden = true;
+    closeSheet();
     if (button.dataset.reset) send({ command: "reset", outcome: button.dataset.reset, for_attempt: sheetAttempt });
   };
 }
-$("reset-sheet").onclick = (event) => { if (event.target === $("reset-sheet")) $("reset-sheet").hidden = true; };
+$("reset-sheet").onclick = (event) => { if (event.target === $("reset-sheet")) closeSheet(); };
+$("autopilot-hold").onclick = () => { if (status && status.autopilot) send({ command: "autopilot_hold", hold: !status.autopilot.held }); };
 // Pause leaves the sheet open, so the operator can still say how the attempt went.
 $("sheet-pause").onclick = () => send({ command: "pause" });
 for (const button of document.querySelectorAll("[data-tool]")) button.onclick = () => send({ command: button.dataset.tool });
@@ -779,7 +829,7 @@ function onKey(event) {
     if (spaceDown) return;
     spaceDown = true;
   }
-  if (key === "Escape") { $("reset-sheet").hidden = true; $("results-sheet").hidden = true; return; }
+  if (key === "Escape") { if (!$("reset-sheet").hidden) closeSheet(); $("results-sheet").hidden = true; return; }
   if (!status) return;
   const refusal = (command) => status.refusals[command];
   const sheetOpen = !$("reset-sheet").hidden || !$("results-sheet").hidden;

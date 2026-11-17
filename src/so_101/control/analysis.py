@@ -22,14 +22,16 @@ the `rewind` event's.
 - **Segments:** each run of one `control.phase` in an attempt, with who drove: the policy
   (Autonomous), a human (Teleop), or the script (Starting, Paused, Handover, Rewinding, Returning,
   in which the controller moves or holds the arm itself).
-- **Waiting frames:** Autonomous frames whose `control.policy_action` is all NaN: the policy sent no
-  action that tick, as while a cloud GPU's next chunk is late. They are script time, not policy
+- **Waiting frames:** Autonomous frames the model didn't drive: `control.driver` WAITING (it sent no
+  action that tick, as while a cloud GPU's next chunk is late), PLAYBACK or HOLD (a layer of the policy
+  stack drove), or, in a run recorded before that column, `control.policy_action` all NaN. They are script time, not policy
   time, in no training cut, count toward no blame window, and the policy hasn't started driving
   until its first action. A Teleop frame with no leader pose (`control.leader` all NaN, the tick the
   leader was lost) is in no cut either.
-- **Interruptions:** each Autonomous segment that an operator's Pause, Rewind or Teleop ended. Reset
-  and Quit end the attempt rather than interrupt it, and a time limit, fault or lost link isn't an
-  operator's judgement of the policy. Each has the reason from a `label` event, if the operator gave
+- **Interruptions:** each Autonomous segment that an operator's Pause, Rewind or Teleop ended, or
+  that the policy itself paused for a person (`policy_asked`, from the supervisor's layer: stuck, or
+  done). Reset and Quit end the attempt rather than interrupt it, and a time limit, fault or lost link
+  isn't a judgement of the policy. Each has the reason from a `label` event, if the operator gave
   one, and what came next: resume, rewind, teleop, how the attempt was asked to end (reset, quit or
   time_limit, from the `state` event into Returning), or end (the episode ended there). A Pause
   and Resume applied in the same tick leave no Paused frame, but their `state` events still make
@@ -37,8 +39,12 @@ the `rewind` event's.
 - **Suspect frames:** the frames that led to an interruption, never used as training targets. When
   the operator rewound right after it (only pauses in between), they are the range the rewinds
   undid. Otherwise they are the last `blame_s` seconds of policy frames before it, counting back
-  through pauses and waiting frames but not through anything else. The frames any other rewind
-  undid, such as one from Teleop or after a lost link, are suspect too.
+  through pauses and waiting frames but not through anything else. An ask that isn't `stuck` (the
+  task looks done, or a layer stopped) blames nothing: it isn't a judgement that the policy went
+  wrong. An ask from a run recorded before the `state` event named its kind blames as `stuck` does. The frames any other rewind
+  undid, such as one from Teleop or after a lost link, are suspect too, and so are the frames each of
+  any layer's playbacks undid (`playback` events, from the policy stack). The playback's own
+  frames are waiting frames: `control.driver` says a layer drove, not the model.
 - **Corrections:** the Teleop segments after the policy had driven in the attempt (sent its first
   action), a human stepping in on the policy. Only their frames are interventions
   (`intervention_mask`). Teleop before the policy first drove, as in a human attempt, corrects no
@@ -75,7 +81,9 @@ from pathlib import Path
 import numpy as np
 
 from so_101.control.recorder import OUTCOMES, Phase
-from so_101.control.states import STEP_INS
+from so_101.control.states import ASKED_OR_STEPPED_IN
+from so_101.policy.base import STUCK
+from so_101.policy.base import HOLD, PLAYBACK, WAITING
 from so_101.data import LABELS_FILE, Run, whole
 from so_101.settings import ConfigError, replace_file
 UNLABELLED = "unlabelled"
@@ -103,7 +111,9 @@ SOURCES = (CORRECTIONS, HUMAN_ATTEMPTS, POLICY_SUCCESSES)
 # The version of the rules that cut and label a run's frames, which build.json records. Raise it when
 # `training_cuts`, `intervention_mask` or `frame_labels` change what a build holds, so a build made
 # under other rules isn't current.
-RULES_VERSION = 6  # 6: a cut's action is the leader's pose or the policy's action, before the cap
+RULES_VERSION = 1  # 1: the supervisor's playbacks undo frames, its pauses interrupt, and only a stuck ask blames the frames before it
+# What stops the policy for a judgement of it: an operator's step-in, or the policy asking for a person.
+STOPS = ASKED_OR_STEPPED_IN
 
 Range = tuple[int, int]
 
@@ -138,7 +148,7 @@ class Segment:
 @dataclass(frozen=True)
 class Interruption:
     segment: Segment  # the Autonomous segment it ended
-    command: str  # pause, rewind or teleop
+    command: str  # pause, rewind, teleop or policy_asked
     reason: str | None  # why the operator paused, from a `label` event
     next: str  # resume, rewind, teleop, an ending (reset, quit or time_limit), or end
     rewound: Range | None  # the frames the rewinds right after it undid
@@ -192,11 +202,16 @@ class Attempt:
     # Per frame: an Autonomous frame where the policy sent no action, and a Teleop frame with no leader pose.
     waiting: np.ndarray = field(repr=False, compare=False)
     leaderless: np.ndarray = field(repr=False, compare=False)
+    skills: np.ndarray = field(repr=False, compare=False)  # control.skill per frame, -1 without one
     segments: tuple[Segment, ...]
     interruptions: tuple[Interruption, ...]
     rewinds: tuple[Range, ...]
     failure_fixes: tuple[FailureFix, ...]
     dropped_frames: dict[str, int] = field(default_factory=dict)  # video frames dropped per camera, from attempt_end
+    # Per frame: a Pause (or ask) and a Resume taken in the tick that recorded it, which leave the frame
+    # Autonomous; its `state` event out of Autonomous names the frame (`same_tick_handbacks`). The policy
+    # stack heard that handback, so the offline replays of its detector do too (`grasp.replay`).
+    handbacks: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     @property
     def frames(self) -> int:
@@ -415,16 +430,19 @@ def read_events(run: Run) -> list[dict]:
     return events
 
 
-def read_data(root: Path, columns: list[str]) -> tuple["pd.DataFrame | None", list[tuple[Path, str]]]:
-    """`columns` of every Parquet file of the dataset at `root`, and the files that couldn't be read,
-    each with why. Each file is read on its own, so one a hard kill left without its footer costs
-    only its own episodes. The table is None when no file could be read."""
+def read_data(root: Path, columns: list[str], optional: tuple[str, ...] = ()) -> tuple["pd.DataFrame | None", list[tuple[Path, str]]]:
+    """`columns` of every Parquet file of the dataset at `root`, plus each of `optional` the file has
+    (a column added after older runs were recorded), and the files that couldn't be read, each with
+    why. Each file is read on its own, so one a hard kill left without its footer costs only its own
+    episodes. The table is None when no file could be read."""
     import pandas as pd
+    import pyarrow.parquet as pq
 
     tables, skipped = [], []
     for f in sorted(Path(root).glob("data/*/*.parquet")):
         try:
-            tables.append(pd.read_parquet(f, columns=columns))
+            names = set(pq.read_schema(f).names) if optional else set()
+            tables.append(pd.read_parquet(f, columns=[*columns, *(c for c in optional if c in names)]))
         except Exception as e:  # pyarrow raises several types for a cut-off or malformed file
             reason = (str(e).strip().splitlines() or [""])[0]
             skipped.append((f, f"{e.__class__.__name__}: {reason}" if reason else e.__class__.__name__))
@@ -436,8 +454,18 @@ class Frames:
     """One episode's columns, in frame order."""
 
     phases: np.ndarray  # control.phase
-    waiting: np.ndarray  # an Autonomous frame whose control.policy_action is all NaN
+    # An Autonomous frame the model didn't drive: control.driver WAITING, PLAYBACK or HOLD, or, in a run
+    # recorded before that column, a control.policy_action that is all NaN.
+    waiting: np.ndarray
     leaderless: np.ndarray  # a Teleop frame whose control.leader is all NaN
+    skills: np.ndarray  # control.skill: the skill's index in run.json's policy.skills, -1 without one or the column
+
+
+def _ints(rows, name: str) -> np.ndarray | None:
+    """A one-value int column as an array, or None in a run recorded before it existed."""
+    if name not in rows or rows[name].isna().any():
+        return None
+    return np.array([int(np.ravel(v)[0]) for v in rows[name]], dtype=np.int8)
 
 
 def _no_values(column) -> np.ndarray:
@@ -463,15 +491,20 @@ def read_run(run: Run) -> RunRecord:
     if (info := run.info()) is None:
         return RunRecord(run, events, None, {}, ())
     table, skipped = read_data(run.dataset_root, ["episode_index", "frame_index", "control.phase",
-                                                  "control.policy_action", "control.leader"])
+                                                  "control.policy_action", "control.leader"],
+                               optional=("control.driver", "control.skill"))
     episodes = {}
     for episode, rows in () if table is None else table.groupby("episode_index"):
         rows = rows.sort_values("frame_index")
         phases = np.array([int(np.ravel(p)[0]) for p in rows["control.phase"]], dtype=np.int8)
+        driver = _ints(rows, "control.driver")
+        idle = np.isin(driver, (WAITING, PLAYBACK, HOLD)) if driver is not None else _no_values(rows["control.policy_action"])
+        skills = _ints(rows, "control.skill")
         episodes[int(episode)] = Frames(
             phases,
-            (phases == Phase.AUTONOMOUS) & _no_values(rows["control.policy_action"]),
+            (phases == Phase.AUTONOMOUS) & idle,
             (phases == Phase.TELEOP) & _no_values(rows["control.leader"]),
+            skills if skills is not None else np.full(len(phases), -1, dtype=np.int8),
         )
     return RunRecord(run, events, float(info["fps"]), episodes, tuple(skipped))
 
@@ -530,7 +563,8 @@ def analyse_record(record: RunRecord, labels: Labels, blame_s: float) -> RunAnal
             notes.append(f"attempt {number}'s episode {episode} isn't in the dataset")
             episode = None
         if frames is None:
-            frames = Frames(np.zeros(0, dtype=np.int8), np.zeros(0, dtype=bool), np.zeros(0, dtype=bool))
+            frames = Frames(np.zeros(0, dtype=np.int8), np.zeros(0, dtype=bool), np.zeros(0, dtype=bool),
+                            np.zeros(0, dtype=np.int8))
         if episode is not None and (dropped := (end or {}).get("dropped_frames")):
             counts = ", ".join(f"{camera} {n}" for camera, n in dropped.items())
             notes.append(f"attempt {number} dropped video frames when it was recorded ({counts}), so its video and "
@@ -548,18 +582,34 @@ def analyse_record(record: RunRecord, labels: Labels, blame_s: float) -> RunAnal
     return RunAnalysis(run, fps, tuple(attempts), tuple(notes))
 
 
+def same_tick_handbacks(phases: np.ndarray, events) -> np.ndarray:
+    """Per frame, whether a `state` event left Autonomous at it while the frame is still Autonomous: a Pause, an
+    ask or a lost link and a Resume applied in the tick that recorded it. An event names the frame its tick
+    records next, so a pause that lasts a tick leaves that frame Paused and isn't one."""
+    marks = np.zeros(len(phases), dtype=bool)
+    for e in events:
+        frame = e.get("frame")
+        if (e.get("type") == "state" and e.get("previous") == "autonomous" and isinstance(frame, int)
+                and 0 <= frame < len(phases) and phases[frame] == Phase.AUTONOMOUS):
+            marks[frame] = True
+    return marks
+
+
 def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame_s, labels) -> Attempt:
     phases = frames.phases
     segments = segments_of(phases)
     starts = {s.start: i for i, s in enumerate(segments)}
     rewinds = [e for e in events if e["type"] == "rewind" and "start_frame" in e]
+    playbacks = [e for e in events if e["type"] == "playback" and "start_frame" in e]
     states = [e for e in events if e["type"] == "state" and e.get("previous") == "autonomous"]
     reasons = [e for e in events if e["type"] == "label"]
 
     # Each interruption: the policy's segment up to it, the segments after it, and the command.
     found: list[tuple[Segment, tuple[Segment, ...], str]] = []
     stepped_in = sorted((e["frame"], e["cause"]) for e in states
-                        if isinstance(e.get("frame"), int) and e.get("cause") in STEP_INS)
+                        if isinstance(e.get("frame"), int) and e.get("cause") in STOPS)
+    # The frames where the policy stack asked for a person with a kind that blames nothing (`_blames`).
+    unblamed = {e["frame"] for e in states if e.get("cause") == "policy_asked" and e.get("ask", STUCK) != STUCK}
     for i, segment in enumerate(segments):
         if segment.phase is not Phase.AUTONOMOUS:
             continue
@@ -575,7 +625,7 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
             continue  # the episode ended on the policy: a fault or a crash, not an operator
         ended = next((e for e in states if e.get("frame") == segment.stop), None)
         command = ended.get("cause") if ended else None
-        if command in STEP_INS:
+        if command in STOPS:
             found.append((Segment(Phase.AUTONOMOUS, start, segment.stop), segments[i + 1 :], command))
 
     interruptions = []
@@ -593,6 +643,8 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
         rewound = (min(a for a, _ in undone), max(b for _, b in undone)) if undone else None
         if next_ == "rewind" and rewound:
             suspect, source = rewound, "rewind"
+        elif command == "policy_asked" and segment.stop in unblamed:
+            suspect, source = None, "blame"
         else:
             suspect, source = _blame(phases, frames.waiting, segment, round(blame_s * fps)), "blame"
         key = (number, segment.stop)
@@ -627,10 +679,12 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
 
     return Attempt(
         number=number, episode=episode, ended_by=end.get("ended_by") if end else None,
-        recorded_outcome=recorded, outcome=outcome, phases=phases, waiting=frames.waiting,
+        recorded_outcome=recorded, outcome=outcome, phases=phases, waiting=frames.waiting, skills=frames.skills,
         leaderless=frames.leaderless, segments=segments,
-        interruptions=tuple(interruptions), rewinds=tuple((e["start_frame"], e["end_frame"]) for e in rewinds),
+        interruptions=tuple(interruptions),
+        rewinds=tuple((e["start_frame"], e["end_frame"]) for e in rewinds + playbacks),
         failure_fixes=tuple(pairs), dropped_frames=dict((end or {}).get("dropped_frames") or {}),
+        handbacks=same_tick_handbacks(phases, events),
     )
 
 

@@ -58,7 +58,8 @@ class Command(StrEnum):
 
 
 # The commands that interrupt a running policy: each is a step-in on the attempt's timeline, and an
-# interruption in the run's analysis. Reset and Quit end the attempt instead.
+# interruption in the run's analysis. Reset and Quit end the attempt instead. The policy stack asking
+# for a person (Event.POLICY_ASKED) is a step-in too (`ASKED_OR_STEPPED_IN`).
 STEP_INS = frozenset({Command.PAUSE, Command.REWIND, Command.TELEOP})
 
 
@@ -71,8 +72,14 @@ class Event(StrEnum):
     TIME_LIMIT = "time_limit"  # the attempt has used its policy or its Teleop seconds
     LEADER_LOST = "leader_lost"  # the leader was unplugged or stopped answering
     LINK_LOST = "link_lost"  # the controlling page stopped polling or was hidden, with on_link_loss = "pause"
+    POLICY_ASKED = "policy_asked"  # the policy asked for a person (the supervisor's layer: stuck, or done)
     LEADER_RESTED = "leader_rested"  # the leader's move to rest ended: it arrived, stopped short or was lost
     FAULT = "fault"  # a hardware, camera, motor-alarm or policy failure
+
+
+# What stops the policy for a judgement of it, and counts as a step-in: an operator's step-in, or the
+# policy stack asking for a person. `so101 runs` counts the same (`analysis.STOPS`).
+ASKED_OR_STEPPED_IN = STEP_INS | {Event.POLICY_ASKED}
 
 
 class Action(StrEnum):
@@ -112,7 +119,7 @@ class Facts:
     quitting: bool  # a Quit is under way (Esc or a signal), so the process exits at rest
     # A Quit asked to confirm exiting where the arm is, under CONFIRM_S ago, and the state hasn't changed since.
     confirm_pending: bool
-    source: str | None  # where the command came from: terminal, page or signal
+    source: str | None  # where the command came from: terminal, page, signal or autopilot (`so101 run`'s)
     at_rest: bool  # every joint is within rollout.TOLERANCE of the rest pose
     leader_to_rest: bool  # the leader is on its way to rest, motors on: exiting now would drop it
     attempt_open: bool
@@ -135,6 +142,10 @@ class Facts:
     outcome: bool  # the command came with an outcome to record (Reset's)
     fault_saved: bool  # the last fault saved an attempt, which an outcome given with Reset in Fault labels
     fault_labelled: str | None  # that attempt's outcome, when it already has one: Reset in Fault won't relabel it
+    # Why no page watches the arm: none is in control, or the one in control is out of reach (no poll for
+    # link_timeout_s, or hidden), whatever on_link_loss says. None when a page is in control and its link is
+    # live. The autopilot's Resume and Reset are refused while it's set (`step`).
+    unwatched: str | None
 
 
 @dataclass(frozen=True)
@@ -161,11 +172,15 @@ def _fault_refusal(facts: Facts) -> str:
 # Commands that start the arm moving on its own, under the policy, a human or a rewind. A missing
 # required device refuses them.
 NEEDS_DEVICES = frozenset({"resume", "rewind", "teleop"})
+# The autopilot's commands that move the arm: refused while no page in control watches it (`Facts.unwatched`).
+# Its Quit isn't, since it quits only from rest at the rest pose, which moves nothing.
+WATCHED_ONLY = frozenset({"resume", "reset"})
 
 
 # A quit at rest waits for the leader's move to rest: nothing starts meanwhile, or the quit, still under
-# way, would refuse every Esc for the whole attempt.
-WAITING_TO_QUIT = "Quitting: serve exits once the leader is at rest, so nothing starts now."
+# way, would refuse every Esc for the whole attempt. It names no command: `so101 serve` and `so101 run`
+# both refuse with it, and the state machine doesn't know which is running.
+WAITING_TO_QUIT = "Quitting: so101 exits once the leader is at rest, so nothing starts now."
 
 
 def _resume(state: State, facts: Facts) -> Transition:
@@ -291,7 +306,7 @@ def _quit(state: State, facts: Facts) -> Transition:
     if facts.quitting:
         if state is State.RESTING:
             return _refuse(state, WAITING_TO_QUIT)
-        return _refuse(state, "Already quitting. The arm is on its way to rest, and serve exits once it's there; "
+        return _refuse(state, "Already quitting. The arm is on its way to rest, and so101 exits once it's there; "
                               "Pause cancels the quit.")
     if state is State.RESTING:
         if not facts.at_rest:
@@ -302,6 +317,8 @@ def _quit(state: State, facts: Facts) -> Transition:
         # power is off, can't have its motors turned off either: exiting leaves the arm as it is, so no
         # confirmation is needed, and a signal exits too.
         if facts.follower_silent:
+            if facts.source == "autopilot":  # it quits only from rest; leaving the motors is a person's call
+                return _refuse(state, "The autopilot quits only at rest: a person quits with the follower silent.")
             return Transition(state, (Action.EXIT_LEAVING_MOTORS,))
         return Transition(state, (Action.CONFIRM_QUIT,))
     if state is State.RETURNING:
@@ -385,6 +402,13 @@ def _link_lost(state: State, facts: Facts) -> Transition:
     return _refuse(state, f"The policy isn't driving in {state}.")
 
 
+def _policy_asked(state: State, facts: Facts) -> Transition:
+    if state is State.AUTONOMOUS:
+        # The policy stops itself, and the arm holds where it is, for a person to decide what's next.
+        return Transition(State.PAUSED, (Action.PAUSE_POLICY,))
+    return _refuse(state, f"The policy isn't driving in {state}.")
+
+
 def _leader_rested(state: State, facts: Facts) -> Transition:
     if state is State.RESTING and facts.quitting:
         # Moved off rest while it waited, the arm can't exit there unasked: y at the terminal decides.
@@ -417,6 +441,7 @@ _RULES = {
     Event.TIME_LIMIT: _time_limit,
     Event.LEADER_LOST: _leader_lost,
     Event.LINK_LOST: _link_lost,
+    Event.POLICY_ASKED: _policy_asked,
     Event.LEADER_RESTED: _leader_rested,
     Event.FAULT: _fault,
 }
@@ -427,6 +452,12 @@ def step(state: State, given: Command | Event, facts: Facts) -> Transition:
     transition = _RULES[given](state, facts)
     if transition.accepted and given in NEEDS_DEVICES and facts.device_missing:
         return _refuse(state, facts.device_missing)
+    # The autopilot never starts motion (Resume, or Reset from a pause) unless a page in control watches: with
+    # none in control, or the one in control out of reach, only a person (r at the terminal, or a page's command,
+    # which takes control or brings its link back) does. A return to rest already under way finishes even if the
+    # page is lost, as every return to rest does, because stopping halfway would leave the arm held in mid-air.
+    if transition.accepted and facts.source == "autopilot" and facts.unwatched and given in WATCHED_ONLY:
+        return _refuse(state, facts.unwatched)
     if transition.accepted and Action.OPEN_ATTEMPT in transition.actions and facts.recording:
         return _refuse(state, facts.recording)
     return transition

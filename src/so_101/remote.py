@@ -1,7 +1,7 @@
 """Run a policy on a Hugging Face Jobs GPU while the arm and cameras stay on this Mac.
 
 The job runs LeRobot's policy server, listening only on its own loopback. An SSH tunnel makes that
-port appear on this Mac, and `so101-rollout` (`run --remote`) or `so101-control` (`serve --remote`)
+port appear on this Mac, and `so101-control` (`run --remote` and `serve --remote`)
 connects to it with `client_args`.
 """
 
@@ -25,6 +25,7 @@ SERVER_IMAGE = "huggingface/lerobot-gpu@sha256:aed1a4990fedee463b545050f33a38afc
 PORT = 7447
 DEPLOYMENT = "so101"
 SEMANTICS = "so101-degrees-gripper-percent-v1"
+SKILL_SEMANTICS = "so101-skill-one-hot-v1"  # the skill one-hot a skills model reads (`skill_features`)
 SERVER_LABEL = "policy-server"
 PIN_LABEL = "pin_unused_actions"
 # What the pi0.5 job prints the first time it pins the unused action columns, during warm-up.
@@ -51,12 +52,16 @@ EXECUTION = {"act": "chunk", "pi05": "rtc_guided"}
 RTC_REFILL_S = 1.0
 # How long the arm holds its last target when the queue runs out before the run fails (LeRobot: 1 s).
 RTC_STARVATION_GRACE_S = 2.0
-# With RTC, how much of the queued motion the server steers the new chunk to match: all of it, since
-# the arm plays the queue while the request is out, and every step it plays before the new chunk takes
-# over must be steered. LeRobot's default of 10 steps (0.33 s) would leave the seam free. Past the
-# queue, the server pads with its last action, pulling the new chunk toward a hold, so this matches
-# the refill. Seams are steered while the turnaround stays under it.
-RTC_HORIZON_S = RTC_REFILL_S
+# With RTC, how much of the queued motion the server steers the new chunk to match. The seam where the
+# new chunk takes over is steered only while the turnaround (about 0.65 s from India at JPEG quality 50)
+# stays under this; past the seam, every steered step holds the new chunk to the old plan, made from
+# frames about 1 s older. Steering the whole 1 s queue made pi0.5 close its gripper short of the block:
+# at the first close the block sat 0.56 to 0.65 of the way down the wrist picture in the misses,
+# against 0.67 to 0.77 in the demos. 0.33 s (LeRobot's 10 steps) put every close in the demos' range
+# and went 4 of 5, but the seams came after it, unsteered, and the gripper jumped up to 17.7 in a
+# frame (5.0 with 1 s). 0.65 s (20 steps at 30 fps) steers the seam and frees the rest: 4 of 4
+# labelled, with closes at 0.62 to 0.73. A turnaround over it leaves that seam unsteered.
+RTC_HORIZON_S = 0.65
 
 # The script the pi0.5 job runs in place of `lerobot-policy-server`. `setup_script` writes it after a
 # line that sets PIN_UNUSED_ACTIONS. It changes four things in LeRobot before starting its server.
@@ -158,11 +163,17 @@ main()
 
 
 def server_config(
-    repo: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int, fps: int
+    repo: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int, fps: int,
+    skills: tuple = (),
 ) -> dict:
     """The policy server's config, describing the model's inputs and outputs. `image_sizes` is each
     camera's (width, height), from `tasks.image_sizes`. With real-time chunking, `action_steps` is
-    the model's own and only bounds the steered horizon: LeRobot takes no execution slice then."""
+    the model's own and only bounds the steered horizon: LeRobot takes no execution slice then.
+
+    A skills model (`skills`, the task's `skills.Skill`s) has one more input, the skill one-hot
+    `observation.environment_state`. LeRobot's server serves a checkpoint only when the inputs its config
+    names equal the checkpoint's, so it's named here, as `skills.state_feature` describes it; the client
+    sends it each tick (`control.main.remote_context`)."""
     vector = {"dtype": "float32", "names": JOINTS, "semantics": SEMANTICS, "shape": [len(JOINTS)]}
     cameras = [
         {
@@ -182,9 +193,35 @@ def server_config(
         "zenoh": {"mode": "peer", "listen_endpoints": [f"tcp/127.0.0.1:{PORT}"]},
         "semantics": SEMANTICS,
         "robot_type": "so101_follower",
-        "features": [{"name": "observation.state", **vector}, *cameras],
+        "features": [{"name": "observation.state", **vector}, *cameras, *skill_features(skills)],
         "action_feature": {"name": "action", **vector},
     }
+
+
+def skill_features(skills: tuple) -> list[dict]:
+    """The skill one-hot as the server's config names it: none without skills."""
+    if not skills:
+        return []
+    from so_101.skills import STATE_KEY, state_feature
+
+    feature = state_feature(skills)
+    return [{"name": STATE_KEY, "dtype": feature["dtype"], "names": feature["names"], "semantics": SKILL_SEMANTICS,
+             "shape": list(feature["shape"])}]
+
+
+def skill_inputs(config: dict, skills: tuple, model: str) -> tuple:
+    """The skills whose one-hot the server must name for a skills model with this config.json: all of
+    them when the checkpoint reads the one-hot, none when it reads only the prompt. Exits before a job
+    starts, and bills, when the checkpoint's one-hot is another size than the task's skills."""
+    from so_101.skills import STATE_KEY
+
+    one_hot = config["input_features"].get(STATE_KEY)
+    if one_hot is None:
+        return ()
+    if list(one_hot["shape"]) != [len(skills)]:
+        sys.exit(f"{model} reads a one-hot of {one_hot['shape'][0]} skills, and the task lists {len(skills)} "
+                 f"({', '.join(k.name for k in skills)}). Train it again with --skills, or serve the model trained on them.")
+    return skills
 
 
 def execution_config(mode: str, action_steps: int, fps: int) -> dict:
@@ -263,18 +300,21 @@ def describe(job) -> str:
              else "real-time chunking" if execution else "plain chunks from before real-time chunking")
     pin = {"true": ", unused action columns pinned", "false": ", unused action columns not pinned"}.get(
         labels.get(PIN_LABEL), ", started before the unused action columns setting" if labels.get("policy") == "pi05" else "")
+    commit = f" (commit {labels['commit'][:12]})" if labels.get("commit") else ""
     return (
-        f"{labels.get('policy')} for {labels.get('task')} at {labels.get('revision')}, {steps}{pin}, "
+        f"{labels.get('policy')} for {labels.get('task')}{' skills' if labels.get('dataset') == 'skills' else ''} "
+        f"at {labels.get('revision')}{commit}, {steps}{pin}, "
         f"on {job.flavor} (job {job.id}, {job.status.stage})"
     )
 
 
-def _labels(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool) -> dict[str, str]:
-    """The job labels that say which model a server serves, how its chunks are joined and, for pi0.5,
-    whether its unused action columns are pinned: `start_server` sets them, and `require_server`
-    matches them."""
-    labels = {"task": task, "policy": policy_type, "revision": revision, "action_steps": str(action_steps),
-              "execution": EXECUTION[policy_type]}
+def _labels(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool,
+            dataset: str = "whole") -> dict[str, str]:
+    """The job labels that say which model a server serves (the task's whole-demo model or its skills
+    model, `dataset`), how its chunks are joined and, for pi0.5, whether its unused action columns are
+    pinned: `start_server` sets them, and `require_server` matches them."""
+    labels = {"task": task, "dataset": dataset, "policy": policy_type, "revision": revision,
+              "action_steps": str(action_steps), "execution": EXECUTION[policy_type]}
     if policy_type == "pi05":
         labels[PIN_LABEL] = "true" if pin_unused_actions else "false"
     return labels
@@ -282,7 +322,7 @@ def _labels(task: str, policy_type: str, revision: str, action_steps: int, pin_u
 
 def start_server(
     *, repo: str, task: str, policy_type: str, revision: str, image_sizes: dict[str, tuple[int, int]], action_steps: int,
-    fps: int, target: str, timeout: str, pin_unused_actions: bool,
+    fps: int, target: str, timeout: str, pin_unused_actions: bool, dataset: str = "whole",
 ) -> None:
     """Start the job and wait until the model is loaded and serving."""
     from huggingface_hub import HfApi, get_token
@@ -290,8 +330,15 @@ def start_server(
     check_ssh_key()
     if server := active_server():
         sys.exit(f"A policy server is already running: {describe(server)}.\nStop it first: uv run so101 server stop")
+    commit = hub_commit(repo, revision)  # the server loads exactly this, and says so in its `commit` label
+    skills = ()
+    if dataset == "skills":
+        from so_101 import tasks
+
+        found = tasks.load()[task]
+        skills = skill_inputs(found.policy_config(commit, policy_type, True), found.require_skills(), repo)
     setup, serve = setup_script(
-        policy_type, server_config(repo, policy_type, revision, image_sizes, action_steps, fps), pin_unused_actions
+        policy_type, server_config(repo, policy_type, commit, image_sizes, action_steps, fps, skills), pin_unused_actions
     )
     api = HfApi()
     job = api.run_job(
@@ -301,7 +348,10 @@ def start_server(
         secrets={"HF_TOKEN": get_token()},
         flavor=target,
         timeout=timeout,
-        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps, pin_unused_actions)},
+        # `revision` stays the name asked for, so `run --revision main` matches; `commit` is what the server loaded,
+        # 40 hex characters. A real server hasn't been started with this label yet: starting one bills.
+        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps, pin_unused_actions, dataset),
+                "commit": commit},
         ssh=True,
     )
     print(f"Started job {job.id} on {target}. It bills until `uv run so101 server stop`, or {timeout} at most.")
@@ -310,11 +360,17 @@ def start_server(
         wait_until_ready(job.id, policy_type, pin_unused_actions)
     except KeyboardInterrupt:
         sys.exit("\nStopped watching. The job is still running and billing: uv run so101 server stop")
-    steps = steps_flag(policy_type, action_steps)
-    print(
+    print(ready_lines(task, policy_type, revision, action_steps, dataset))
+
+
+def ready_lines(task: str, policy_type: str, revision: str, action_steps: int, dataset: str = "whole") -> str:
+    """What `server start` prints once the server is ready: the commands that use it, and the one that stops it."""
+    flags = f"--policy {policy_type} --remote --revision {revision}{steps_flag(policy_type, action_steps)}"
+    flags += " --skills" if dataset == "skills" else ""
+    return (
         "\nThe policy server is ready. Next:\n"
-        f"  uv run so101 run {task} --policy {policy_type} --remote --revision {revision}{steps}\n"
-        f"  uv run so101 serve {task} --policy {policy_type} --remote --revision {revision}{steps}\n"
+        f"  uv run so101 run {task} {flags}\n"
+        f"  uv run so101 serve {task} {flags}\n"
         "  uv run so101 server stop"
     )
 
@@ -365,16 +421,57 @@ def stop_server() -> None:
                  + "\n  ".join(failed))
 
 
-def require_server(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool):
+def hub_commit(repo: str, revision: str) -> str:
+    """The Hub commit `revision` of the model `repo` names now. Exits with one line when there's no such
+    model or revision."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
+
+    try:
+        return HfApi().model_info(repo, revision=revision).sha
+    except RepositoryNotFoundError:
+        sys.exit(f"There's no model {repo} on the Hub, or your login can't see it.")
+    except RevisionNotFoundError:
+        sys.exit(f"{repo} has no revision {revision!r}.")
+
+
+def _start_command(task: str, policy_type: str, revision: str, dataset: str, action_steps: int | None = None) -> str:
+    steps = "" if action_steps is None else steps_flag(policy_type, action_steps)
+    return (f"uv run so101 server start {task} --policy {policy_type} --revision {revision}"
+            f"{steps}{' --skills' if dataset == 'skills' else ''}")
+
+
+def active_server_or_exit(task: str, policy_type: str, revision: str, dataset: str = "whole"):
+    """The running server, or exit saying how to start one. The start command leaves out --action-steps,
+    which comes from the model's config, read only after the server's commit is known."""
+    server = active_server()
+    if server is None:
+        sys.exit(f"No policy server is running. Start one first:\n  {_start_command(task, policy_type, revision, dataset)}")
+    return server
+
+
+def served_commit(server, task: str, policy_type: str, revision: str, dataset: str = "whole") -> str:
+    """The Hub commit the server loaded (its `commit` label), which a run reads the model's files at, so it
+    checks the model the server serves rather than whatever `revision` names now. Exits for a server started
+    before the label."""
+    commit = (server.labels or {}).get("commit")
+    if not commit:
+        sys.exit("The policy server was started before so101 recorded the commit it serves, so the run can't check "
+                 "the model it serves. Stop it (uv run so101 server stop) and start it again:\n  "
+                 f"{_start_command(task, policy_type, revision, dataset)}")
+    return commit
+
+
+def require_server(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool,
+                   dataset: str = "whole"):
     """The running server, if it serves what this run asks for, as so101.toml sets it. Starting one
-    bills, so never do it implicitly."""
-    start = (f"uv run so101 server start {task} --policy {policy_type} --revision {revision}"
-             f"{steps_flag(policy_type, action_steps)}")
+    bills, so never do it implicitly. A server started before the `dataset` label serves the whole-demo model."""
+    start = _start_command(task, policy_type, revision, dataset, action_steps)
     server = active_server()
     if server is None:
         sys.exit(f"No policy server is running. Start one first:\n  {start}")
-    labels = server.labels or {}
-    wanted = _labels(task, policy_type, revision, action_steps, pin_unused_actions)
+    labels = {"dataset": "whole", **(server.labels or {})}
+    wanted = _labels(task, policy_type, revision, action_steps, pin_unused_actions, dataset)
     if {key: labels.get(key) for key in wanted} != wanted or server.status.stage != "RUNNING":
         sys.exit(f"The policy server isn't serving this model: {describe(server)}.\nStop it, then: {start}")
     return server

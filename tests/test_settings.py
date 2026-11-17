@@ -5,7 +5,7 @@ import unittest
 from lerobot.robots.utils import ensure_safe_goal_position
 from test_serve_preflight import ARMS, ConfigTest
 
-from so_101 import settings
+from so_101 import settings, tasks
 
 
 class TeleopTest(ConfigTest):
@@ -26,6 +26,50 @@ class TeleopTest(ConfigTest):
                     settings.load()
         self.config.write_text(ARMS + "\n[teleop]\nmax_relative_target = 0\n")
         self.assertEqual(settings.load().teleop.max_relative_target, 0.0, "0 turns the limit off")
+
+
+class RunTest(ConfigTest):
+    def test_a_leftover_duration_names_the_settings_that_replaced_it(self) -> None:
+        # `so101 run` once read its attempts' length from here; it's [control] attempt_limit_s now, and
+        # a value left here would otherwise be ignored without a word.
+        self.config.write_text(ARMS + "\n[run]\nduration_s = 60\n")
+        with self.assertRaises(settings.ConfigError) as error:
+            settings.load()
+        message = str(error.exception)
+        self.assertIn("[run] duration_s", message)
+        self.assertIn("[control] attempt_limit_s", message)
+        self.assertIn("--duration", message)
+        self.assertEqual(len(message.splitlines()), 1)
+
+    def test_episodes_is_a_whole_number_of_one_or_more(self) -> None:
+        self.config.write_text(ARMS + "\n[run]\nepisodes = 5\n")
+        self.assertEqual(settings.load().run.episodes, 5)
+        self.config.write_text(ARMS)
+        self.assertEqual(settings.load().run.episodes, 1)
+        for value in ("0", "-1", "1.5", '"3"', "true"):
+            with self.subTest(value):
+                self.config.write_text(ARMS + f"\n[run]\nepisodes = {value}\n")
+                with self.assertRaisesRegex(settings.ConfigError, r"\[run\] episodes"):
+                    settings.load()
+
+
+class TasksTest(ConfigTest):
+    TASK = '[test]\nprompt = "Put the block in the jar"\n'
+
+    def test_a_reset_time_that_is_not_finite_seconds_of_0_or_more_is_refused(self) -> None:
+        # `so101 run` waits reset_time_s between attempts: nan or inf broke the control page's status.
+        for value in ("nan", "inf", "-1", '"ten"', "true"):
+            with self.subTest(value):
+                (self.root / "tasks.toml").write_text(self.TASK + f"reset_time_s = {value}\n")
+                with self.assertRaisesRegex(settings.ConfigError, "reset_time_s"):
+                    tasks.load()
+
+    def test_a_reset_time_of_0_or_more_is_kept(self) -> None:
+        for value, expected in (("0", 0), ("12.5", 12.5)):
+            (self.root / "tasks.toml").write_text(self.TASK + f"reset_time_s = {value}\n")
+            self.assertEqual(tasks.load()["test"].reset_time_s, expected)
+        (self.root / "tasks.toml").write_text(self.TASK)
+        self.assertEqual(tasks.load()["test"].reset_time_s, 10, "the default")
 
 
 class RemoteTest(ConfigTest):

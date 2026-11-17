@@ -42,8 +42,8 @@ VOLTAGE_SPREAD_WARN_V = 1.0
 POSITION_SLACK_TICKS = 50  # how far outside its calibrated range a joint may read before it's flagged
 CAMERA_SAMPLE_S = 2.5
 LOOP_SAMPLE_S = 3.0
-# Free disk below which recording is refused, and below which it's warned about. `serve` checks them
-# before each attempt too.
+# Free disk below which recording is refused, and below which it's warned about. `serve` and `run` check
+# them before each attempt too.
 DISK_FAIL_GB = 1
 DISK_WARN_GB = 5
 
@@ -638,7 +638,7 @@ def _number(value: object) -> bool:
 
 
 def rest_pose_problem(s: Settings) -> str | None:
-    """The first thing wrong with the rest pose `serve` drives to, or None. Without the follower's
+    """The first thing wrong with the rest pose `serve` and `run` drive to, or None. Without the follower's
     calibration file there's nothing to compare `rest_pose_calibration` with, so it isn't compared."""
     pose, saved, now = s.control.rest_pose, s.control.rest_pose_calibration, s.follower.calibration_fingerprint()
     if pose is None:
@@ -658,7 +658,7 @@ def rest_pose_problem(s: Settings) -> str | None:
         return (f"rest_pose has positions that aren't raw motor steps from 0 to {settings.MOTOR_STEPS - 1}: "
                 + ", ".join(bad))
     if saved is None:
-        return ("rest_pose has no rest_pose_calibration, so `serve` can't tell whether the follower was "
+        return ("rest_pose has no rest_pose_calibration, so `serve` and `run` can't tell whether the follower was "
                 "recalibrated since it was saved, and the pose may no longer fold the arm")
     if now is not None and saved != now:
         return (f"the follower was recalibrated since rest_pose was saved (rest_pose_calibration {saved!r}, "
@@ -666,24 +666,25 @@ def rest_pose_problem(s: Settings) -> str | None:
     return None
 
 
-def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] = "FAIL") -> None:
-    """The rest pose and the `[control]` settings, which `serve` needs. Reads so101.toml and the
+def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] = "FAIL", task: str | None = None) -> None:
+    """The rest pose and the `[control]` settings, which `serve` and `run` need, and the supervisor's
+    files and mode for `task`, the tasks.toml task they run (`check_supervisor`). Reads so101.toml and the
     follower's calibration file only.
 
     `settings.load()` doesn't check them, so a bad value never stops the commands that fix it. Each
-    problem gets `status`: FAIL in `serve`'s preflight, WARN in `so101 check`. `runs`, `build --with`
+    problem gets `status`: FAIL in the preflight of `serve` and `run`, WARN in `so101 check`. `runs`, `build --with`
     and `review --runs` check `blame_s` themselves (`analysis.check_blame_s`)."""
     c = s.control
 
     def problem(group: str, detail: str, fix: str) -> None:
-        report.add(group, status, detail if status == "FAIL" else f"{detail}; `serve` won't start", fix)
+        report.add(group, status, detail if status == "FAIL" else f"{detail}; `serve` and `run` won't start", fix)
 
     if detail := rest_pose_problem(s):
         problem("rest pose", detail, REST_POSE_FIX)
     elif s.follower.calibration_fingerprint() is None:
         # The follower's own check fails on the missing file; this only says what couldn't be compared.
         report.warn("rest pose", f"there's no calibration file ({s.follower.calibration_file}) to compare "
-                    f"rest_pose_calibration {c.rest_pose_calibration!r} with, so `serve` can't tell whether rest_pose "
+                    f"rest_pose_calibration {c.rest_pose_calibration!r} with, so `serve` and `run` can't tell whether rest_pose "
                     "still folds the arm", fix="put the follower's calibration file back, or calibrate it (`uv run "
                     "so101 calibrate follower`) and save the rest pose again")
     else:
@@ -711,13 +712,82 @@ def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] =
             bad_value(key, "isn't a finite number", allowed)
         elif value < low or value == low and not rule.inclusive:
             bad_value(key, f"is out of range: {rule.why}", allowed)
-    if isinstance(c.port, bool) or not isinstance(c.port, int) or not 1 <= c.port <= 65535:
-        bad_value("port", "isn't a port number", "a whole number from 1 to 65535")
+    ports_ok = True
+    for key in ("port", "review_port"):
+        value = getattr(c, key)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+            ports_ok = False
+            bad_value(key, "isn't a port number", "a whole number from 1 to 65535")
+    if ports_ok and c.review_port == c.port:
+        # `so101 review` may run while `serve` or `run` does, so the two pages can't share a port.
+        bad_value("review_port", "is the control page's port too, so `review` couldn't run while `serve` or `run` does",
+                  f"a whole number from 1 to 65535 other than port's {c.port}")
     for key, rule in rules.items():
         if rule.choices and getattr(c, key) not in rule.choices:
             bad_value(key, "isn't allowed", "one of " + ", ".join(f'"{a}"' for a in rule.choices))
     if settings_ok:
         report.ok("control", "every [control] setting is in its range")
+    check_supervisor(report, s, problem, task)
+
+
+def check_supervisor(report: Report, s: Settings, problem, task: str | None = None) -> None:
+    """The grasp thresholds every run's perception reads, whatever `[supervisor] mode` is, and the
+    supervisor's program when the supervisor is on, since only then does a run load it: each must load (a
+    FAIL in the preflight of `serve` and `run`, through `problem`). With the supervisor on, `task` (the
+    tasks.toml task, when one is known) must be the one the judges' prompt is written for
+    (`vision.prompt.TASK_NAME`), also through `problem`, and a judge without its API key or its provider's
+    SDK is a warning: the supervisor runs without it. Reads files, the environment and the SDKs' imports
+    only."""
+    from so_101.grasp import thresholds
+    from so_101.skills import RUN_LABEL_VERSION
+
+    try:
+        grasp = thresholds.load(s.perception.thresholds)
+    except thresholds.ThresholdsError as error:
+        problem("perception", str(error), f"fix the file, or delete thresholds under [perception] in {s.path} for "
+                "the package's own")
+        return
+    versions = (f"grasp thresholds [gripper] v{grasp.gripper.version} and [rules] v{grasp.rules.version}, "
+                f"run labels v{RUN_LABEL_VERSION}")
+    if s.supervisor.mode == "off":
+        report.ok("supervisor", f"off; {versions} load")
+        return
+    from so_101.supervisor import program
+
+    try:
+        loaded = program.load(s.supervisor.program)
+    except program.ProgramError as error:
+        problem("supervisor", str(error), f"fix the program, or delete program under [supervisor] in {s.path} for "
+                "the package's own")
+        return
+    versions = f"program v{loaded.version}, {versions}"
+    from so_101.vision.prompt import TASK_NAME
+
+    if task is not None and task != TASK_NAME:
+        # The prompt, its moments and its failure categories name the block and the jar.
+        problem("supervisor", f"{s.supervisor.mode} mode judges every attempt as {TASK_NAME}, the one task its "
+                f"prompts describe, so it can't supervise {task}",
+                f"run {task} with `--supervisor off`, or set mode = \"off\" under [supervisor] in {s.path}")
+        return
+    from so_101.vision.env import load_env
+    from so_101.vision.models import MODELS
+    from so_101.vision.providers import sdk_missing
+
+    load_env(s.path.parent / ".scratch" / "bench.env")
+    j = loaded.judges
+    missing = []
+    for key in dict.fromkeys((j.decision, j.chat, j.escalation)):
+        model = MODELS[key]
+        if not model.has_key():
+            missing.append(f"{key} needs {model.env}")
+        elif why := sdk_missing(model.provider):
+            missing.append(f"{key}: {why}")
+    if missing:
+        report.warn("supervisor", f"{s.supervisor.mode} mode runs without these vision checks: {'; '.join(missing)}",
+                    fix=f"put the keys in {s.path.parent / '.scratch' / 'bench.env'} or the environment, and the "
+                        "SDKs in with `uv sync --group failbench`")
+    else:
+        report.ok("supervisor", f"{s.supervisor.mode} mode, {versions}, every judge's key and SDK is there")
 
 
 # --- Putting it together --------------------------------------------------------------------------
@@ -735,10 +805,12 @@ def run_checks(
     control: Literal["FAIL", "WARN"] | None = None,
     teleop_only: tuple[ArmName, ...] = (),
     video: bool | None = None,
+    run_task: str | None = None,
 ) -> tuple[Report, list[CameraLookup]]:
     """Run the checks. `loop_fps` also times a recording step, which needs both arms and the cameras.
     With `control`, the rest pose and `[control]` settings are checked too, each problem getting that
-    status (`check_control`). The arms in `teleop_only` (of `arms`) are needed only for Teleop: each of
+    status (`check_control`), and the supervisor's mode against `run_task`, the task `serve` or `run`
+    runs, or else `task`'s. The arms in `teleop_only` (of `arms`) are needed only for Teleop: each of
     their failures is a WARN that says Teleop won't be available. With `video`, the video encoder's
     crash fix is checked too (`check_video`): True for a command that records. Every device the checks
     open, they close.
@@ -749,7 +821,7 @@ def run_checks(
     if video is not None:
         check_video(report, video)
     if control is not None:
-        check_control(report, s, control)
+        check_control(report, s, control, run_task or (task.name if task is not None else None))
     buses: dict[ArmName, SerialMotorsBus] = {}
     opened: dict[str, OpenCVCamera] = {}
     lookups: list[CameraLookup] = []

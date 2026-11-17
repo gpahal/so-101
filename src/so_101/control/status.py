@@ -5,6 +5,8 @@ kept (`Controller.status`). It is the controller's own, kept in a file beside `c
 controller's state and changes nothing.
 """
 
+import math
+
 from so_101.control.attempt import summary
 from so_101.control.link import NOT_IN_CONTROL
 from so_101.control.states import State
@@ -24,7 +26,9 @@ def build(controller, refusals: dict[str, str | None]) -> dict:
         "attempt_open": attempt is not None,
         "elapsed_s": round(c.clock() - attempt.started, 1) if attempt is not None else None,
         "policy_s": round(attempt.spent["attempt_limit_s"], 1) if attempt is not None else None,
-        "limit_s": c.control.attempt_limit_s,
+        # Seconds of policy time an attempt may use, or None for no limit (`so101 run --duration 0`): JSON
+        # has no infinity, and the page and the web server refuse NaN and infinities.
+        "limit_s": c.control.attempt_limit_s if math.isfinite(c.control.attempt_limit_s) else None,
         "teleop_s": round(attempt.spent["human_limit_s"], 1) if attempt is not None else None,
         "rewind_available_s": round(c.rewind_available(), 1) if attempt is not None else None,
         "rewind_s": c.control.rewind_s,
@@ -51,6 +55,9 @@ def build(controller, refusals: dict[str, str | None]) -> dict:
         "timeline": [{**run, "s": round(run["s"], 1)} for run in (shown.timeline if shown else [])],
         "label": {"current": shown.label if shown else None, "refusal": c.label_reason()},
         "summary": summary(c.saved_attempts),
+        # `so101 run`'s autopilot: made (attempts ended) of how many, next_in_s (until the next starts,
+        # while it counts down), waiting (why it waits, or None) and held (Hold on the page). None in serve.
+        "autopilot": c.autopilot.status(c.clock()) if c.autopilot is not None else None,
     }
 
 

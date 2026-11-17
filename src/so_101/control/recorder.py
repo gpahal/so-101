@@ -1,6 +1,7 @@
-"""Record a `so101 serve` run: one LeRobot dataset episode per attempt, and an event log.
+"""Record a `so101 serve` or `so101 run` run: one LeRobot dataset episode per attempt, and an event log.
 
-The controller owns the recorder and is its only caller. Every tick of an open attempt adds one
+The controller owns the recorder and is its only caller (the supervisor's layer, stepped by the controller
+as its policy, writes its `supervisor` events with `event` on the same thread). Every tick of an open attempt adds one
 frame, whatever the arm is doing, so timestamps stay evenly spaced. The episode is saved when the
 arm arrives at rest, or where the arm holds: at once after a fault, or where a quit's drive to rest
 stopped short. Each attempt's data file is finished (finalized) on disk before the attempt counts as
@@ -17,9 +18,16 @@ started, on the control loop's clock) and `wall` (Unix time). During an attempt 
 be recorded. A `state` event's `frame` is the first frame recorded in the new state, so events line
 up with the `control.phase` column. No other field can replace these.
 
+Besides the robot's columns, each frame has `intervention`, `control.phase`, `control.policy_action`
+(NaN when the model's action didn't reach the arm), `control.leader` (NaN when the leader wasn't read),
+`control.skill` (the index, in `run.json`'s `policy.skills`, of the skill the model was conditioned on;
+-1 without skills; a playback, a hold or a person's Teleop keeps the skill they interrupted) and
+`control.driver` (`policy.base`'s OTHER, POLICY, WAITING, PLAYBACK or HOLD: who drove in Autonomous;
+OTHER in every other phase, where `control.phase` already says).
+
     attempt_start  attempt
-    command        command, accepted, reason (None when accepted), its options (outcome, label, for_attempt),
-                   source (terminal, page or signal), who (a page's caller, for page commands
+    command        command, accepted, reason (None when accepted), its options (outcome, label, for_attempt,
+                   hold), source (terminal, page, signal or autopilot, `so101 run`'s), who (a page's caller, for page commands
                    only: its Tailscale login behind HTTPS, "this Mac", or its IP address), via
                    ("toggle" when the page's Space became this pause or resume) and operator
     state          state, previous, cause (the command or event that caused it), ended_by (when
@@ -58,10 +66,24 @@ up with the `control.phase` column. No other field can replace these.
     recording_failed  error: saving or finishing an attempt's file failed (its attempt_end says saved
                    false), or the dataset couldn't be reopened after a saved attempt. Either way no new
                    attempt can be recorded in this run
+    grasp          the perception's (`policy.perception`): grasp (close, carry, regrasp or release),
+                   policy_t (seconds the model had driven), and the detector's fields (gripper, close,
+                   regrasps, elbow_travel, held_at); name for a carry: how it was seen (hold or elbow)
+    rule           the perception's: name (a stuck rule), policy_t, progress, closes, regrasps
+    skill          the skill sequencer's (`policy.skills`): skill, index, cause (start, the handover
+                   event, or reopened after a handback with the gripper open) and previous
+    playback       a layer's playback of the model's motion: layer, and the `rewind` event's start_frame,
+                   end_frame, seconds, cause, farthest and gap
+    supervisor     what the supervisor saw, asked and did (`supervisor.layer`): kind (start, attempt,
+                   check, decision, escalation, attempt_end or error), mode (shadow or act), for_attempt
+                   (the attempt it's about, which a late check's event may name after the next attempt
+                   opened) and policy_t, then the kind's own fields. A decision has acted (false in
+                   shadow mode, or while the stack doesn't have the arm)
+    <layer>        kind error: a layer's own error, after which it passes everything through
     run_end        the last event of a run that ended with a quit: finished (local time,
                    YYYY-mm-ddTHH:MM:SS), attempts (opened) and episodes (saved)
 
-`operator` (the name given with `so101 serve --operator`, or None) is on the events a person's
+`operator` (the name given with `--operator`, or None) is on the events a person's
 action causes: command, label, outcome, control_taken, check and pose. Events the robot causes on
 its own, such as fault, link_lost and loop_rate, don't have it.
 
@@ -103,12 +125,18 @@ class Phase(IntEnum):
 
 OUTCOMES = ("succeeded", "failed", "ignored")
 KEEP_EVENTS = 500  # recent events kept in memory for the control page
+# Frames LeRobot's streaming encoder queues per camera before it drops one (after 0.1 s of a full
+# queue). LeRobot's default of 30 is 1 s at 30 fps: a stall of an encoder thread for longer, as when a
+# save and another app load the Mac at once, dropped frames, and the build then leaves that attempt
+# out. 90 frames is 3 s, about 80 MB per 640x480 camera at most, held only while the encoder is behind.
+ENCODER_QUEUE_FRAMES = 90
 
 
 def jsonable(record: dict) -> dict:
-    """`record` as JSON would give it back: a value JSON can't hold becomes its `str`, so the event
-    log and the page's /events can always write it."""
-    return json.loads(json.dumps(record, default=str))
+    """`record` as JSON would give it back: a value JSON can't hold becomes its `str`, and NaN and the
+    infinities, which strict JSON has no word for, become null, so the event log and the page's /events
+    (strict, `web.server`) can always write it."""
+    return json.loads(json.dumps(record, default=str), parse_constant=lambda constant: None)
 
 
 def warn(message: str) -> None:
@@ -156,6 +184,8 @@ def features(robot) -> dict[str, dict]:
         "control.phase": {"dtype": "int8", "shape": (1,), "names": None},
         "control.policy_action": {"dtype": "float32", "shape": (len(joints),), "names": joints},
         "control.leader": {"dtype": "float32", "shape": (len(joints),), "names": joints},
+        "control.skill": {"dtype": "int8", "shape": (1,), "names": None},
+        "control.driver": {"dtype": "int8", "shape": (1,), "names": None},
     }
 
 
@@ -186,6 +216,7 @@ class Recorder:
             "streaming_encoding": True,
             "encoder_threads": 2,
             "rgb_encoder": RGBEncoderConfig(preset=10),  # SVT-AV1 has no preset above 10; the default of 12 warns
+            "encoder_queue_maxsize": ENCODER_QUEUE_FRAMES,
         }
         self.dataset = LeRobotDataset.create(
             folder.repo_id, fps, features(robot), root=folder.dataset_root, robot_type=robot.robot_type,
@@ -219,7 +250,7 @@ class Recorder:
                 self._unwritten.add(type_)
                 warn(f"Couldn't write a {type_} event to {self.folder.events_path}: {error}. The arm and "
                      f"the control loop carry on; {type_} events are written once the disk takes them again, "
-                     "and lost if it doesn't before so101 serve exits. Is the disk full or unplugged?")
+                     "and lost if it doesn't before so101 exits. Is the disk full or unplugged?")
 
     # --- Attempts ----------------------------------------------------------------------------------
 
@@ -239,6 +270,8 @@ class Recorder:
         intervention: bool = False,
         policy_action: dict[str, float] | None = None,
         leader: dict[str, float] | None = None,
+        skill: int = -1,
+        driver: int = 0,
     ) -> None:
         """One frame of the open attempt. `action` is the goal sent this tick, after the step cap.
         `intervention` is set in Teleop once the policy has driven in the attempt (an action of its
@@ -258,6 +291,8 @@ class Recorder:
             "control.phase": np.array([phase], dtype=np.int8),
             "control.policy_action": self._joints(policy_action),
             "control.leader": self._joints(leader),
+            "control.skill": np.array([skill], dtype=np.int8),
+            "control.driver": np.array([driver], dtype=np.int8),
             "task": self.task,
         }
         self.dataset.add_frame(frame)
@@ -299,7 +334,7 @@ class Recorder:
             self.attempt = None
             self.failure = (f"Saving attempt {attempt} failed ({type(error).__name__}: {error}), so it isn't in the "
                             "run's dataset and no new attempt can be recorded. Check the disk the run is recorded "
-                            "on, then restart so101 serve to start a new run.")
+                            "on, then restart so101 serve or so101 run to start a new run.")
             self.event("recording_failed", error=self.failure)
             return None
         self.saved += 1
@@ -341,7 +376,7 @@ class Recorder:
         except Exception as error:  # the episode was saved; only the next attempt can't be recorded
             self.failure = (f"The run's dataset couldn't be reopened after episode {self.saved - 1} "
                             f"({type(error).__name__}: {error}), so no new attempt can be recorded. Restart "
-                            "so101 serve to start a new run.")
+                            "so101 serve or so101 run to start a new run.")
             self.event("recording_failed", error=self.failure)
 
     def discard_attempt(self, ended_by: str | None, **details) -> None:
@@ -377,5 +412,5 @@ class Recorder:
                 self._events.close()  # closed even when its last flush fails
             except (OSError, ValueError) as error:
                 warn(f"Couldn't finish writing {self.folder.events_path}: {error}. The events it couldn't "
-                     "write before so101 serve exited are lost; the page showed them.")
+                     "write before so101 exited are lost; the page showed them.")
 

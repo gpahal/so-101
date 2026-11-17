@@ -6,6 +6,7 @@ Only this virtualenv's python and a fake `ssh` run; nothing here reaches the net
 """
 
 import contextlib
+import dataclasses
 import io
 import json
 import logging
@@ -25,7 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from so_101 import remote
+from so_101 import remote, settings
 
 # A child that records each SIGINT on its own line, and exits with code 7 a while after the
 # `wanted`-th one, so the test can see whether the wrapper waited for it.
@@ -194,6 +195,21 @@ def port_open(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
+@dataclasses.dataclass(frozen=True)
+class Settings:
+    """The parts of so101.toml's `settings.Settings` that so101-control reads, with no devices."""
+
+    control: object
+    supervisor: settings.Supervisor
+    perception: settings.Perception = settings.Perception(None)
+    follower: object = None
+    leader: object = None
+    path: Path = Path("so101.toml")
+
+    def camera(self, name: str) -> str:
+        return name
+
+
 class ControlShutdown(unittest.TestCase):
     """`so101-control`'s whole run on the fake follower, with what reaches beyond this process
     stubbed: config files, devices, signal handlers, the page's server, the policy's loading and the
@@ -230,19 +246,21 @@ class ControlShutdown(unittest.TestCase):
         path = self.run_dir / "events.jsonl"
         return [json.loads(line)["type"] for line in path.read_text().splitlines()] if path.exists() else []
 
-    def control(self, before_quit=lambda: None, quit_in: str = "resting", at_exit=lambda: None) -> None:
+    def control(self, before_quit=lambda: None, quit_in: str = "resting", at_exit=lambda: None,
+                manifest: dict | None = None, run: dict | None = None, mode: str = "off") -> None:
         """Run `so101-control` until the key reader's quit, after `before_quit()`. Its stop raises.
 
         The quit comes from the terminal at once, at rest; with another `quit_in`, it comes as a signal
         once the state is `quit_in`. If that never comes within 10 s, or the signal's quit hasn't ended
         the run 2 s later, the terminal quits and confirms, so the run always ends. `at_exit()` runs as the policy stops, just before the
-        follower disconnects."""
+        follower disconnects. `manifest` adds to the run.json serve passes, and `run` to RUN_ENV's JSON;
+        `mode` is so101.toml's `[supervisor] mode`. `self.keys_status` is the controller's status."""
         from fakes import control, make_engine
         from test_controller import POLICY_ACTIONS, REST_STEPS
 
         from so_101.control import main
-        from so_101.control.policy import EngineDriver
-        from so_101.control.server import Bind
+        from so_101.policy.engine import EngineDriver
+        from so_101.web.server import Bind
 
         order, robot, test = self.order, self.robot, self
         driver = EngineDriver(make_engine(POLICY_ACTIONS), list(robot.action_features))
@@ -253,8 +271,7 @@ class ControlShutdown(unittest.TestCase):
             at_exit()
 
         driver.stop = stop
-        s = SimpleNamespace(control=control(preview_fps=0, rest_pose=REST_STEPS), follower=None, leader=None,
-                            camera=lambda name: name, path=Path("so101.toml"))
+        s = Settings(control=control(preview_fps=0, rest_pose=REST_STEPS), supervisor=settings.Supervisor(mode, None))
         task = SimpleNamespace(name="test", cameras=tuple(robot.inner.cameras))
         cfg = SimpleNamespace(task="test", policy=SimpleNamespace(pretrained_path="policy"))
 
@@ -274,7 +291,7 @@ class ControlShutdown(unittest.TestCase):
         class Keys:
             def __init__(self, submit, status) -> None:
                 self.submit, self.status = submit, status
-                test.keys_submit = submit  # for `before_quit`
+                test.keys_submit, test.keys_status = submit, status  # for `before_quit`
 
             def start(self) -> None:
                 before_quit()
@@ -298,8 +315,8 @@ class ControlShutdown(unittest.TestCase):
                 raise RuntimeError("restoring the terminal failed")
 
         manifest = {"operator": None, "control": {"fps": 30},
-                    "policy": {"type": "act", "revision": "main", "inference": "local"}}
-        environment = {main.RUN_ENV: json.dumps({"dir": str(self.run_dir), "manifest": manifest})}
+                    "policy": {"type": "act", "revision": "main", "inference": "local"}, **(manifest or {})}
+        environment = {main.RUN_ENV: json.dumps({"dir": str(self.run_dir), "manifest": manifest, **(run or {})})}
         # LeRobot's real init_logging runs, so a call it rejects fails here. It replaces the root
         # logger's handlers and level, which the other tests rely on, so they're put back after.
         root = logging.getLogger()
@@ -335,6 +352,80 @@ class ControlShutdown(unittest.TestCase):
         self.assertFalse(self.motors.torqued(), "the motors turned off")
         self.assertFalse(self.motors.is_open)
 
+    def test_cleanup_stops_the_whole_policy_stack_not_only_the_model(self) -> None:
+        from so_101.policy import stack
+
+        build = stack.build
+
+        def recording_build(*args, **kwargs):
+            built = build(*args, **kwargs)
+            stop = built.stop
+
+            def stopped() -> None:
+                self.order.append("stack stopped")
+                stop()
+
+            built.stop = stopped
+            return built
+
+        with mock.patch.object(stack, "build", recording_build):
+            self.control()
+        self.assertIn("stack stopped", self.order)
+
+    def run_json(self) -> dict:
+        return json.loads((self.run_dir / "run.json").read_text())
+
+    def test_run_mode_records_its_autopilot_and_the_files_the_perception_and_supervisor_read(self) -> None:
+        from so_101.control import main
+        from so_101.grasp import thresholds
+        from so_101.skills import RUN_LABEL_VERSION
+        from so_101.policy import stack
+        from so_101.supervisor import program
+
+        statuses = []
+        parts = main.policy_parts
+        modes = []
+
+        def policy_parts(s):  # the judges would need API keys: the mode it was asked for is what's checked
+            modes.append(s.supervisor.mode)
+            grasp, _, judges = parts(dataclasses.replace(s, supervisor=dataclasses.replace(s.supervisor, mode="off")))
+            return grasp, program.load(s.supervisor.program), judges  # with the supervisor on, the program loads
+
+        build = stack.build
+
+        def build_stack(driver, ctx, **options):
+            modes.append(options["mode"])
+            return build(driver, ctx, **{**options, "mode": "off"})
+
+        autopilot = {"episodes": 1, "reset_s": 0.0, "duration_s": 0}
+        with mock.patch.object(main, "policy_parts", policy_parts), mock.patch.object(stack, "build", build_stack):
+            self.control(before_quit=lambda: statuses.append(json.dumps(self.keys_status(), allow_nan=False)),
+                         manifest={"mode": "run", "autopilot": autopilot}, run={"supervisor": "shadow"})
+        self.assertEqual(modes, ["shadow", "shadow"], "the run's --supervisor over so101.toml's off")
+        manifest = self.run_json()
+        self.assertEqual((manifest["mode"], manifest["autopilot"]), ("run", autopilot))
+        grasp, loaded = thresholds.load(), program.load()
+        self.assertEqual(manifest["grasp_thresholds"], {"path": str(grasp.path), "gripper_version": grasp.gripper.version,
+                                                        "rules_version": grasp.rules.version,
+                                                        "run_labels": RUN_LABEL_VERSION})
+        self.assertEqual(manifest["supervisor_program"], {"path": str(loaded.path), "version": loaded.version,
+                                                          "mode": "shadow"})
+        [status] = map(json.loads, statuses)
+        self.assertIsNone(status["limit_s"], "--duration 0: no limit")
+
+    def test_serve_records_the_thresholds_and_program_too(self) -> None:
+        self.control()
+        manifest = self.run_json()
+        self.assertEqual(manifest["supervisor_program"], {"mode": "off"}, "with the supervisor off, no program is read")
+        self.assertIn("gripper_version", manifest["grasp_thresholds"])
+
+    def test_a_duration_that_isnt_0_or_more_stops_it_before_anything_connects(self) -> None:
+        for duration in (-1, float("nan")):
+            with self.subTest(duration=duration), self.assertRaises(SystemExit) as stopped:
+                self.control(manifest={"mode": "run", "autopilot": {"episodes": 1, "reset_s": 0.0, "duration_s": duration}})
+            self.assertIn("--duration", str(stopped.exception))
+            self.assertFalse(self.run_dir.exists())
+
     def test_a_quit_with_the_follower_silent_leaves_its_motors_on_when_it_answers_again_at_exit(self) -> None:
         def unplug() -> None:  # the follower's USB cable comes out with its power on, then a policy starts
             self.motors.failing = True
@@ -357,7 +448,7 @@ class SuspendTest(unittest.TestCase):
         code = ("import os, signal, time; from so_101.control import main; main.refuse_suspend(); "
                 "os.kill(os.getpid(), signal.SIGTSTP); time.sleep(0.2); print('still running', flush=True)")
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
-        self.assertEqual(out.stdout.splitlines(), [main.SUSPEND_REFUSED, "still running"])
+        self.assertEqual(out.stdout.splitlines(), [main.SUSPEND_REFUSED.format(command="so101 serve"), "still running"])
 
 
 class TunnelRestart(unittest.TestCase):
