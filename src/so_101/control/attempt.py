@@ -36,7 +36,8 @@ class Attempt:
     teleop_next: bool = False  # the move to the start pose hands over to the leader, not the policy
     history: History | None = field(default_factory=History)  # what Rewind plays back; None once closed
     skill: int = -1  # the skill the policy stack last said the model was conditioned on, recorded on each frame
-    moved: bool = False  # Teleop or Rewind moved the arm since the policy stack last had it
+    moved: bool = False  # Teleop, a Rewind, a return to rest or a layer's playback moved the arm since the
+    # policy stack last had it; a playback the layer handed back itself, and the model drove after, doesn't count
     # Runs of one phase, each {"phase", "s", "stepped_in"}.
     timeline: list[dict] = field(default_factory=list)
     stepped_in: bool = False  # the next run of the timeline starts with a step-in

@@ -378,6 +378,7 @@ class ControlShutdown(unittest.TestCase):
     def test_run_mode_records_its_autopilot_and_the_files_the_perception_and_supervisor_read(self) -> None:
         from so_101.control import main
         from so_101.grasp import thresholds
+        from so_101.skills import RUN_LABEL_VERSION
         from so_101.policy import stack
         from so_101.supervisor import program
 
@@ -387,7 +388,8 @@ class ControlShutdown(unittest.TestCase):
 
         def policy_parts(s):  # the judges would need API keys: the mode it was asked for is what's checked
             modes.append(s.supervisor.mode)
-            return parts(dataclasses.replace(s, supervisor=dataclasses.replace(s.supervisor, mode="off")))
+            grasp, _, judges = parts(dataclasses.replace(s, supervisor=dataclasses.replace(s.supervisor, mode="off")))
+            return grasp, program.load(s.supervisor.program), judges  # with the supervisor on, the program loads
 
         build = stack.build
 
@@ -404,7 +406,8 @@ class ControlShutdown(unittest.TestCase):
         self.assertEqual((manifest["mode"], manifest["autopilot"]), ("run", autopilot))
         grasp, loaded = thresholds.load(), program.load()
         self.assertEqual(manifest["grasp_thresholds"], {"path": str(grasp.path), "gripper_version": grasp.gripper.version,
-                                                        "rules_version": grasp.rules.version})
+                                                        "rules_version": grasp.rules.version,
+                                                        "run_labels": RUN_LABEL_VERSION})
         self.assertEqual(manifest["supervisor_program"], {"path": str(loaded.path), "version": loaded.version,
                                                           "mode": "shadow"})
         [status] = map(json.loads, statuses)
@@ -413,7 +416,7 @@ class ControlShutdown(unittest.TestCase):
     def test_serve_records_the_thresholds_and_program_too(self) -> None:
         self.control()
         manifest = self.run_json()
-        self.assertEqual(manifest["supervisor_program"]["mode"], "off")
+        self.assertEqual(manifest["supervisor_program"], {"mode": "off"}, "with the supervisor off, no program is read")
         self.assertIn("gripper_version", manifest["grasp_thresholds"])
 
     def test_a_duration_that_isnt_0_or_more_stops_it_before_anything_connects(self) -> None:

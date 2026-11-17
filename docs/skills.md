@@ -37,7 +37,7 @@ In `tasks.toml`, under the task, in the order they run:
 #   close    the gripper drops below 25: it closes on the block
 #   lift     shoulder_lift has moved 4 deg since the close: the block leaves the mat (0.63 s after, median)
 #   carry    the gripper has held steady in its holding band for 1.5 s (1.57 s after the close)
-#   release  the gripper opens 4 past where it held the block
+#   release  the gripper opens 4 past where it held the block, and above the hold band's top (22)
 #   widest   the gripper's widest opening in the 2 s after the release (0.5 s after it, median)
 #   end      the kept demo's last frame
 # `handover` is the event that switches to this skill at runtime: a carry or a release. It must fall
@@ -65,16 +65,36 @@ Why these spans, from the 144 demos:
   that moved the arm with the jaws open sends the run back to pick (step 6 of
   [Running a skills model](#running-a-skills-model)).
 
-Measured with `so101 skills` on the 144 demos, all of which cut:
+Measured with `so101 skills` on the 125 demos kept of the 180 recorded (the 144 and 36 more recorded as
+edge cases), all of which cut. The other 55 are deleted in `edits.toml`, each with its reason: mostly a jaw within
+about 2 mm of the block before closing, a block well off square to the jaws, a jar the drop pushed, an arm
+still moving as the jaws opened, or a reach with long stops. The cut keeps 14 to 20 of the 24 earlier demos
+at each of the six block spots: 11 with a moderate fault stay at the two spots farthest from the arm, where
+faults were commonest, and the 11 weakest left at three nearer spots went instead.
 
-| Skill | Frames (144 demos) | Median length |
+| Skill | Frames (125 demos) | Median length |
 |---|---|---|
-| pick | 40,159 | 9.4 s |
-| place | 17,269 | 3.9 s |
-| return | 20,076 | 4.6 s |
-| `whole`, for comparison | 68,111 | 15.5 s |
+| pick | 35,405 | 9.5 s |
+| place | 14,981 | 3.8 s |
+| return | 17,481 | 4.7 s |
+| `whole`, for comparison | 59,580 | 15.8 s |
 
-The release to the widest opening takes 0.50 s, and the widest opening to the demo's end 4.08 s (median).
+The release to the widest opening takes 0.50 s, and the widest opening to the demo's end 4.13 s (median).
+
+One of the 36 edge cases opens the jaws only 4.9 past its hold, from 18.9 to 23.8 over 0.3 s, and the block slides
+into the jar. The detector first took the hold to be the gripper's last reading inside the hold band, which
+followed those jaws up to 21.6 as they opened, so it wanted 25.6 and saw no release: the demo couldn't be
+cut. The hold is now the median reading over the last 1.5 s the gripper held steady (`Detector._steady`),
+which a block settling in the jaws still moves and opening jaws don't. That demo cuts, and in the other
+179 recorded demos only the release moved, by 0 to 2 frames earlier; no other event did. The demo itself is
+among the 55 deleted, for that narrow release. A release also needs the reading above the hold band's top
+(22): a held block keeps the gripper inside the band, and a carried block whose reading rises 4.5 inside it
+within 2 s, from 17.0 to 21.5, is still held, where the median hold alone called it a release. That demo
+still releases, at 23.8, and the guard moved no event in any of the 180 recorded demos, so the cut rules
+stayed version 5. A change to how the detector reads the same thresholds raises `skills.RUN_LABEL_VERSION`, which each
+run's `run.json` records, since it can move a run's labels. Jaws that open slower than about `hold_steady` per `hold_s` (1.3 a second) carry the hold
+with them, as a settling block does, so such an opening is a release only once it passes 4 over where the
+hold stopped: 18.9 to 24 over 4 s is none.
 
 ## Commands
 
@@ -86,7 +106,7 @@ wherever there is a choice. Without it, everything works on `whole`, as today.
 | `so101 skills [task]` | Finds every skill's span in every kept demo, checks the handover falls inside both spans, prints the phase timings and any demo it couldn't cut, and draws a contact sheet of each cut | Reads `data/`; writes `outputs/skills/<task>/` |
 | `so101 build [task] --skills` | Builds `datasets/skills/`: each demo's skills as episodes, in order | `data/<task>/datasets/skills/` |
 | `so101 train [task] --skills [--policy act\|pi05]` | Builds if stale, uploads to `<you>/so101_<task>_skills`, trains `<you>/<policy>_so101_<task>_skills` | Hub, HF Jobs credit |
-| `so101 serve [task] --skills [--policy …] [--remote]` and `so101 run [task] --skills …` | Runs the skills model with the skill layer switching skills | The arm |
+| `so101 serve [task] --skills [--policy …] [--remote]` and `so101 run [task] --skills …` | Runs the skills model with the skill layer switching skills, refusing one whose build records another skills contract ([below](#a-model-tied-to-its-skills)) | The arm |
 | `so101 server start [task] --skills --policy pi05` | The cloud GPU server for the skills model | HF Jobs credit |
 | `so101 tasks` | Also lists each task's skills, and which datasets are built and current | Reads only |
 
@@ -94,7 +114,7 @@ A session, start to finish:
 
 ```
 uv run so101 review                       # as today: trims apply to both datasets
-uv run so101 skills                       # check the cuts: 144 of 144 cut, sheets in outputs/skills/
+uv run so101 skills                       # check the cuts: 125 of 125 cut, sheets in outputs/skills/
 uv run so101 train --skills --policy pi05 # builds datasets/skills, uploads, trains one model on all three
 uv run so101 server start --skills --policy pi05
 uv run so101 serve --skills --policy pi05 --remote
@@ -105,7 +125,20 @@ uv run so101 serve --skills --policy pi05 --remote
   1. The attempt's joint readings go through one detector frame by frame, as the perception's do at
      runtime. The attempt starts on the first skill and moves to the next at its handover event.
   2. Frames a script moved aren't replayed: the move to the start pose, a Rewind, the return to rest
-     (`control.phase`) and a layer's playback (`control.driver`). Frames a person drove in Teleop are
+     (`control.phase`) and a layer's playback (`control.driver`). Nor are frames the running model's
+     detector never sees: Paused, Handover and a layer's hold. Only Teleop frames and Autonomous frames the
+     model drove or waited on (`control.driver` policy or waiting, or every Autonomous frame in a run
+     recorded before that column) are fed, through `grasp.replay.LiveFeed`, the one offline copy of the
+     perception's feed (`tests/test_replay.py` checks it against `Perception`). The detector's clock is the
+     model's: 1/fps per fed frame, and nothing for the first fed frame after a handback, as the perception
+     counts it live: the perception runs the same `LiveFeed`, one tick fed at a time. So a 2 s pause with the jaws on the block right after a close is no carry:
+     the carry comes `hold_s` of fed frames after it, as at runtime. After a paused or held stretch the next
+     fed frame tells the detector the arm was held, not moved (`resumed(False)`), as the perception hears
+     after a plain Pause; a scripted or Teleop stretch in the same gap wins and says it moved. A Pause and
+     Resume taken in one tick leave no Paused frame, but the perception heard them, so the replay does too,
+     from the run's `state` events (`analysis.Attempt.handbacks`). The live clock and the replay's both count
+     ticks at the task's fps, so they agree on every frame, at any loop speed. Only frames the model drove, and
+     Teleop, count as driven time for the stuck rules. Frames a person drove in Teleop are
      replayed: a person's close and carry count, and so does their release, so a person who finishes the
      task in Teleop is in the return from their release. A person who opens the jaws on a carried block
      and has the gripper back in the hold band (16.5 to 22, on a block, not shut as at rest) when the
@@ -190,8 +223,8 @@ use was found, so it's the first thing to test; the fallback is a model per skil
 dataset gives by filtering on the prompt.
 
 Steps follow the demo count, as for `whole`, so time and cost are the same. The skills dataset has 114% of
-`whole`'s frames (77,504 against 68,111): place overlaps pick by about 1.4 s and return by 0.7 s. Before
-return was a skill it had 84% (57,428), because it left the return out.
+`whole`'s frames (67,867 against 59,580 on the 125 kept demos): place overlaps pick by about 1.5 s and return by
+0.7 s. Without return as a skill it would have 85% (50,386), because it would leave the return out.
 
 ## Running a skills model
 
@@ -217,7 +250,9 @@ commands; it conditions the model through the stack, and only the model acts on 
    (`Detector.resumed`), and if it then shows neither a carry nor a release, the attempt starts again on
    the first skill, whatever skill it was on. So a missed grasp the supervisor plays back retries inside
    pick, and a block let go outside the jar and rewound to before the close is picked again rather than
-   left to return. With the jaws closed after the move nothing changes: a block still held keeps place,
+   left to return. Open means at `closed_below` (25) or above, or, once the block was carried or let go,
+   above `hold_band`'s top (22), where no block is held: the line a release crosses, so a narrow release
+   (18.9 to 23.8) that a person undoes re-arms too. With the jaws closed after the move nothing changes: a block still held keeps place,
    and jaws a person closed on the block count as a close. A person who teleoperates after a real release
    and resumes with the jaws open also sends it back to pick, because the detector can't tell that from a
    block put back; that was chosen over leaving a dropped block on return. The model drives that first
@@ -233,8 +268,20 @@ only while they're unchanged:
 - each skill's name, prompt, bounds and handover, in order;
 - the `[gripper]` thresholds, by the sha256 of their values (`skills.gripper_hash`), not the file's path:
   the same values in another file cut the same skills;
-- `skills.CUT_RULES_VERSION`, raised with any change to `LIFT_DEG`, `WIDEST_WITHIN_S`, `MIN_SPAN_S` or the
-  code that cuts a demo or labels a run.
+- `skills.CUT_RULES_VERSION` (5), raised with any change to `LIFT_DEG`, `WIDEST_WITHIN_S`, `MIN_SPAN_S`,
+  the code that cuts a demo, or how the detector finds the events a cut uses. Version 5 is the median hold;
+  the band guard after it moved no event in the 180 recorded demos, so it kept 5;
+- for a build with runs only (`--with`), `skills.RUN_LABEL_VERSION` (1), raised with any change to how
+  `label_run` labels a run: 1 replays Teleop frames and the frames the live detector sees, through
+  `grasp.replay.LiveFeed`, on the live clock, and hears a Pause and Resume taken in one tick. A demos-only build doesn't
+  record it, so it stays current across a change, and a build with runs made before it was recorded is
+  stale and rebuilt on its next `build`. It covers the grasp detector too, since a detector change can
+  move a run's labels without moving any demo's cut: the band guard, which kept the cut rules at 5, was
+  measured on the demos only. An earlier, separate detector version was folded in before any build
+  recorded it.
+
+`skills.contract` is the one definition of these fields: `data.build_inputs` records it and the
+skills-model check below compares it, so the two can't drift.
 
 The stuck rules (`[rules]`) cut nothing, so retuning them leaves the build current. `build.json` holds no
 folder of this computer, since `train` uploads it with the dataset: a note that quoted one writes the data
@@ -250,8 +297,19 @@ A rebuild renames the old dataset aside, renames the new one in, and only then d
 
 - a model that reads the one-hot without `--skills`, and an ACT model without it with `--skills`;
 - a one-hot of another size than `[<task>.skills]`;
-- a model whose build's `build.json` lists other skills (names, prompts or order) or was cut with other
-  `[gripper]` thresholds, or recorded none.
+- a model whose build's `build.json` records another `skills.contract` than this checkout's: any skill's
+  name, prompt, `from`, `to` or `handover`, or their order; the `[gripper]` thresholds' hash; the cut
+  rules (`CUT_RULES_VERSION`); and, when the build took runs, the run labelling, the grasp detector
+  included (`RUN_LABEL_VERSION`).
+  One refusal names every difference, by skill and field (`place: handover carry here, release in the
+  model's build`), and a `build.json` that leaves any of them out is refused, naming it. A model trained
+  on a skills build with runs from before `run_labels` was recorded is refused: train it again.
+
+`run.json`'s `policy` records the skills and the `[gripper]` thresholds' hash the model was checked
+against (`skills`, `gripper_sha256`). `so101-control` loads `tasks.toml` and the grasp thresholds again
+when it starts, which can be minutes later after a download, and exits before anything connects if
+either no longer matches (`control.main.require_run_skills`), so a run never switches skills where its
+model wasn't trained to, or records skills it didn't use.
 
 The build is the one the model was trained on, which `train --skills` records as `dataset.revision` in
 the model's `train_config.json` (`commands.policy.skills_build`):
@@ -262,13 +320,18 @@ the model's `train_config.json` (`commands.policy.skills_build`):
   `train --skills` uploads over `main` and leaves that commit as it was.
 - With `--target local`, the record is `so101-build-` and the sha256 of the `build.json` it trained on
   (`data.build_revision`). Every build writes that file anew, with the time it was built, so the sha256
-  names one build. LeRobot reads a local dataset from `dataset.root` and never uses the revision. The
-  check reads the `build.json` in `dataset.root` and refuses the model if the dataset there was rebuilt
-  since, even with the same skills, since the folder holds only the newest build.
+  names one build. LeRobot reads a local dataset from `dataset.root` and never uses the revision.
+  Before training, `train` copies that `build.json` to `outputs/train/builds/<revision>.json`
+  (`data.snapshot_build`, written to a temporary name and renamed, and never rewritten once there). The
+  check reads that copy (`data.trained_build_path`) and refuses the model, naming the file, when it's
+  missing or its sha256 no longer matches. The dataset folder holds only the newest build, so the check
+  once read `dataset.root`'s `build.json` and refused the model after any rebuild, even with the same
+  skills, including the one `train` runs when the build is stale, which retired a model that took days
+  to train. A model moved to another computer needs its copy moved too.
 - A model trained before `train` recorded either has `dataset.revision` null and is refused, saying so:
   train it again.
 
-The prompts and the thresholds are what the model is told and when it switches at runtime, so a model
+The prompts, bounds, handovers, thresholds and rules are what the model was trained on and when it switches at runtime, so a model
 trained on other ones would be told the wrong skill at the wrong time. `train --skills --base` refuses a
 whole-demo ACT base, which has no input for the one-hot, and `train --base` a skills one.
 

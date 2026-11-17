@@ -11,14 +11,21 @@ the tick down or drives the arm itself:
   and each request times out at `answer_within_s` too, so a stale check neither bills nor holds a worker.
 - **Rewind and retry.** A miss (an after_close check that both judges call wrong) plays back
   `miss_rewind_s[n]` of the model's own measured motion, newest first (`control.rewind`, the same
-  playback as serve's Rewind), then hands the arm back with `Handback(LAYER, moved=True)`, so the layers
-  below restart from where the arm is: the perception's detector forgets the close it undid. A miss past
+  playback as serve's Rewind), on the model's clock: its history counts each tick the model drove as
+  1/fps of the task's fps, as the perception's clock does, so a playback replays one recorded pose per
+  tick and reaches the close the check was for at any loop speed. Then it hands the arm back with
+  `Handback(LAYER, moved=True)`, so the layers below restart from where the arm is: the perception's
+  detector forgets the close it undid. A playback
+  that stops short (a joint still more than `rollout.TOLERANCE` off after `REWIND_SETTLE_S`) hands
+  nothing back: it holds where it stopped and asks for a person, as a person's Rewind does. A miss past
   that list counts as stuck. While the list has rungs left and both judges answer, a `regrasp_loop` rule
   is left to it.
 - **Hold and check.** A stuck rule holds the arm and asks the watch check. A sure ok hands it back with
   `Handback(LAYER, moved=False)`; anything else, or no answer within `hold_deadline_s`, asks for a person
-  (`Output.asks`), and the escalation model's advice for them follows as a message (`maintain`). A
-  `pause` ends a hold: whoever paused has the arm, so its deadline asks nobody and its verdict is stale.
+  (`Output.asks`), and the escalation model's advice for them follows as a message (`maintain`), once an
+  attempt. A `pause` ends a hold: whoever paused has the arm, so its deadline asks nobody and its verdict
+  is stale. Once the runner hands the arm back (`run`), after an ask or not, the rules not yet fired, the
+  miss ladder and the done check watch again; each rule still fires once an attempt.
 - **Done.** A release that both judges are sure put the block in the container is logged, and the
   policy drives on until the arm is at rest (`Tick.at_rest`) or `home_within_s` of its time has passed;
   then the layer asks for a person with kind `done`: only a person, or `run`'s autopilot, ends or labels
@@ -27,12 +34,22 @@ the tick down or drives the arm itself:
 Every verdict carries the generation it was asked in, raised by `pause`, `run` and each hold: a watch
 verdict settles only the hold it was asked for, and an after_close verdict is dropped after a pause or
 resume, a newer close, a carry or release since it was asked, or once it is `after_close_answer_s` of
-the model's time old, when the first playback would no longer reach back past the close.
+the model's time old, when the first playback would no longer reach back past the close. A check not
+yet sent is dropped at a pause or resume too, and an after_close check not yet sent when a newer close
+comes is dropped unsent; every check keeps the close it was scheduled for. Those scheduling rules are
+`supervisor.schedule.Schedule`, which `failbench.candidates` shares. A handback that moved the arm
+forgets a confirmed release, so nothing about the scene before a handback is acted on after it.
 
 In `shadow` mode every tick passes straight through: the decisions are logged with `acted: false` and
 nothing else changes. Either way each decision and check is a `supervisor` event, and each playback a
 `playback` event with the `start_frame` and `end_frame` of the motion it undid, which `control.analysis`
-never trains on, whichever layer wrote it.
+never trains on, whichever layer wrote it. Each playback tick's Output names the frame it goes back to
+(`goal_frame`), so the loop drops what it undid from a person's Rewind history.
+
+Each check sends the newest frames, the tick's own, so it judges the picture `so101-failbench candidates`
+scores for the same moment; only the watch check's lookback ring keeps one every `FRAME_EVERY_S`. That ring
+(`FRAME_EVERY_S`, `lookback_s`), `hold_deadline_s` and `answer_within_s` are on the loop's clock instead:
+they're about real time, a person's and a provider's, not the model's.
 
 What the runner owns, it leaves alone: it never ends, labels or resets an attempt, and anything between
 `pause` and `run` (a person's Teleop, a serve Rewind) is outside it. After each handback its playback
@@ -42,17 +59,18 @@ history starts again, so it never drives back past a pose something else set.
 from collections import deque
 from dataclasses import dataclass, field, replace
 
+from so_101 import rollout
 from so_101.control import rewind as R
 from so_101.grasp.thresholds import RULES
 from so_101.policy.base import (DONE, HOLD, LAYER, PLAYBACK, STUCK, Ask, Handback, Layer, LayerContext, Output,
                                 Readings, Tick)
 from so_101.supervisor import judges as J
 from so_101.supervisor.program import RING_S
+from so_101.supervisor.schedule import Schedule
 
 MODES = ("off", "shadow", "act")
 CAMERAS = ("top", "wrist")
-FRAME_EVERY_S = 0.2  # frames kept for the checks at most this often
-MAX_STEP_S = 0.5  # a longer gap between steps (a stalled loop) counts as this much of the playback history
+FRAME_EVERY_S = 0.2  # frames kept in the watch check's lookback ring at most this often
 FORGET_AFTER_S = 300.0  # a call still out this long after its check settled is no longer waited for, even to log
 PASS, REWINDING, HOLDING = "pass", "rewinding", "holding"  # what the layer is doing with the arm
 EVENT_ROLES = ("decision", "chat")
@@ -79,14 +97,13 @@ class _Check:
 @dataclass
 class _Attempt:
     number: int
+    schedule: Schedule  # the after_close and after_release checks not yet sent, and the closes so far
     history: R.History = field(default_factory=R.History)  # the model's motion since the last handback
     readings: Readings = field(default_factory=Readings)  # the perception's, as of the model's last tick
     frames: dict | None = None  # the newest frames
     ring: deque = field(default_factory=deque)  # (loop clock, frames), for the watch check's lookback
     closes: list = field(default_factory=list)  # (caption, frames) for the contact sheet
     log: list[str] = field(default_factory=list)
-    scheduled: list = field(default_factory=list)  # (due t, moment, close seq)
-    close_seq: int = 0
     progress: int = 0  # carries and releases so far
     misses: int = 0
     watches: int = 0
@@ -96,7 +113,8 @@ class _Attempt:
     judges_silent: bool = False  # the last after_close check settled without both judges' answers
     released_t: float | None = None  # the model's seconds at the release
     done: bool = False  # a release the judges are sure of: ask once the arm is home
-    asked: bool = False  # it has asked for a person in this attempt
+    asked: bool = False  # it has asked for a person in this attempt, at least once (`attempt_end` logs it)
+    waiting: bool = False  # it has asked for a person since the runner last handed the stack the arm
     escalated: bool = False  # the escalation model was asked: once an attempt, in either mode
 
     @property
@@ -118,7 +136,7 @@ class Supervisor(Layer):
         self._wants: list[tuple] = []  # what the next step starts, in order: (REWINDING, s), (HOLDING,), (PASS,)
         self.doing = PASS
         self._rewind: R.Rewind | None = None
-        self._last: float | None = None
+        self._stepped = False  # a tick was stepped since the last handback (`run`) or `pause`
         self._pose: dict[str, float] = {}
         self._frames_at: float | None = None
         self._now = 0.0  # the loop's clock at the last tick
@@ -160,30 +178,39 @@ class Supervisor(Layer):
     def pause(self) -> None:
         """The runner takes the arm: no action from the model or from a playback reaches it after this. A
         hold ends here: whoever paused has the arm, so its deadline asks nobody and its watch check is stale."""
-        self._active, self._wants, self._asking, self._last = False, [], None, None
+        self._active, self._wants, self._asking, self._stepped = False, [], None, False
         self.generation += 1
         self.safely(self._end_hold)
+        self.safely(self._drop_scheduled)
         if self._rewind is not None:
             self.safely(self._finish_rewind, "paused")
         self.doing, self._rewind = PASS, None
         self.inner.pause()
 
     def run(self, handback: Handback) -> None:
-        """The runner hands the arm to the stack, after something else may have moved it."""
+        """The runner hands the arm to the stack, after something else may have moved it. A person has
+        answered any ask, so the layer watches and may ask again. A release the judges confirmed stays done
+        only if nothing moved the arm since: a person may have undone it."""
         self.inner.run(handback)
-        self._active, self._wants, self._asking, self._last, self.doing = True, [], None, None, PASS
+        self._active, self._wants, self._asking, self._stepped, self.doing = True, [], None, False, PASS
         self.generation += 1
         self._rewind = None
+        self.safely(self._drop_scheduled)
         if (a := self.attempt) is not None:
             a.history = R.History()
-            a.stuck = None
+            a.stuck, a.waiting = None, False  # a person answered any ask: the rules not yet fired watch again
+            if handback.moved:
+                a.done, a.released_t = False, None
 
     def step(self, robot, tick: Tick) -> Output:
         """This tick's goal: the stack below's, the next of a playback's, or the hold. The layer's own
         logic runs in `safely`; every call to the stack below, and the playback's goals to the arm, run
         outside it, so what they raise is theirs, for the runner."""
-        dt = 0.0 if self._last is None else min(max(tick.now - self._last, 0.0), MAX_STEP_S)
-        self._last = tick.now
+        # The model's clock: each tick counts 1/fps, as the perception's does, so a playback replays one recorded
+        # pose per tick, newest first, and reaches as far back at any loop speed. The first after a handback adds
+        # nothing.
+        dt = 1 / self.ctx.fps if self._stepped else 0.0
+        self._stepped = True
         self.safely(self._observe, tick)
         wants, self._wants = self._wants, []
         for want in wants if self.mode == "act" and self.broken is None else ():
@@ -203,13 +230,20 @@ class Supervisor(Layer):
         asking, self._asking = self._asking, None
         if self.doing == REWINDING:
             arrived = self._rewind.step(robot, self._pose, dt)
-            if arrived is not None:
-                self.safely(self._finish_rewind, "arrived" if arrived else "stopped_short")
+            goal_frame = self._rewind.start_frame  # read before `_finish_rewind` lets the playback go
+            if arrived:
+                self.safely(self._finish_rewind, "arrived")
                 if self.broken is None:  # else `failed` left it holding for a person
                     self.doing = PASS
                     self.inner.run(Handback(LAYER, moved=True))  # a clean slate, from where the playback left the arm
+            elif arrived is False:  # something blocks the arm: it holds where it stopped, as after a person's Rewind
+                joint, off = rollout.farthest(self._pose, self._rewind.target)  # before `_finish_rewind` lets it go
+                self.safely(self._finish_rewind, "stopped_short")
+                if self.broken is None:  # else `failed` left it holding and asked for a person
+                    self.doing = HOLDING
+                    self.safely(self._stopped_short, joint.removesuffix(".pos"), off)
             later, self._asking = self._asking, None  # `failed`'s, if the playback's end broke the layer
-            return Output(None, PLAYBACK, asks=asking or later)
+            return Output(None, PLAYBACK, asks=asking or later, goal_frame=goal_frame)
         if self.doing == HOLDING:
             self.inner.hold(robot)
             return Output(None, HOLD, asks=asking)
@@ -279,7 +313,7 @@ class Supervisor(Layer):
             if ask is not None:
                 self._wants.append((HOLDING,))
                 self._asking = Ask(ask_kind, f"Supervisor: {ask}")
-                self.attempt.asked = True
+                self.attempt.asked = self.attempt.waiting = True
             if tell is not None:
                 self.say(f"Supervisor: {tell}")
         return acting
@@ -287,7 +321,7 @@ class Supervisor(Layer):
     # --- Watching ----------------------------------------------------------------------------------
 
     def _begin(self, number: int) -> None:
-        self.attempt = _Attempt(number)
+        self.attempt = _Attempt(number, Schedule(self.p.after_close_s, self.p.after_release_s))
         self._frames_at = None
         self.log("attempt")
 
@@ -302,14 +336,18 @@ class Supervisor(Layer):
     def _observe(self, tick: Tick) -> None:
         self._pose = dict(tick.pose)
         self._now = tick.now
-        if (a := self.attempt) is not None and (self._frames_at is None or tick.now - self._frames_at >= FRAME_EVERY_S):
+        if (a := self.attempt) is not None:
             frames = {name: tick.observation[name] for name in self.cameras if name in tick.observation}
             if frames:
+                # Every check sends the tick's own frames, the ones `failbench.candidates` scores for that moment.
+                # They're encoded only when a check is sent (`_images`). Only the watch check's lookback ring is
+                # thinned to one every FRAME_EVERY_S.
                 a.frames = frames
-                a.ring.append((tick.now, frames))
-                while a.ring and a.ring[0][0] < tick.now - RING_S:
-                    a.ring.popleft()
-                self._frames_at = tick.now
+                if self._frames_at is None or tick.now - self._frames_at >= FRAME_EVERY_S:
+                    a.ring.append((tick.now, frames))
+                    while a.ring and a.ring[0][0] < tick.now - RING_S:
+                        a.ring.popleft()
+                    self._frames_at = tick.now
         self._collect()
 
     def _watch_model(self, dt: float, tick: Tick, out: Output) -> None:
@@ -322,7 +360,7 @@ class Supervisor(Layer):
         for signal in out.signals:
             self._signal(a, signal)
         self._due_checks(a)
-        if a.done and not a.asked and (tick.at_rest or a.t - a.released_t >= self.p.home_within_s):
+        if a.done and not a.waiting and (tick.at_rest or a.t - a.released_t >= self.p.home_within_s):
             a.done = False
             self._decide("done: the block is in the container", ask_kind=DONE,
                          ask="the block looks in the container. Reset and label the attempt.",
@@ -330,15 +368,12 @@ class Supervisor(Layer):
 
     def _signal(self, a: _Attempt, s) -> None:
         self._note(f"{s.kind}{' ' + s.name if s.name else ''} {s.detail}")
-        if s.kind == "close":
-            a.close_seq += 1
-            a.scheduled.append((s.t + self.p.after_close_s, "after_close", a.close_seq))
-        elif s.kind == "carry":
+        a.schedule.signal(s.kind, s.t)
+        if s.kind == "carry":
             a.progress += 1
         elif s.kind == "release":
             a.progress += 1
             a.released_t = s.t
-            a.scheduled.append((s.t + self.p.after_release_s, "after_release", a.close_seq))
         elif s.kind == "rule":
             self._stuck(a, s.name)
 
@@ -356,22 +391,24 @@ class Supervisor(Layer):
 
         return images
 
-    def _send(self, moment: str, a: _Attempt, futures: dict, **extra) -> None:
+    def _send(self, moment: str, a: _Attempt, futures: dict, seq: int | None = None, **extra) -> None:
+        """Put a check out, about close `seq` (by default the newest close)."""
         self._inflight.append(_Check(moment, a.number, self.generation, a.t, self.ctx.clock(), futures,
-                                     seq=a.close_seq, progress=a.progress, extra=extra))
+                                     seq=a.schedule.closes if seq is None else seq, progress=a.progress, extra=extra))
 
     def _due_checks(self, a: _Attempt) -> None:
-        due = [item for item in a.scheduled if item[0] <= a.t]
-        a.scheduled = [item for item in a.scheduled if item[0] > a.t]
         j = self.p.judges
-        for _, moment, seq in due:
+        for moment, seq, stale in a.schedule.due(a.t):
+            if stale:  # a newer close came: its own check is scheduled
+                self.log("check", moment=moment, stale="newer_close", sent=False)
+                continue
             if (images := self._images(a.frames)) is None:
                 self.log("check", moment=moment, error="no camera frames")
                 continue
             futures = {role: self.judges.submit(lambda key=key, images=images, moment=moment:
                                                 self.judges.ask(key, images(), moment))
                        for role, key in zip(EVENT_ROLES, (j.decision, j.chat), strict=True)}
-            self._send(moment, a, futures, frames=a.frames)
+            self._send(moment, a, futures, seq=seq, frames=a.frames)
 
     def _lookback(self, a: _Attempt) -> dict | None:
         target = self._now - self.p.watch.lookback_s
@@ -397,7 +434,7 @@ class Supervisor(Layer):
                 and self.judges.available(j.chat) and self.judges.out_of_budget() is None and not a.judges_silent)
 
     def _stuck(self, a: _Attempt, why: str) -> None:
-        if a.stuck or a.asked:
+        if a.stuck or a.waiting:
             return
         if why == "regrasp_loop" and self._ladder_open(a):
             self.log("ignored", rule=why, why="the miss ladder has rungs left and both judges answer")
@@ -434,6 +471,13 @@ class Supervisor(Layer):
         future = self.judges.submit(lambda: self.judges.escalate(J.contact_sheet(columns), sheet_log))
         self._send("escalation", a, {"escalation": future})
 
+    def _stopped_short(self, joint: str, off: float) -> None:
+        """A playback ended more than `rollout.TOLERANCE` from the pose it went back to: the model never
+        drives on from a pose it didn't reach. The arm holds there and a person is asked, as when a
+        person's Rewind stops short."""
+        if (a := self.attempt) is not None:
+            self._escalate(a, f"the playback stopped short: {joint} is {off:.0f} away from the pose it went back to")
+
     def _end_hold(self) -> None:
         """A pause took the arm while a stuck rule held it: the hold is over, with no ask and no escalation.
         The rule stays spent for the attempt (the detector fires each once), so after Resume the policy
@@ -444,6 +488,14 @@ class Supervisor(Layer):
         self.log("hold_ended", rule=a.stuck, why="paused")
         self._note(f"hold on {a.stuck} ended: paused")
         a.stuck = None
+
+    def _drop_scheduled(self) -> None:
+        """A pause or resume drops the checks due but not yet sent, as it does the verdicts still out: each
+        was about the scene before the handback, so it would judge, and could play back, motion since."""
+        if (a := self.attempt) is None:
+            return
+        for moment in a.schedule.drop():
+            self.log("check", moment=moment, stale="paused_or_resumed", sent=False)
 
     def _finish_rewind(self, cause: str) -> None:
         running, self._rewind = self._rewind, None
@@ -496,7 +548,7 @@ class Supervisor(Layer):
         if check.generation != self.generation:
             return "paused_or_resumed"
         if check.moment == "after_close":
-            if check.seq != a.close_seq:
+            if check.seq != a.schedule.closes:
                 return "newer_close"
             if check.progress != a.progress:
                 return "carried_or_released"
@@ -559,7 +611,7 @@ class Supervisor(Layer):
         if call == J.WRONG:
             self._decide("tell the operator: the release missed the container",
                          tell="the block may have missed the container.")
-        elif success and not a.asked:
+        elif success and not a.waiting:
             a.done = True  # asked for once the arm is home (`_watch_model`)
 
 

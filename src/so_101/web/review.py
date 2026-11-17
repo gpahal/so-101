@@ -475,14 +475,18 @@ class ReviewServer(web.PageServer):
     def decoded(self, id: str, camera: str, start: int, stop: int) -> Decoded:
         """Frames `start` up to `stop` of the item's camera, as JPEGs: those that decode, and why the
         rest didn't (a video cut short or missing a frame), or None."""
+        import av
+
         def decode() -> Decoded:
             meta, episode = self.source.video(id)
             jpegs = []
             try:
                 for _, frame in episode_frames(meta, episode, f"observation.images.{camera}", start, stop):
                     jpegs.append(jpeg(frame))
-            except (OSError, ValueError) as error:  # a video file missing, cut short or unreadable
-                return jpegs, str(error)
+            # A video file missing, cut short or unreadable. PyAV's EOFError and UndefinedError are
+            # neither an OSError nor a ValueError.
+            except (OSError, ValueError, av.error.FFmpegError) as error:
+                return jpegs, str(error) or type(error).__name__
             return jpegs, None
 
         return self.frames.get((id, camera, start, stop), decode)
@@ -532,7 +536,7 @@ class Handler(web.Handler):
         """Reply with what `make` returns, or with the error that stopped it (`_failure`)."""
         try:
             status, body = make()
-        except (ConfigError, OSError, LookupError) as error:
+        except (ConfigError, OSError, LookupError, ValueError) as error:  # ValueError: a Parquet file it can't read
             status, body = self._failure(error)
         self._json(status, body)
 
@@ -543,7 +547,7 @@ class Handler(web.Handler):
             return
         try:
             result = self._chunk(id, camera, query)
-        except (ConfigError, OSError, LookupError) as error:
+        except (ConfigError, OSError, LookupError, ValueError) as error:
             result = self._failure(error)
         if isinstance(result, bytes):
             self._send(HTTPStatus.OK, result, "application/octet-stream", send_s=send_timeout(len(result)))

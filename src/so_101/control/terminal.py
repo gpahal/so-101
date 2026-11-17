@@ -7,7 +7,9 @@ The answer applies only to the attempt the right arrow asked about: the question
 attempt has ended, except in Fault, where the answer labels the attempt the fault saved, and the
 controller refuses it once another attempt is the current one. With no attempt open (in Fault,
 where the attempt was already saved, or resting away from rest) the right arrow resets to rest
-without asking. After a time limit ends an attempt, s, f or i answers the controller's outcome prompt. c runs the
+without asking. The right arrow's question tells the controller once that a person started answering
+(`commands.ANSWERING`), which hands the attempt to them in `so101 run`: its autopilot neither resumes nor
+ends it, however long the answer takes. After a time limit ends an attempt, s, f or i answers the controller's outcome prompt. c runs the
 checks and prints their report, o the pose against the demos' start pose. Space only pauses, and r
 starts or resumes: a terminal sends no key-up, so it can't tell a held Space from a fresh press, and
 once the OS's key-repeat delay runs past the control loop's 1 s rule a held Space would start the arm
@@ -150,14 +152,13 @@ class KeyReader:
                 if outcome := OUTCOME_KEYS.get(key):
                     self._send("reset", outcome=outcome, for_attempt=attempt)
                     return
-                self._tell_answering(attempt, False)
                 if key not in ENDING_KEYS:
                     print("Not ended: the attempt goes on.", flush=True)
         if key == "right" and not status["attempt_open"]:
             self._send("reset")  # in Fault the attempt was saved there; at rest none is open: nothing to ask
         elif key == "right":
             self.asking = status["attempt"]
-            self._tell_answering(self.asking, True)  # `so101 run`'s autopilot leaves the attempt to the answer
+            self._send("answering", for_attempt=self.asking)  # `so101 run`'s autopilot hands the attempt over
             print(ASK, flush=True)
         elif key == "left":
             self._send("reset", outcome="ignored")
@@ -169,11 +170,6 @@ class KeyReader:
             self._send(KEYS[key], note=SPACE_REFUSED.get(status["state"]))
         elif command := KEYS.get(key):
             self._send(command)
-
-    def _tell_answering(self, attempt: int, still: bool) -> None:
-        """Say that a person is answering how `attempt` went, or no longer is. A refusal (the attempt
-        ended meanwhile) needs no word: the question is dropped with it."""
-        self.submit("answering", source="terminal", for_attempt=attempt, open=still)
 
     def _send(self, command: str, note: str | None = None, **options) -> None:
         self.submit(command, source="terminal", **options).add_done_callback(partial(report, note=note))

@@ -91,9 +91,30 @@ BUILD_REVISION = "so101-build-"
 def build_revision(path: Path) -> str:
     """What `train --skills --target local` records as the dataset revision in the checkpoint's
     train_config.json: the sha256 of the build.json at `path`, which every build writes anew (with the
-    time it was built), so it names one build. LeRobot reads a local dataset from its root and never
-    uses the revision."""
+    time it was built), so it names one build. `snapshot_build` keeps a copy of that build.json under
+    this name, which `run --skills` checks the model against, so a later build doesn't retire the model.
+    LeRobot reads a local dataset from its root and never uses the revision."""
     return BUILD_REVISION + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def trained_build_path(s: Settings, revision: str) -> Path:
+    """Where `snapshot_build` keeps the build.json a local skills model trained on, named by its
+    `build_revision`."""
+    return s.outputs_dir / "train" / "builds" / f"{revision}.json"
+
+
+def snapshot_build(s: Settings, manifest: Path) -> str:
+    """Copy the build.json at `manifest` to `trained_build_path` before a local training run, unless that copy
+    is already there, and return its `build_revision`. Written to a temporary name and renamed, so a kill
+    leaves the whole file or none."""
+    revision = build_revision(manifest)
+    path = trained_build_path(s, revision)
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(f".{path.name}.partial")
+        partial.write_bytes(manifest.read_bytes())
+        partial.replace(path)
+    return revision
 
 
 @dataclass(frozen=True)
@@ -374,6 +395,17 @@ def kept_episodes(s: Settings, task: "Task") -> int:
     )
 
 
+def built_demos(s: Settings, task: "Task", kind: str = WHOLE) -> int:
+    """The demos in the build of `kind`: its build.json's distinct (session, episode) pairs. A skills build has
+    an entry per skill of each demo, and leaves out a demo whose skills can't be cut; run cuts (`run` entries)
+    aren't demos. 0 without a build."""
+    path = build_manifest_path(s, task, kind)
+    if not path.is_file():
+        return 0
+    entries = json.loads(path.read_text()).get("episodes", [])
+    return len({(e["session"], e["episode"]) for e in entries if "session" in e})
+
+
 def demo_start_pose(s: Settings, task: "Task") -> dict[str, float] | None:
     """Each joint's median position at the start of the built demos, if there's a local training set:
     the whole dataset, or else the skills dataset's first skill.
@@ -418,9 +450,13 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
 
     `sources` are the run sources besides the demos (`so101 build --with`). A demos-only build
     without labels depends on no run, so it records no runs and a new run doesn't make it stale. A
-    skills build also depends on the skill definitions (names, prompts, bounds and handovers), the
-    `[gripper]` thresholds that find the events, by the hash of their values, and the cut rules
-    (`skills.CUT_RULES_VERSION`). The stuck rules (`[rules]`) cut nothing, so retuning them changes no build.
+    skills build also depends on `skills.contract`: the skill definitions (names, prompts, bounds and
+    handovers, in order), the `[gripper]` thresholds that find the events, by the hash of their values,
+    the cut rules (`skills.CUT_RULES_VERSION`) and, only when it takes runs, how their frames are labelled
+    (`skills.RUN_LABEL_VERSION`, which covers the grasp detector too), so a
+    demos-only build stays current when only those change. A skills
+    model is checked against the same fields (`commands.policy.require_skills_contract`). The stuck rules
+    (`[rules]`) cut nothing, so retuning them changes no build.
     """
     inputs = {
         "prompt": task.prompt,
@@ -453,9 +489,9 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
 
         gripper = thresholds.load(s.perception.thresholds).gripper
         # By content, never by path: the same thresholds in another file cut the same skills, and
-        # build.json is uploaded with the dataset.
-        inputs |= {"dataset": SKILLS, "skills": [skill.record() for skill in task.skills],
-                   "gripper_sha256": skills.gripper_hash(gripper), "cut_rules": skills.CUT_RULES_VERSION}
+        # build.json is uploaded with the dataset. A skills build takes no keep_labels, so it labels runs
+        # exactly when it takes them.
+        inputs |= {"dataset": SKILLS, **skills.contract(task.skills, gripper, runs=bool(sources))}
     return inputs
 
 

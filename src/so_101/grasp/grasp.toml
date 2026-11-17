@@ -1,7 +1,8 @@
 # The gripper and stuck-rule thresholds every run's perception reads (src/so_101/grasp/detector.py), and
 # that `so101 skills` and `build --skills` cut demos with. `[perception] thresholds` in so101.toml names
-# another file in this format. Each table has its own `version`: raise it with every change to that
-# table, because each run's events record the versions they ran with.
+# another file in this format. Each table has its own `version`: raise it when that table's values or their
+# meaning change, because each run's events record the versions they ran with. A change to how the
+# detector reads them raises `RUN_LABEL_VERSION` (src/so_101/skills.py) instead, since it can move a run's labels.
 #
 # The numbers were fitted offline on 150 recorded ACT and pi0.5 attempts from the first, 5-spot demos
 # (docs/supervisor.md), and scored on the same attempts. Those recordings are deleted, and the policies
@@ -13,10 +14,14 @@ version = 1
 closed_below = 25.0        # a close is the gripper falling below this
 carry_open_above = 12.0    # a close carries when the elbow then moves carry_elbow_deg with the gripper above this
 carry_elbow_deg = 25.0     # a miss reopened after a median of 5 deg of elbow travel; a real grasp moved 36
-hold_band = [16.5, 22.0]   # a held block keeps the gripper here (18 to 19 on this arm)
+hold_band = [16.5, 22.0]   # a held block keeps the gripper here (18 to 19 on this arm); after a person
+                           # moves the arm, jaws above it mean no block is held
 hold_steady = 2.0          # within this of where it was, to count as holding steady
 hold_s = 1.5               # holding steady this long counts as a carry
-release_above = 4.0        # after a carry, the gripper opening this far above its hold is a release
+release_above = 4.0        # after a carry, the gripper opening this far above its hold, and above hold_band's
+                           # top, is a release: inside the band a held block keeps it. Its hold is the median
+                           # of its readings over the last hold_s they stayed in hold_band and within
+                           # hold_steady of each other, so jaws that open quickly don't move it
 
 # The stuck rules. Each fires at most once per attempt, before any carry unless noted.
 [rules]
@@ -36,6 +41,6 @@ within_s = 3.0
 speed_below = 3.0
 seconds = 4.0
 [rules.no_carry]
-seconds = 14.0             # of the policy's driving time
+seconds = 14.0             # of the policy's driving time, counted in ticks at the task's fps
 [rules.not_released]       # after a carry
 seconds = 10.0             # holding steady, never released

@@ -11,8 +11,9 @@
   and the detector's log, and picks one of `CHOICES`. It never picks another identical retry.
 
 A judge whose key or SDK is missing is left out at the start and named in the supervisor's start event.
-Every call is counted against the program's `max_cost_usd`; once a run has spent it, checks answer
-with an error instead of calling. Nothing here raises: a failed call is a verdict with `error` set.
+Every call is counted against the program's `max_cost_usd` (`vision.budget.Budget`, failbench's too): a
+call starts only if its estimate fits under the cap, and once one doesn't, or the run has spent the cap,
+checks answer with an error instead of calling. Nothing here raises: a failed call is a verdict with `error` set.
 
 The calls run on `DaemonPool`'s threads, so a call that hangs never keeps the process from exiting, and
 closing the pool cancels the calls still queued. Each judge's request times out at `answer_within_s`,
@@ -27,6 +28,7 @@ from concurrent.futures import Future
 from dataclasses import asdict, dataclass
 
 from so_101.supervisor.program import Program
+from so_101.vision.budget import Budget
 
 JPEG_QUALITY = 90  # as so101-failbench's samples, so its scores hold for these checks
 OK, WRONG, UNSURE = "ok", "wrong", "unsure"
@@ -208,8 +210,7 @@ class Judges:
 
         self.p = program
         self.models = {key: MODELS[key] for key in (program.judges.decision, program.judges.chat, program.judges.escalation)}
-        self.spent = 0.0
-        self._lock = threading.Lock()
+        self.budget = Budget(program.judges.max_cost_usd)
         self._pool = pool or DaemonPool(8, "supervisor-judge")
         self.missing: dict[str, str] = {}  # model key -> why it can't be asked
         self._adapters = dict(adapters) if adapters is not None else self._make_adapters()
@@ -246,41 +247,52 @@ class Judges:
         """Run `fn(*args)` on the judges' pool. Returns its Future."""
         return self._pool.submit(fn, *args)
 
-    def _budget(self) -> str | None:
-        with self._lock:
-            if self.spent >= self.p.judges.max_cost_usd:
-                return f"the run has spent its ${self.p.judges.max_cost_usd:g} on checks (max_cost_usd)"
-        return None
+    @property
+    def spent(self) -> float:
+        """What the run's calls have cost, with the estimates of the calls still out."""
+        return self.budget.spent
+
+    def _why_not(self) -> str:
+        return f"the run has spent its ${self.p.judges.max_cost_usd:g} on checks (max_cost_usd)"
 
     def out_of_budget(self) -> str | None:
-        """Why checks no longer call their models: the run has spent `max_cost_usd`. None while it hasn't."""
-        return self._budget()
+        """Why checks no longer call their models: a call's estimate didn't fit under `max_cost_usd`, or the
+        run has spent it. None while neither."""
+        return self._why_not() if self.budget.exhausted() else None
 
-    def _charge(self, cost: float) -> None:
-        with self._lock:
-            self.spent += cost
+    def _reserve(self, estimate: float) -> str | None:
+        """Charge a call's estimate before it starts, so calls out together can't all pass against the same
+        balance; the call settles it to its real cost (`_settle`). Returns why the call may not start,
+        reserving nothing, when its estimate doesn't fit under `max_cost_usd`."""
+        return None if self.budget.reserve(estimate) else self._why_not()
+
+    def _settle(self, estimate: float, cost: float) -> None:
+        """Replace a call's reserved `estimate` with what it cost."""
+        self.budget.settle(estimate, cost)
 
     def ask(self, key: str, images: list[tuple[str, bytes]], moment: str) -> Verdict:
         """One model's verdict on `images` at `moment`. Never raises."""
         if key not in self._adapters:
             return Verdict(key, error=self.missing.get(key, "not available"))
-        if reason := self._budget():
-            return Verdict(key, error=reason)
-        started = time.monotonic()
         # A call that reports no cost, or fails, may still have been billed: it's charged the model's
         # estimate, as `so101-failbench run` charges it, so the cap holds.
         estimate = self.models[key].estimate if key in self.models else 0.0
+        if reason := self._reserve(estimate):
+            return Verdict(key, error=reason)
+        started = time.monotonic()
         try:
             answer = self._adapters[key].predict(images, moment)
-        except Exception as error:
-            self._charge(estimate)
+        except Exception as error:  # charged the estimate reserved
             return Verdict(key, latency_s=time.monotonic() - started, error=f"{type(error).__name__}: {error}"[:300])
         reported = answer.get("cost_usd")
         cost = float(reported) if reported is not None else estimate
-        self._charge(cost)
+        self._settle(estimate, cost)
+        error = answer.get("error")
+        if error is None and answer.get("p_wrong_dropped") is not None:  # `providers.parse_answer`'s
+            error = (f"p_wrong {answer['p_wrong_dropped']:g} contradicts wrong={str(answer.get('wrong')).lower()}: "
+                     "counted as no answer")
         return Verdict(key, p_wrong=answer.get("p_wrong"), category=answer.get("category"),
-                       latency_s=answer.get("latency_s", time.monotonic() - started), cost_usd=cost,
-                       error=answer.get("error"))
+                       latency_s=answer.get("latency_s", time.monotonic() - started), cost_usd=cost, error=error)
 
     def watch_check(self, now: list[tuple[str, bytes]], before: list[tuple[str, bytes]]) -> Verdict:
         """The decision model on each camera now and `lookback_s` before; the chat model if it's missing."""
@@ -295,11 +307,15 @@ class Judges:
         key = self.p.judges.escalation
         if key not in self._adapters:
             return {"error": self.missing.get(key, "not available")}
-        if reason := self._budget():
+        # Reserved before the call and settled to its cost after; a call that raises may still have been
+        # billed, so it keeps the estimate, as `ask` charges a failed call.
+        estimate = self.models[key].estimate
+        if reason := self._reserve(estimate):
             return {"error": reason}
         if (stand_in := self._adapters[key]) is not None:  # tests pass an object with its own `escalate`
             answer = stand_in.escalate(sheet, log)
-            self._charge(float(answer.get("cost_usd") or 0.0))
+            reported = answer.get("cost_usd")
+            self._settle(estimate, estimate if reported is None else float(reported))
             return answer
         from so_101.vision.providers import openrouter_json
 
@@ -309,7 +325,9 @@ class Judges:
             choices = "\n".join(f"- {name}: {why}" for name, why in CHOICES.items())
             answer, cost = openrouter_json(model, ESCALATION_SYSTEM, sheet, f"Log:\n{log}\n\nChoices:\n{choices}",
                                            "escalation", ESCALATION_SCHEMA, title="so101-supervisor")
-            self._charge(cost)
+            # A reply without usage may still have been billed: it keeps the estimate, as `ask` charges one.
+            cost = estimate if cost is None else cost
+            self._settle(estimate, cost)
             if answer.get("choice") not in CHOICES:
                 return {"error": f"no choice in the answer: {str(answer)[:200]}", "cost_usd": round(cost, 4)}
             return {**{k: str(answer.get(k, ""))[:300] for k in ("choice", "reason", "observation")},

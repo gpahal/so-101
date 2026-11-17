@@ -200,6 +200,29 @@ class StalenessTest(unittest.TestCase):
         with self.subTest("the cut rules"), mock.patch.object(skills, "CUT_RULES_VERSION", skills.CUT_RULES_VERSION + 1):
             self.assertFalse(data.build_is_current(self.s, TASK, kind=data.SKILLS))
 
+    def test_the_run_labelling_version_stales_only_a_build_with_runs(self) -> None:
+        self.assertNotIn("run_labels", self.inputs, "a demos-only build labels no run")
+        runs = ("policy-successes",)
+        with_runs = data.build_inputs(self.s, TASK, runs, kind=data.SKILLS)
+        self.assertEqual(with_runs["run_labels"], skills.RUN_LABEL_VERSION)
+        with mock.patch.object(skills, "RUN_LABEL_VERSION", skills.RUN_LABEL_VERSION + 1):
+            self.assertTrue(data.build_is_current(self.s, TASK, kind=data.SKILLS), "a demos-only build stays current")
+        data.build_manifest_path(self.s, TASK, data.SKILLS).write_text(json.dumps({"inputs": with_runs}))
+        self.assertTrue(data.build_is_current(self.s, TASK, runs, kind=data.SKILLS))
+        with mock.patch.object(skills, "RUN_LABEL_VERSION", skills.RUN_LABEL_VERSION + 1):
+            self.assertFalse(data.build_is_current(self.s, TASK, runs, kind=data.SKILLS), "a build with runs goes stale")
+        # A skills build with runs from before run_labels was recorded is stale too.
+        before = {k: v for k, v in with_runs.items() if k != "run_labels"}
+        data.build_manifest_path(self.s, TASK, data.SKILLS).write_text(json.dumps({"inputs": before}))
+        self.assertFalse(data.build_is_current(self.s, TASK, runs, kind=data.SKILLS))
+
+    def test_the_build_records_the_skills_contract_a_model_is_checked_against(self) -> None:
+        for runs in ((), ("policy-successes",)):
+            with self.subTest(runs=runs):
+                inputs = data.build_inputs(self.s, TASK, runs, kind=data.SKILLS)
+                want = skills.contract(TASK.skills, GRASP.gripper, runs=bool(runs))
+                self.assertEqual({k: inputs.get(k) for k in want}, want)
+
     def test_the_stuck_rules_and_where_the_thresholds_live_change_no_build(self) -> None:
         for change, s in {"a stuck rule": self.thresholds("seconds = 14.0", "seconds = 20.0"),
                           "the same thresholds in another file": self.thresholds("hold_s = 1.5", "hold_s = 1.5")}.items():
@@ -210,9 +233,92 @@ class StalenessTest(unittest.TestCase):
 class RunLabelTest(unittest.TestCase):
     """Each frame of a run's attempt labelled by what happened (`skills.label_run`), as a demo is cut."""
 
-    def label(self, state, skills_=SKILLS, scripted=None, told=None, teleop=None) -> np.ndarray:
+    def label(self, state, skills_=SKILLS, scripted=None, told=None, teleop=None, fed=None, drove=None) -> np.ndarray:
         scripted = np.zeros(len(state), dtype=bool) if scripted is None else scripted
-        return skills.label_run(skills_, state, NAMES, FPS, GRASP, scripted, told, teleop=teleop)
+        return skills.label_run(skills_, state, NAMES, FPS, GRASP, scripted, told, teleop=teleop, fed=fed, drove=drove)
+
+    def held_after_close(self) -> tuple[np.ndarray, int]:
+        """A reach that closes on the block at 18 and then holds it still for 6 s, with no elbow travel, so
+        the carry comes from holding steady: the trace, and the frame the jaws reach 18."""
+        rows = [np.array([0.0, -100.0, 90.0, 70.0, 0.0, 1.0])]
+
+        def to(seconds: float, **target) -> None:
+            start, end = rows[-1], rows[-1].copy()
+            for name, value in target.items():
+                end[NAMES.index(f"{name}.pos")] = value
+            n = round(seconds * FPS)
+            rows.extend(start + (end - start) * (i / n) for i in range(1, n + 1))
+
+        to(0.5)
+        to(2.0, shoulder_pan=20, gripper=40)
+        to(0.5, gripper=18)
+        closed = len(rows) - 1
+        to(6.0)
+        return np.array(rows, dtype=np.float32), closed
+
+    def test_a_pause_right_after_the_close_is_no_carry_and_the_hold_counts_again_after_it(self) -> None:
+        state, closed = self.held_after_close()
+        hold = round(GRASP.gripper.hold_s * FPS)
+        unpaused = int(np.flatnonzero(self.label(state) == 1)[0])
+        pause = slice(closed + 1, closed + 1 + 2 * FPS)  # 2 s Paused with the jaws on the block
+        self.assertTrue(pause.start < unpaused < pause.stop, "without the pause, the carry falls inside it")
+        fed = np.ones(len(state), dtype=bool)
+        fed[pause] = False
+        labels = self.label(state, fed=fed)
+        np.testing.assert_array_equal(labels[: pause.stop], 0, "no carry while paused: the detector saw none of it")
+        carry = int(np.flatnonzero(labels == 1)[0])
+        self.assertLessEqual(abs(carry - (pause.stop + hold)), 1, "the carry comes hold_s of fed frames after the pause")
+        # As at runtime: the perception sees no paused tick and is handed back with moved=False.
+        h = Stack()
+        h.feed(state[: pause.start])
+        h.top.pause()
+        h.top.run(Handback(PERSON))
+        h.feed(state[pause.stop:])
+        ran = pause.stop + [o.skill for o in h.outputs[pause.start:]].index(1)
+        self.assertLessEqual(abs(carry - ran), 1, f"the carry at frame {carry}, at runtime at {ran}")
+
+    def test_a_pause_and_resume_in_one_tick_restarts_the_hold_as_it_did_live(self) -> None:
+        # Every frame stays Autonomous, but the perception heard the handback (resumed with nothing moved),
+        # which restarts the steady hold the carry waits for: `analysis.Attempt.handbacks` marks the frame.
+        state, closed = self.held_after_close()
+        hold = round(GRASP.gripper.hold_s * FPS)
+        unmarked = int(np.flatnonzero(self.label(state) == 1)[0])
+        at = closed + 10
+        self.assertLess(at, unmarked, "the handback comes during the hold")
+        marks = np.zeros(len(state), dtype=bool)
+        marks[at] = True
+        labels = skills.label_run(SKILLS, state, NAMES, FPS, GRASP, np.zeros(len(state), dtype=bool), handbacks=marks)
+        carry = int(np.flatnonzero(labels == 1)[0])
+        self.assertGreater(carry, unmarked, "the hold started again at the handback")
+        self.assertLessEqual(abs(carry - (at + hold)), 1, "the carry comes hold_s after the handback")
+
+    def test_waiting_frames_count_on_the_detector_s_clock(self) -> None:
+        state, closed = self.held_after_close()
+        unpaused = int(np.flatnonzero(self.label(state) == 1)[0])
+        waiting = slice(closed + 1, closed + 1 + 2 * FPS)  # the model sent nothing for 2 s; the frames are fed
+        drove = np.ones(len(state), dtype=bool)
+        drove[waiting] = False
+        labels = self.label(state, fed=np.ones(len(state), dtype=bool), drove=drove)
+        self.assertEqual(int(np.flatnonzero(labels == 1)[0]), unpaused, "the carry comes as if the model drove")
+
+    def test_a_pause_then_a_rewind_with_the_jaws_open_starts_again_on_pick(self) -> None:
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        # After the carry the person pauses, then a Rewind plays the arm back to before the close: moved wins.
+        held = state[: at["carry"] + 15]
+        paused = np.repeat(held[-1][None], FPS, axis=0)
+        back = state[at["close"] - 20: at["carry"] + 15][::-1][:40]
+        again = state[at["close"] - 20:]
+        joined = np.concatenate([held, paused, back, again])
+        scripted = np.zeros(len(joined), dtype=bool)
+        scripted[len(held) + len(paused): len(held) + len(paused) + len(back)] = True
+        fed = np.ones(len(joined), dtype=bool)
+        fed[len(held): len(held) + len(paused)] = False
+        labels = self.label(joined, THREE, scripted=scripted, fed=fed)
+        restart = len(held) + len(paused) + len(back)
+        np.testing.assert_array_equal(labels[len(held): restart], 1, "paused and rewinding frames keep the skill")
+        self.assertEqual(labels[restart], 0, "the jaws read open after the rewind: back on pick")
+        self.assertEqual(labels[-1], 2)
 
     def test_a_regrip_in_teleop_during_the_carry_stays_in_place(self) -> None:
         state = trace()
@@ -485,7 +591,7 @@ class BuildTest(unittest.TestCase):
         actions = [[a[k] for k in START_POSE] for a in opened + closed]
         run_dir = data.task_dir(self.s, TASK) / "runs" / name
         rig = Rig(run_dir, actions=actions, wrap=lambda driver, recorder, clock: stack.build(
-            driver, LayerContext(recorder.event, clock, GRASP, PROGRAM), skills=SKILLS if with_skills else ()))
+            driver, LayerContext(recorder.event, clock, GRASP, PROGRAM, FPS), skills=SKILLS if with_skills else ()))
         rig.start_policy(ticks=5 * FPS)
         rig.reset("succeeded")
         rig.close()
@@ -503,7 +609,7 @@ class BuildTest(unittest.TestCase):
         name = "20260101-130000"
         run_dir = data.task_dir(self.s, TASK) / "runs" / name
         rig = Rig(run_dir, wrap=lambda driver, recorder, clock: stack.build(
-            driver, LayerContext(recorder.event, clock, GRASP, PROGRAM)))
+            driver, LayerContext(recorder.event, clock, GRASP, PROGRAM, FPS)))
         rig.start_policy(ticks=FPS)
         rig.teleop(1.0)
         rig.reset("succeeded")
@@ -516,7 +622,103 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(why, "")
         teleop = label.call_args.kwargs["teleop"]
         np.testing.assert_array_equal(teleop, attempt.phases == Phase.TELEOP)
+        self.assertIs(label.call_args.kwargs["handbacks"], attempt.handbacks, "same-tick handbacks reach the replay")
         self.assertGreaterEqual(teleop.sum(), FPS - 1, "the second of Teleop")
+
+    def test_a_runs_paused_frames_are_not_replayed_and_only_the_models_drive(self) -> None:
+        from test_controller import Rig
+
+        from so_101 import build as builder
+        from so_101.control import analysis
+        from so_101.control.recorder import Phase
+        from so_101.policy.base import WAITING
+
+        name = "20260101-140000"
+        run_dir = data.task_dir(self.s, TASK) / "runs" / name
+        rig = Rig(run_dir, wrap=lambda driver, recorder, clock: stack.build(
+            driver, LayerContext(recorder.event, clock, GRASP, PROGRAM, FPS)))
+        rig.start_policy(ticks=FPS)
+        rig.command("pause")
+        rig.tick(FPS)
+        rig.command("resume")
+        rig.tick_until("autonomous")
+        rig.tick(FPS)
+        rig.teleop(0.5)
+        rig.reset("succeeded")
+        rig.close()
+        (run_dir / "run.json").write_text(json.dumps({"policy": {}}))
+        run = next(r for r in data.runs(self.s, TASK) if r.name == name)
+        attempt = analysis.analyse(run, self.s.control.blame_s).attempts[0]
+        with mock.patch.object(skills, "label_run", wraps=skills.label_run) as label:
+            per_frame, why = builder.run_skills(run, attempt, TASK, GRASP)
+        self.assertEqual(why, "")
+        driver = np.array([int(np.ravel(v)[0]) for v in table(run.dataset_root)["control.driver"]])
+        autonomous, teleop = attempt.phases == Phase.AUTONOMOUS, attempt.phases == Phase.TELEOP
+        fed, drove = label.call_args.kwargs["fed"], label.call_args.kwargs["drove"]
+        np.testing.assert_array_equal(fed, teleop | (autonomous & np.isin(driver, (POLICY, WAITING))))
+        np.testing.assert_array_equal(drove, teleop | (driver == POLICY))
+        self.assertGreaterEqual((attempt.phases == Phase.PAUSED).sum(), FPS - 1, "the second Paused")
+        self.assertFalse(fed[attempt.phases == Phase.PAUSED].any(), "no paused frame is replayed")
+        self.assertTrue(fed[teleop].all() and teleop.sum() >= FPS // 2 - 1, "Teleop frames are")
+
+    def test_the_replay_labels_a_run_as_the_live_sequencer_did_after_a_layers_playback(self) -> None:
+        """A layer plays the model's motion back and hands the arm back itself; the model then closes on the
+        block, carries it and lets it go, and a person pauses and resumes. The live sequencer stays on
+        return across that plain pause, and the replay of the recorded run says the same on every frame
+        the model drove."""
+        from test_controller import START_POSE, PlayingBack, Rig
+
+        from so_101 import build as builder
+        from so_101.control import analysis
+        from so_101.control.recorder import Phase
+
+        three = dataclasses.replace(TASK, skills=THREE)
+        opened = [{**START_POSE, "gripper.pos": min(10.0 + 2 * i, 40.0)} for i in range(1, 31)]
+        closed = [{**opened[-1], "gripper.pos": max(40.0 - 3 * i, 18.4)} for i in range(1, 11)]
+        held = [closed[-1]] * (2 * FPS)
+        let_go = [{**closed[-1], "gripper.pos": min(18.4 + 3 * i, 40.0)} for i in range(1, 11)]
+        actions = [[a[k] for k in START_POSE] for a in opened + closed + held + let_go]
+        name = "20260101-150000"
+        run_dir = data.task_dir(self.s, three) / "runs" / name
+        rig = Rig(run_dir, actions=actions, wrap=lambda driver, recorder, clock: PlayingBack(
+            stack.build(driver, LayerContext(recorder.event, clock, GRASP, PROGRAM, FPS), skills=THREE),
+            drive=FPS // 2, back_s=0.3, clock=clock, hand_back=True))
+        rig.start_policy(ticks=6 * FPS)
+        rig.command("pause")
+        rig.tick(FPS)
+        rig.command("resume")
+        rig.tick_until("autonomous")
+        rig.tick(FPS)
+        rig.reset("succeeded")
+        rig.close()
+        (run_dir / "run.json").write_text(json.dumps({"policy": {"skills": [s.record() for s in THREE]}}))
+        run = next(r for r in data.runs(self.s, three) if r.name == name)
+        attempt = analysis.analyse(run, self.s.control.blame_s).attempts[0]
+        events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+        self.assertTrue(any(e.get("type") == "grasp" and e["grasp"] == "release" for e in events), "the model let go")
+        self.assertIn(Phase.PAUSED, set(attempt.phases), "a person paused after it")
+        live = attempt.skills
+        resumed = int(np.flatnonzero(attempt.phases == Phase.PAUSED)[-1]) + 1
+        driven_after = np.flatnonzero((attempt.phases == Phase.AUTONOMOUS) & (np.arange(len(live)) >= resumed))
+        self.assertTrue(len(driven_after) and (live[driven_after] == 2).all(),
+                        "the live sequencer stays on return across the plain pause")
+        with mock.patch.object(skills, "label_run", wraps=skills.label_run) as label:
+            builder.run_skills(run, attempt, three, GRASP)
+        args, kwargs = label.call_args
+        replayed = skills.label_run(*args[:6], None, **{k: v for k, v in kwargs.items() if k != "told"})
+        driven = (attempt.phases == Phase.AUTONOMOUS) & kwargs["drove"] & (replayed >= 0)
+        # The live perception's clock counts each tick fed as 1/fps, as the replay counts each frame (it runs the
+        # replay's own LiveFeed), so the two agree exactly: the same skills, in the same order, switching on the
+        # same frames, and every driven frame the same. This was within a frame while the perception summed real
+        # tick gaps (a fake clock at 1000.0 plus 1/30 a tick, which rounds), and is exact again now.
+        def switches(labels: np.ndarray) -> list[tuple[int, int]]:
+            frames = np.flatnonzero(driven)
+            return [(int(f), int(labels[f])) for k, f in enumerate(frames) if k and labels[f] != labels[frames[k - 1]]]
+
+        self.assertTrue(switches(live), "the attempt switches skills, so the switches are compared")
+        self.assertEqual(switches(replayed), switches(live), "the same skills, in the same order, on the same frames")
+        np.testing.assert_array_equal(replayed[driven], live[driven])
+        self.assertTrue((replayed[driven_after] == 2).all(), "the replay stays on return across the plain pause too")
 
     def test_run_cuts_are_split_where_the_skill_changes(self) -> None:
         for name, with_skills in (("20260101-110000", False), ("20260101-120000", True)):
@@ -584,7 +786,7 @@ class Stack:
         self.events: list[dict] = []
         self.now, self.frame = 0.0, -1
         self.leaf = FakeLeaf()
-        ctx = LayerContext(lambda type_, **fields: self.events.append({"type": type_, **fields}), lambda: self.now, GRASP, PROGRAM)
+        ctx = LayerContext(lambda type_, **fields: self.events.append({"type": type_, **fields}), lambda: self.now, GRASP, PROGRAM, FPS)
         self.top = stack.build(self.leaf, ctx, skills=skills_)
         self.top.begin_episode(1)
         self.top.run(Handback(START))
@@ -666,6 +868,21 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual(h.leaf.conditions[-1].prompt, SKILLS[0].prompt)
         self.assertEqual(h.outputs[-1].skill, 0)
 
+    def test_a_handback_above_the_hold_band_after_a_release_goes_back_to_pick(self) -> None:
+        # Jaws at 23.8 after a moved handback: under closed_below, but above the hold band, so nothing is held.
+        h = Stack(THREE)
+        state = trace()
+        at = skills.events(state, NAMES, FPS, GRASP)
+        h.feed(state[: at["release"] + 5])
+        self.assertEqual(h.switches()[-1], ("return", "release"))
+        h.top.pause()
+        h.top.run(Handback(PERSON, moved=True))
+        ajar = state[at["release"] + 5: at["release"] + 10].copy()
+        ajar[:, NAMES.index("gripper.pos")] = 23.8
+        h.feed(ajar)
+        self.assertEqual(h.switches()[-1], ("pick", "reopened"))
+        self.assertEqual(h.outputs[-1].skill, 0)
+
     def test_a_drop_outside_the_jar_rewound_to_before_the_close_goes_back_to_pick(self) -> None:
         h = Stack(THREE)
         state = trace()
@@ -736,7 +953,7 @@ class SequencerTest(unittest.TestCase):
         made = J.Judges(program_, adapters={"jev": FakeModel({"after_close": 0.95}),
                                             "gemini-3.8-flash": FakeModel({"after_close": 0.95}),
                                             "claude-opus-5.5": FakeEscalation()}, pool=pool)
-        ctx = LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: now[0], GRASP, program_)
+        ctx = LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: now[0], GRASP, program_, FPS)
         top = stack.build(leaf, ctx, skills=SKILLS, judges=made, mode="act", cameras=("top", "wrist"))
         top.begin_episode(1)
         top.run(Handback(START))
@@ -815,7 +1032,7 @@ class InServeTest(unittest.TestCase):
         actions = [[a[k] for k in START_POSE] for a in opened + closed]
         with tempfile.TemporaryDirectory() as folder:
             rig = Rig(Path(folder) / "run", actions=actions,
-                      wrap=lambda driver, recorder, clock: stack.build(driver, LayerContext(recorder.event, clock, GRASP, PROGRAM),
+                      wrap=lambda driver, recorder, clock: stack.build(driver, LayerContext(recorder.event, clock, GRASP, PROGRAM, FPS),
                                                                        skills=SKILLS))
             rig.start_policy(ticks=4 * FPS)
             rig.reset("failed")
@@ -831,6 +1048,51 @@ class InServeTest(unittest.TestCase):
             self.assertTrue((skill[: switch - 1] <= 0).all())
 
 
+class RunSkillsTest(unittest.TestCase):
+    """so101-control checks again, after it reloads tasks.toml and the grasp thresholds, that the skills and
+    `[gripper]` thresholds are the ones `serve` or `run` checked the model against and wrote in run.json
+    (`control.main.require_run_skills`): either file may change while the policy downloads."""
+
+    def policy(self, **changes) -> dict:
+        return {"skills": json.loads(json.dumps([skill.record() for skill in SKILLS])),
+                "gripper_sha256": skills.gripper_hash(GRASP.gripper), **changes}
+
+    def refused(self, policy: dict, task: Task = TASK, gripper=GRASP.gripper) -> str:
+        from so_101.control.main import require_run_skills
+
+        with self.assertRaises(SystemExit) as stop:
+            require_run_skills(policy, task, gripper)
+        return str(stop.exception.code)
+
+    def test_the_skills_and_thresholds_checked_run(self) -> None:
+        from so_101.control.main import require_run_skills
+
+        require_run_skills(self.policy(), TASK, GRASP.gripper)
+        require_run_skills({"skills": None}, dataclasses.replace(TASK, skills=()), GRASP.gripper)  # a whole-demo model
+
+    def test_skills_changed_in_tasks_toml_since_the_check_are_refused(self) -> None:
+        reworded = dataclasses.replace(TASK, skills=tuple(dataclasses.replace(k, prompt="Grab it") if k.name == "pick"
+                                                          else k for k in SKILLS))
+        message = self.refused(self.policy(), task=reworded)
+        self.assertIn("[test.skills]", message)
+        self.assertIn("pick", message)
+        self.assertIn("start the run again", message)
+        message = self.refused(self.policy(), task=dataclasses.replace(TASK, skills=()))
+        self.assertIn("[test.skills]", message)
+
+    def test_gripper_thresholds_changed_since_the_check_are_refused(self) -> None:
+        message = self.refused(self.policy(), gripper=dataclasses.replace(GRASP.gripper, hold_s=1.6))
+        self.assertIn("[gripper]", message)
+        self.assertNotIn("[test.skills]", message)
+        self.assertIn("[gripper]", self.refused(self.policy(gripper_sha256=None)), "a run.json that recorded none")
+
+    def test_both_changes_are_named_in_one_refusal(self) -> None:
+        message = self.refused(self.policy(), task=dataclasses.replace(TASK, skills=SKILLS[::-1]),
+                               gripper=dataclasses.replace(GRASP.gripper, hold_s=1.6))
+        self.assertIn("[test.skills]", message)
+        self.assertIn("[gripper]", message)
+
+
 class ModelTest(unittest.TestCase):
     """A skills model runs only with the skills and gripper thresholds its dataset was cut with
     (`commands.policy.check_skills_model`), found through its train_config.json and the dataset's build.json."""
@@ -839,14 +1101,19 @@ class ModelTest(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="so101-model-")
         self.addCleanup(temp.cleanup)
         self.folder = Path(temp.name)
-        self.build = {"inputs": {"dataset": data.SKILLS, "skills": [skill.record() for skill in SKILLS],
-                                 "gripper_sha256": skills.gripper_hash(GRASP.gripper)}}
-        self.s = settings.load()
+        self.build = {"inputs": {"dataset": data.SKILLS, "sources": ["demos"],
+                                 "skills": [skill.record() for skill in SKILLS],
+                                 "gripper_sha256": skills.gripper_hash(GRASP.gripper),
+                                 "cut_rules": skills.CUT_RULES_VERSION}}
+        # outputs/ beside a so101.toml in the temporary folder, where `train` keeps the build a local model
+        # trained on (`data.trained_build_path`): never the repo's own outputs/.
+        self.s = dataclasses.replace(settings.load(), path=self.folder / "so101.toml")
 
     def check(self, build: dict | None = None, task: Task = TASK, one_hot: int | None = 2, with_skills: bool = True,
-              policy: str = "act", pinned: bool = True, rebuilt: bool = False) -> None:
-        """Check a local checkpoint trained on `build`, whose train_config.json records that build as
-        `train --target local` does (`pinned`), and whose dataset was then built again (`rebuilt`)."""
+              policy: str = "act", pinned: bool = True, rebuilt: bool = False, kept: str = "kept") -> None:
+        """Check a local checkpoint trained on `build`, whose train_config.json records that build, and whose
+        build.json is kept, as `train --target local` does (`pinned`), and whose dataset was then built again
+        (`rebuilt`). `kept` is what became of the kept copy: "kept", "changed" or "missing"."""
         from so_101.commands.policy import check_skills_model
 
         root = self.folder / "dataset"
@@ -856,7 +1123,12 @@ class ModelTest(unittest.TestCase):
         model.mkdir(exist_ok=True)
         dataset = {"repo_id": "local/so101_test_skills", "root": str(root), "revision": None}
         if pinned:
-            dataset["revision"] = data.build_revision(root / "build.json")
+            dataset["revision"] = data.snapshot_build(self.s, root / "build.json")
+            copy = data.trained_build_path(self.s, dataset["revision"])
+            if kept == "changed":
+                copy.write_text(copy.read_text() + " ")
+            elif kept == "missing":
+                copy.unlink()
         (model / "train_config.json").write_text(json.dumps({"dataset": dataset}))
         if rebuilt:  # the same skills and thresholds, built again after training
             (root / "build.json").write_text(json.dumps({"built": "second", **(self.build if build is None else build)}))
@@ -877,10 +1149,61 @@ class ModelTest(unittest.TestCase):
         inputs = self.build["inputs"]
         renamed = [{**r, "name": "grab"} if r["name"] == "pick" else r for r in inputs["skills"]]
         reworded = [{**r, "prompt": "Grab it"} if r["name"] == "pick" else r for r in inputs["skills"]]
-        for case, changed in {"a name": renamed, "a prompt": reworded, "the order": inputs["skills"][::-1]}.items():
+        for case, changed in {"a name": renamed, "the order": inputs["skills"][::-1]}.items():
             with self.subTest(case):
                 self.refused("doesn't match this task's skills: its skills were",
                              build={"inputs": {**inputs, "skills": changed}})
+        self.refused("doesn't match this task's skills: pick: prompt 'Pick up the red block' here, 'Grab it' in the "
+                     "model's build", build={"inputs": {**inputs, "skills": reworded}})
+
+    def test_a_model_is_refused_when_its_skills_switch_or_end_elsewhere(self) -> None:
+        inputs = self.build["inputs"]
+
+        def place(**change) -> list[dict]:
+            return [{**r, **change} if r["name"] == "place" else r for r in inputs["skills"]]
+
+        cases = {
+            "the handover": (place(handover="release"), "place: handover carry here, release in the model's build"),
+            "from": (place(**{"from": "carry"}), "place: from lift here, carry in the model's build"),
+            "to": (place(to="widest + 0.3"), "place: to widest + 0.2 here, widest + 0.3 in the model's build"),
+        }
+        for case, (changed, message) in cases.items():
+            with self.subTest(case):
+                self.refused(message, build={"inputs": {**inputs, "skills": changed}})
+        # Every difference is named in the one refusal.
+        both = [{**r, "handover": "release", "to": "widest + 0.3"} if r["name"] == "place" else r
+                for r in inputs["skills"]]
+        with self.assertRaises(SystemExit) as stop:
+            self.check(build={"inputs": {**inputs, "skills": both}})
+        self.assertIn("place: to widest + 0.2 here, widest + 0.3 in the model's build; "
+                      "place: handover carry here, release in the model's build", str(stop.exception.code))
+
+    def test_a_model_is_refused_when_its_demos_were_cut_under_other_rules(self) -> None:
+        inputs = self.build["inputs"]
+        self.refused(f"its demos were cut under cut rules {skills.CUT_RULES_VERSION - 1}, and this checkout cuts under "
+                     f"{skills.CUT_RULES_VERSION}",
+                     build={"inputs": {**inputs, "cut_rules": skills.CUT_RULES_VERSION - 1}})
+        self.refused("its build recorded no cut_rules",
+                     build={"inputs": {k: v for k, v in inputs.items() if k != "cut_rules"}})
+
+    def test_a_model_trained_with_runs_is_refused_when_they_were_labelled_under_other_rules(self) -> None:
+        inputs = {**self.build["inputs"], "sources": ["demos", "policy-successes"]}
+        self.check(build={"inputs": {**inputs, "run_labels": skills.RUN_LABEL_VERSION}})
+        self.refused(f"its runs were labelled under run labels {skills.RUN_LABEL_VERSION + 1}, and this checkout labels "
+                     f"them under {skills.RUN_LABEL_VERSION}",
+                     build={"inputs": {**inputs, "run_labels": skills.RUN_LABEL_VERSION + 1}})
+        self.refused("its build took runs and recorded no run_labels", build={"inputs": inputs})
+
+    def test_a_model_is_accepted_when_its_build_matches_this_checkout(self) -> None:
+        # A demos-only build records no run_labels, and needs none.
+        self.assertNotIn("run_labels", self.build["inputs"])
+        self.check()
+        temp = tempfile.TemporaryDirectory(prefix="so101-model-data-")
+        self.addCleanup(temp.cleanup)
+        s = dataclasses.replace(self.s, data_dir=Path(temp.name))
+        for runs in ((), ("policy-successes",)):
+            with self.subTest(runs=runs):
+                self.check(build={"inputs": data.build_inputs(s, TASK, runs, kind=data.SKILLS)})
 
     def test_a_model_is_refused_when_its_demos_were_cut_with_other_gripper_thresholds(self) -> None:
         inputs = self.build["inputs"]
@@ -898,10 +1221,36 @@ class ModelTest(unittest.TestCase):
 
     def test_a_local_checkpoint_is_checked_against_the_build_it_was_trained_on(self) -> None:
         self.check()
-        # Rebuilt since, even with the same skills: the build.json there no longer says what it was trained on.
-        self.refused("was rebuilt after this model was trained", rebuilt=True)
+        # Rebuilt since: `train` kept a copy of the build.json it trained on, so the model still runs. This was a
+        # refusal ("was rebuilt after this model was trained") until the user chose to keep that copy, since any
+        # rebuild, the one `train` runs when the build is stale included, retired a model that took days to train.
+        self.check(rebuilt=True)
         # Trained before `train` recorded its build: its train_config.json has no dataset.revision.
         self.refused("recorded no build", pinned=False)
+
+    def test_a_local_skills_model_without_its_build_snapshot_is_refused(self) -> None:
+        copy = data.trained_build_path(self.s, data.build_revision(self.write_build()))
+        self.refused(f"whose copy {copy} is missing", kept="missing")
+        self.refused(f"whose copy {copy} is changed", kept="changed")
+        self.refused("Copy it there from the computer that trained the model", kept="missing")
+
+    def write_build(self) -> Path:
+        """The build.json `check` writes, for its name."""
+        path = self.folder / "built.json"
+        path.write_text(json.dumps({"built": "first", **self.build}))
+        return path
+
+    def test_snapshot_build_copies_the_build_once(self) -> None:
+        build = self.folder / "build.json"
+        build.write_text(json.dumps({"built": "first", **self.build}))
+        revision = data.snapshot_build(self.s, build)
+        kept = data.trained_build_path(self.s, revision)
+        self.assertEqual(revision, data.build_revision(build))
+        self.assertEqual(kept.read_bytes(), build.read_bytes(), "the same bytes as the build")
+        self.assertEqual(list(kept.parent.iterdir()), [kept], "no partial file left behind")
+        kept.write_text("kept")  # an existing snapshot is never rewritten
+        self.assertEqual(data.snapshot_build(self.s, build), revision)
+        self.assertEqual(kept.read_text(), "kept")
 
     def hub_model(self, revision: str | None) -> mock.MagicMock:
         """Check a Hub model whose train_config.json records the dataset `revision`, as LeRobot writes it;
@@ -916,7 +1265,7 @@ class ModelTest(unittest.TestCase):
             return str(self.folder / name)
 
         with mock.patch("huggingface_hub.hf_hub_download", side_effect=download) as hub:
-            self.assertEqual(skills_build(None, "me/act_so101_test_skills", "v1"), self.build)
+            self.assertEqual(skills_build(self.s, None, "me/act_so101_test_skills", "v1"), self.build)
         return hub
 
     def test_a_hub_model_is_checked_against_the_build_uploaded_at_the_commit_it_trained_from(self) -> None:

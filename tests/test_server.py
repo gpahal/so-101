@@ -12,6 +12,7 @@ import http.client
 import io
 import json
 import socket
+import sys
 import time
 import unittest
 from concurrent.futures import Future
@@ -238,6 +239,49 @@ class HangUpTest(unittest.TestCase):
         self.assertNotIn("Connection reset", err.getvalue())
         self.assertIn("ValueError: a real bug", err.getvalue())
         self.assertEqual(page.request("GET", "/status")[0], 200, "the server still answers")
+
+
+class RouteErrorTest(unittest.TestCase):
+    """A route that raises before it has sent anything is answered 500 with the error's name, on both
+    pages' server, and the connection isn't dropped without a reply."""
+
+    def test_a_route_that_raises_gets_a_500_naming_the_error_and_the_server_answers_on(self) -> None:
+        class Broken(StubController):
+            def status(self, client=None):
+                raise RuntimeError("a status the page can't build")
+
+            def events(self, after, limit):
+                return [{"t": float("nan")}]  # strict JSON refuses it before anything is sent
+
+        page = Server(self, Broken())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, reply, kind = page.request("GET", "/status")
+            self.assertEqual((code, kind), (500, "application/json"))
+            self.assertIn("RuntimeError", reply["error"])
+            self.assertEqual(page.headers["Connection"], "close")
+            code, reply, _ = page.request("GET", "/events")
+            self.assertEqual(code, 500)
+            self.assertIn("ValueError", reply["error"])
+        self.assertIn("RuntimeError: a status the page can't build", err.getvalue())
+        self.assertEqual(page.request("GET", "/")[0], 200, "the server still answers")
+
+    def test_a_route_that_raises_after_its_reply_started_closes_the_connection_as_before(self) -> None:
+        page = Server(self, StubController())
+        handled = []
+        page.server.handle_error = lambda request, address: handled.append(sys.exc_info()[1])
+
+        def camera(handler, name: str) -> None:
+            handler._send(200, b"x", "image/jpeg")
+            raise RuntimeError("after the reply")
+
+        with mock.patch.object(server.Handler, "_camera", camera):
+            code, body, _ = page.request("GET", "/camera/top")
+        self.assertEqual((code, body), (200, b"x"), "no second response follows the first")
+        deadline = time.monotonic() + 5
+        while not handled and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual([str(error) for error in handled], ["after the reply"], "`handle_error` gets it, as before")
 
 
 class UnsafeRouteTest(unittest.TestCase):

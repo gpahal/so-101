@@ -1,56 +1,56 @@
 """Perception: the gripper rules over each tick the model drove, for every layer above to read.
 
 One `grasp.detector.Detector` per attempt, with the grasp thresholds (`ctx.grasp`), fed the measured joints on
-each tick the model drove (its Output's driver is POLICY or WAITING), at the model's own clock: seconds
-it drove, so a pause or a layer's playback never counts. Each tick's signals and the detector's state go
-up the stack in the Output (`signals`, `readings`), so the layers above read one detector and can't
-disagree about whether a carry happened.
+each tick the model drove (its Output's driver is POLICY or WAITING), at the model's own clock: the ticks it
+drove, each 1/fps of the task's fps (`ctx.fps`), the first after a handback adding nothing, so a pause, a
+layer's playback or a slow loop never counts. It runs `grasp.replay.LiveFeed`, the feed the offline replays
+(`skills.label_run`, `so101-failbench candidates`) run over recorded frames, which LeRobot stamps at
+frame_index / fps, so the live clock and the replays' are one piece of code and agree at any loop speed. Each
+tick's signals and the detector's state go up the stack in the Output (`signals`, `readings`), so the layers
+above read one detector and can't disagree about whether a carry happened.
 
 It logs a `grasp` event for each close, carry, regrasp and release, and a `rule` event when a stuck rule
 fires, each with the model's seconds, so every run's events mark its grasps whatever model ran. After a
 handback, on the next tick it feeds, it tells the detector whether the arm moved and where it is
-(`Detector.resumed`): the detector's timers start again, and after a move with the jaws open its grasp
-does too, so a close a playback undid is never counted as a regrasp.
+(`Detector.resumed`): the detector's timers start again, and after a move with the jaws open (above
+`hold_band`'s top after a carry or release) its grasp does too, so a close a playback undid is never counted as a regrasp.
 """
 
 from dataclasses import replace
 
 from so_101.policy.base import POLICY, WAITING, Handback, Layer, LayerContext, Output, Readings, Tick
 
-MAX_STEP_S = 0.5  # a longer gap between ticks (a stalled loop) counts as this much of the model's time
-
 
 class Perception(Layer):
     def __init__(self, inner, ctx: LayerContext) -> None:
         super().__init__(inner, ctx, "perception")
+        self.feed = None  # grasp.replay.LiveFeed: the attempt's detector, its clock and the handback to tell it
         self.detector = None
-        self.t = 0.0
-        self._last: float | None = None
-        self._handback: Handback | None = None  # told to the detector with the next tick's pose
 
     def begin_episode(self, number: int) -> None:
         self.inner.begin_episode(number)
-        self.detector = None
+        self.feed = self.detector = None
         self.safely(self._begin)
 
     def _begin(self) -> None:
-        from so_101.grasp.detector import Detector
+        from so_101.grasp.replay import LiveFeed
 
-        self.detector, self.t, self._last, self._handback = Detector(self.ctx.grasp), 0.0, None, None
+        self.feed = LiveFeed(self.ctx.grasp, self.ctx.fps)
+        self.detector = self.feed.detector
 
     def end_episode(self) -> None:
         self.inner.end_episode()
-        self.detector = None
+        self.feed = self.detector = None
 
     def run(self, handback: Handback) -> None:
         self.inner.run(handback)
-        if (earlier := self._handback) is not None and earlier.moved and not handback.moved:
-            handback = replace(handback, moved=True)  # moved since the detector last saw the arm
-        self._last, self._handback = None, handback
+        if self.feed is not None:  # kept, a move winning, until the detector hears it on the next tick fed
+            self.feed.handback(handback.moved)
 
-    def pause(self) -> None:
-        self.inner.pause()
-        self._last = None
+    @property
+    def t(self) -> float:
+        """The model's seconds at the tick fed last."""
+        return self.feed.t if self.feed is not None else 0.0
 
     def step(self, robot, tick: Tick) -> Output:
         out = self.inner.step(robot, tick)
@@ -63,14 +63,9 @@ class Perception(Layer):
         return replace(out, signals=signals, readings=readings)
 
     def _watch(self, tick: Tick, drove: bool, seen: list) -> None:
-        if (handback := self._handback) is not None:
-            self._handback = None
-            self.detector.resumed(handback.moved, tick.pose)
-        dt = 0.0 if self._last is None else min(max(tick.now - self._last, 0.0), MAX_STEP_S)
-        self._last = tick.now
-        self.t += dt
         found = []
-        for signal in self.detector.step(self.t, tick.pose, drove):
+        _, signals = self.feed.feed(tick.pose, drove)
+        for signal in signals:
             found.append(signal)
             kind = "rule" if signal.kind == "rule" else "grasp"
             self.ctx.event(kind, **({"name": signal.name} if signal.name else {}),
@@ -80,5 +75,7 @@ class Perception(Layer):
 
     def readings(self) -> Readings:
         d = self.detector
-        return Readings(round(self.t, 3), tuple(d.near(self.ctx.program.watch.near)), d.closes, d.regrasps, d.carried,
-                        d.released, tuple(sorted(d.fired)))
+        # Unrounded: the supervisor compares it with check times the detector's signals set, and a rounded clock
+        # sent a check due at 4.93333 s a tick late (`tests/test_supervisor.py`'s SchedulesMatchTest).
+        return Readings(t=self.t, closes=d.closes, regrasps=d.regrasps, carried=d.carried, released=d.released,
+                        fired=tuple(sorted(d.fired)))

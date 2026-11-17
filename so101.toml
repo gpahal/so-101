@@ -239,7 +239,11 @@ teleop_from_rest = "start-pose"
 # undone.
 blame_s = 2.5
 # What a running policy does when the controlling page stops polling for link_timeout_s seconds:
-# "pause" holds the arm, so a policy never runs unsupervised; "continue" keeps it running.
+# "pause" holds the arm, so a policy never runs unsupervised; "continue" keeps it running, for
+# `so101 serve` only. `so101 run` refuses "continue", since an attempt its autopilot started would
+# keep driving with nobody watching. Its autopilot starts motion only while a page in control polls:
+# it starts and ends nothing while the link is lost, leaves the attempt then open to you, and once a
+# page watches again waits --reset-time, at least link_timeout_s + 0.5 s, before the next attempt.
 on_link_loss = "pause"
 # The page polls 4 times a second, so 3 s is 12 missed polls: a real dropout, not a slow phone. At
 # least 1 s, so a few slow polls never count as a lost link.

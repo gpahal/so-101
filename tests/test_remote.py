@@ -147,16 +147,117 @@ class PolicySetupTest(unittest.TestCase):
         self.assertIn("takes no --action-steps", str(exited.exception.code))
         active.assert_not_called()
 
+    SERVED = "b" * 40  # the commit the running server loaded
+
     def setup(self, s: types.SimpleNamespace) -> mock.Mock:
         """Run `policy_setup` for pi0.5 on the cloud GPU up to where it asks for the server."""
         ns = argparse.Namespace(task="task", policy="pi05", remote=True, revision=None, checkpoint=None,
                                 action_steps=None)
-        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy, skills=False: {"chunk_size": 50})
-        with mock.patch.object(remote, "require_server", side_effect=SystemExit("asked")) as require:
+        self.read_at = []
+
+        def policy_config(revision, policy, skills=False):
+            self.read_at.append(revision)
+            return {"chunk_size": 50}
+
+        task = types.SimpleNamespace(name="task", policy_config=policy_config)
+        running = server({**remote._labels("task", "pi05", "main", 50, True), "commit": self.SERVED})
+        with mock.patch.object(remote, "active_server", return_value=running), \
+                mock.patch.object(remote, "require_server", side_effect=SystemExit("asked")) as require:
             with self.assertRaises(SystemExit) as exited:
                 policy.policy_setup(s, ns, task)
         self.exited = str(exited.exception.code)
         return require
+
+    def test_a_remote_run_reads_the_model_at_the_commit_its_server_loaded(self) -> None:
+        section = settings.Remote(job_target="l4x1", job_timeout="1h", pin_unused_actions=True)
+        self.setup(types.SimpleNamespace(path="so101.toml", remote={"pi05": section}))
+        self.assertEqual(self.read_at, [self.SERVED], "never main, which may name a newer model")
+
+    def test_a_server_from_before_the_commit_label_is_refused_with_how_to_restart_it(self) -> None:
+        old = server(remote._labels("task", "pi05", "main", 50, True))
+        with self.assertRaises(SystemExit) as exited:
+            remote.served_commit(old, "task", "pi05", "main")
+        message = str(exited.exception.code)
+        self.assertIn("started before so101 recorded the commit it serves", message)
+        self.assertIn("uv run so101 server stop", message)
+        self.assertIn("uv run so101 server start task --policy pi05 --revision main", message)
+
+    def test_a_server_that_changed_during_the_checks_stops_the_run(self) -> None:
+        ns = argparse.Namespace(task="task", policy="pi05", remote=True, revision=None, checkpoint=None,
+                                action_steps=None)
+        task = types.SimpleNamespace(name="task", policy_config=lambda revision, policy, skills=False: {"chunk_size": 50})
+        labels = remote._labels("task", "pi05", "main", 50, True)
+        first, second = server({**labels, "commit": "b" * 40}), server({**labels, "commit": "d" * 40})
+        section = settings.Remote(job_target="l4x1", job_timeout="1h", pin_unused_actions=True)
+        with mock.patch.object(remote, "active_server", return_value=first), \
+                mock.patch.object(remote, "require_server", return_value=second):
+            with self.assertRaises(SystemExit) as exited:
+                policy.policy_setup(types.SimpleNamespace(path="so101.toml", remote={"pi05": section}), ns, task)
+        self.assertIn("changed while the run was being checked", str(exited.exception.code))
+
+    def test_a_local_run_reads_and_downloads_the_model_at_one_commit(self) -> None:
+        ns = argparse.Namespace(task="task", policy="act", remote=False, revision=None, checkpoint=None,
+                                action_steps=None)
+        calls = []
+
+        def download_policy(revision, skills=False, *, folder):
+            calls.append(("download", revision, folder))
+            raise SystemExit("downloaded")
+
+        task = types.SimpleNamespace(
+            name="task", cameras=(), policy_for=lambda policy, skills=False: "me/act_so101_task",
+            policy_commit=lambda revision, policy, skills=False: calls.append(("commit", revision)) or "c" * 40,
+            policy_config=lambda revision, policy, skills=False: calls.append(("config", revision)) or {"chunk_size": 10, "input_features": {}},
+            download_policy=download_policy)
+        s = types.SimpleNamespace(leader=types.SimpleNamespace(resolve_port=mock.Mock(side_effect=policy.PortNotFoundError(types.SimpleNamespace(name="leader", port=None, serial_number=None)))))
+        with mock.patch.object(policy, "preflight", return_value=([], None)), \
+                mock.patch.object(policy, "cameras_arg", return_value=""), \
+                self.assertRaises(SystemExit) as exited:
+            policy.policy_setup(s, ns, task)
+        self.assertEqual(str(exited.exception.code), "downloaded")
+        self.assertEqual(calls, [("commit", None), ("config", "c" * 40), ("download", "c" * 40, None)],
+                         "one commit for the config and the checkpoint, in the folder of the revision asked for")
+
+    def test_the_skills_check_reads_the_models_build_at_the_commit_checked(self) -> None:
+        from so_101.skills import STATE_KEY
+
+        ns = argparse.Namespace(policy="act", revision=None)
+        task = types.SimpleNamespace(name="task", skills=("pick", "place"),
+                                     policy_for=lambda policy, skills=False: "me/act_so101_task_skills")
+        config = {"input_features": {STATE_KEY: {"shape": [2]}}}
+        s = types.SimpleNamespace(perception=types.SimpleNamespace(thresholds="grasp.toml"))
+        gripper = types.SimpleNamespace()
+        with mock.patch("so_101.grasp.thresholds.load", return_value=types.SimpleNamespace(gripper=gripper)), \
+                mock.patch.object(policy, "skills_build", return_value={"inputs": {}}) as build, \
+                mock.patch.object(policy, "require_skills_contract"), \
+                mock.patch("so_101.skills.gripper_hash", return_value="h"):
+            self.assertEqual(policy.check_skills_model(s, ns, task, config, None, True, "b" * 40), "h")
+        # `s` first: a local model's build is read from the copy `train` kept under s.outputs_dir.
+        build.assert_called_once_with(s, None, "me/act_so101_task_skills", "b" * 40)
+
+    def test_start_server_loads_and_labels_the_commit_its_revision_names(self) -> None:
+        api = mock.Mock()
+        api.model_info.return_value = types.SimpleNamespace(sha="a" * 40)
+        api.run_job.return_value = types.SimpleNamespace(id="job", url="https://x")
+        configs = []
+        real = remote.server_config
+
+        def config(*args, **kwargs):
+            configs.append(real(*args, **kwargs))
+            return configs[-1]
+
+        with mock.patch("huggingface_hub.HfApi", return_value=api), mock.patch("huggingface_hub.get_token", return_value="t"), \
+                mock.patch.object(remote, "check_ssh_key"), mock.patch.object(remote, "active_server", return_value=None), \
+                mock.patch.object(remote, "server_config", side_effect=config), \
+                mock.patch.object(remote, "wait_until_ready"), contextlib.redirect_stdout(io.StringIO()):
+            remote.start_server(repo="me/act_so101_task", task="task", policy_type="act", revision="main",
+                                image_sizes=SIZES, action_steps=100, fps=30, target="l4x1", timeout="1h",
+                                pin_unused_actions=False)
+        api.model_info.assert_called_once_with("me/act_so101_task", revision="main")
+        labels = api.run_job.call_args.kwargs["labels"]
+        self.assertEqual((labels["revision"], labels["commit"]), ("main", "a" * 40))
+        self.assertEqual(configs[0]["model"]["revision"], "a" * 40, "the server loads the commit it's labelled with")
+        self.assertIn("commit aaaaaaaaaaaa", remote.describe(server(labels)))
 
     def test_run_and_serve_ask_for_a_server_with_so101_tomls_pin_setting(self) -> None:
         for pin in (True, False):

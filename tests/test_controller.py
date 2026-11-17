@@ -26,7 +26,8 @@ from so_101.control.commands import Result
 from so_101.control.controller import Controller
 from so_101.control.follower import pose_from_steps
 from so_101.control.rewind import History, Rewind
-from so_101.policy.base import DONE, HOLD, OTHER, PLAYBACK, POLICY, START, STUCK, WAITING, Ask, Layer, LayerContext, Output
+from so_101.policy.base import (DONE, HOLD, LAYER, OTHER, PLAYBACK, POLICY, START, STUCK, WAITING, Ask, Handback, Layer,
+                                LayerContext, Output)
 from so_101.policy.engine import EngineDriver
 from so_101.control.recorder import Phase, Recorder
 from so_101.control.terminal import KeyReader
@@ -109,7 +110,13 @@ class Rig:
             self.controller.tick()
 
     def command(self, name: str, source: str = "terminal", **options) -> Result:
-        """Submit a command and advance one tick, which applies it."""
+        """Submit a command and advance one tick, which applies it. An autopilot command is carried out
+        at once, as the tick carries out the autopilot's (`Controller.pilot_command`), then one tick runs."""
+        if source == "autopilot":
+            assert not options, "the autopilot's commands take no options"
+            result = self.controller.pilot_command(name)
+            self.tick()
+            return result
         future = self.controller.submit(name, source, **options)
         self.tick()
         return future.result(timeout=0)
@@ -898,6 +905,67 @@ class LinkLossTest(RigTest):
         self.assertEqual(self.rig.status()["state"], "starting")
         self.rig.tick_until("autonomous", client=self.PHONE)
 
+    # The user chose that the autopilot moves the arm only while a page in control watches it, whatever
+    # on_link_loss says: this replaces the test of `states._resume`'s old refusal, which applied only to a lost
+    # link with on_link_loss "pause". `states.step` now refuses the autopilot's Resume and Reset on
+    # `Facts.unwatched`, and never a person's command or the autopilot's Quit.
+    NO_PAGE = ("No control page is in control, so the autopilot moves nothing unwatched. Take control on the page, and "
+               "the next attempt starts the run's reset time (--reset-time), at least link_timeout_s + 0.5 s, after "
+               "that; r at the robot's terminal starts it now.")
+    OUT_OF_REACH = ("The controlling page (100.64.0.2) is out of reach, so the autopilot starts nothing unwatched. "
+                    "Bring the page back or take control on another, and the next attempt starts the run's reset "
+                    "time (--reset-time), at least link_timeout_s + 0.5 s, after that; r at the robot's terminal "
+                    "starts it now.")
+
+    def assert_watch_rule(self, rig: Rig, refusal: str | None) -> None:
+        """At rest, and then paused in an attempt: the autopilot's Resume and Reset are refused with `refusal`
+        (accepted with None), a person's are accepted, and the autopilot's Quit at rest is never refused."""
+        from so_101.control import states
+
+        controller = rig.controller
+        resume, reset, quit_ = states.Command.RESUME, states.Command.RESET, states.Command.QUIT
+        self.assertEqual(rig.status()["state"], "resting")
+        self.assertEqual(states.step(controller.state, resume, controller.facts("autopilot")).refused, refusal)
+        self.assertIsNone(states.step(controller.state, quit_, controller.facts("autopilot")).refused, "quit at rest")
+        for source in ("terminal", "page"):
+            self.assertTrue(states.step(controller.state, resume, controller.facts(source)).accepted, source)
+        self.assertEqual(rig.command("resume").accepted, True)  # r at the robot's terminal: a person
+        rig.tick_until("autonomous")
+        self.assertEqual(rig.command("pause"), Result("pause", True))
+        for command in (resume, reset):
+            self.assertEqual(states.step(controller.state, command, controller.facts("autopilot")).refused, refusal,
+                             f"autopilot {command}, paused")
+            for source in ("terminal", "page"):
+                self.assertTrue(states.step(controller.state, command, controller.facts(source)).accepted,
+                                f"{source} {command}, paused")
+
+    def test_the_autopilot_moves_the_arm_only_while_a_page_in_control_watches_it(self) -> None:
+        # No page in control.
+        self.assert_watch_rule(self.rig, self.NO_PAGE)
+
+        # A page in control with its link live.
+        rig = self.new_rig()
+        self.assertTrue(rig.command("take_control", source="page", client=self.PHONE, who="100.64.0.2").accepted)
+        self.assert_watch_rule(rig, None)
+
+        # A page in control whose link is lost, with either on_link_loss.
+        for on_loss in ("pause", "continue"):
+            rig = self.new_rig(control=control(preview_fps=0, on_link_loss=on_loss))
+            self.assertTrue(rig.command("take_control", source="page", client=self.PHONE, who="100.64.0.2").accepted)
+            rig.tick((self.TIMEOUT_S + 1) * FPS)
+            self.assertTrue(rig.controller.link.lost, on_loss)
+            self.assert_watch_rule(rig, self.OUT_OF_REACH)
+            self.assertEqual(rig.command("resume", source="autopilot"), Result("resume", False, self.OUT_OF_REACH))
+
+    def test_a_fault_is_still_the_reason_given_first(self) -> None:
+        from so_101.control import states
+
+        self.rig.in_fault()
+        facts = self.rig.controller.facts("autopilot")
+        self.assertEqual(facts.unwatched, self.NO_PAGE)
+        refused = states.step(self.rig.controller.state, states.Command.RESUME, facts).refused
+        self.assertTrue(refused.startswith("After a fault only Reset and Run checks are allowed"), refused)
+
 
 class LoopSafetyTest(RigTest):
     """No error in a tick drops the arm, and no restarted motor is sent toward its old goal."""
@@ -1423,7 +1491,7 @@ class Asking(Layer):
     attempt, says skill 1 from then on, and notes each episode and handback it hears of."""
 
     def __init__(self, inner, ask_at: int, kind: str = STUCK) -> None:
-        super().__init__(inner, LayerContext(lambda *args, **fields: None, lambda: 0.0, None, None), "asking")
+        super().__init__(inner, LayerContext(lambda *args, **fields: None, lambda: 0.0, None, None, FPS), "asking")
         self.ask_at, self.kind, self.steps, self.heard, self.handbacks, self.at_rest = ask_at, kind, 0, [], [], []
 
     def begin_episode(self, number: int) -> None:
@@ -1453,11 +1521,13 @@ class Asking(Layer):
 class PlayingBack(Layer):
     """A layer over the driver that passes it `drive` steps, then plays back `back_s` of the model's
     measured motion, newest first, as the supervisor does (`control.rewind`, on its own history), and
-    then holds the arm."""
+    then holds the arm, or with `hand_back` hands it back to the driver, as the supervisor does after a
+    playback that arrives. Each playback tick reports the frame of the pose it goes back to, and counts as
+    `tick_s` of the history's time: a long one is a slow tick, which passes several moments at once."""
 
-    def __init__(self, inner, drive: int, back_s: float, clock) -> None:
-        super().__init__(inner, LayerContext(lambda *args, **fields: None, clock, None, None), "playing")
-        self.drive, self.back_s, self.steps = drive, back_s, 0
+    def __init__(self, inner, drive: int, back_s: float, clock, tick_s: float = 1 / FPS, hand_back: bool = False) -> None:
+        super().__init__(inner, LayerContext(lambda *args, **fields: None, clock, None, None, FPS), "playing")
+        self.drive, self.back_s, self.steps, self.tick_s, self.hand_back = drive, back_s, 0, tick_s, hand_back
         self.history, self.playing, self.played_to = History(), None, None  # played_to: where the playback left the arm
         self.handbacks = []
 
@@ -1473,9 +1543,13 @@ class PlayingBack(Layer):
             return out
         if self.played_to is None:
             self.playing = self.playing or Rewind(self.history, self.back_s, self.ctx.clock)
-            if self.playing.step(robot, tick.pose, 1 / FPS) is not None:
+            if self.playing.step(robot, tick.pose, self.tick_s) is not None:
                 self.played_to = dict(tick.pose)
-            return Output(None, PLAYBACK)
+                if self.hand_back:
+                    self.inner.run(Handback(LAYER, moved=True))
+            return Output(None, PLAYBACK, goal_frame=self.playing.start_frame)
+        if self.hand_back:
+            return self.inner.step(robot, tick)
         self.inner.hold(robot)
         return Output(None, HOLD)
 
@@ -1670,6 +1744,31 @@ class HistoryTest(unittest.TestCase):
         rig.command("resume")
         self.assertEqual([(h.why, h.moved) for h in rig.driver.handbacks][-1], ("person", True))
 
+    def test_a_playback_that_passes_a_reversal_in_one_tick_leaves_none_of_it_to_rewind(self) -> None:
+        """The model's pan goes out to 12 degrees, back to 3, then on to 8; a slow tick plays all of it back
+        at once. Nearness to the playback's goal would stop at 3, the nearest pose before the reversal,
+        and leave the swing out to 12 for a person's Rewind to replay."""
+        pan = "shoulder_pan.pos"
+        path = [*np.linspace(0.5, 12, 24), *np.linspace(11.5, 3, 18), *np.linspace(3.5, 8, 10)]
+        actions = [[v if k == pan else START_POSE[k] for k in START_POSE] for v in [*path, *[8.0] * 100]]
+        rig = Rig(actions=actions, wrap=lambda driver, recorder, clock: PlayingBack(
+            driver, drive=len(path) + 5, back_s=60.0, clock=clock, tick_s=60.0))
+        self.addCleanup(rig.close)
+        rig.start_policy(ticks=1)
+        for _ in range(10 * FPS):
+            if rig.driver.played_to is not None:
+                break
+            rig.tick()
+        self.assertIsNotNone(rig.driver.played_to)
+        played_to = rig.driver.played_to[pan]
+        self.assertLess(played_to, 1.0, "the playback went back to where the model began")
+        rig.command("pause")
+        sent = len(rig.goals())
+        if rig.command("rewind").accepted:
+            rig.tick_until("paused")
+        rewound = [rig.units(goal)[pan] for goal in rig.goals()[sent:]]
+        self.assertLess(max(rewound), played_to + 0.5, "nothing the playback undid is replayed")
+
     def test_a_handback_after_a_playback_or_a_paused_return_says_the_arm_moved(self) -> None:
         rig = Rig(wrap=lambda driver, recorder, clock: PlayingBack(driver, drive=FPS, back_s=0.5, clock=clock))
         self.addCleanup(rig.close)
@@ -1687,6 +1786,25 @@ class HistoryTest(unittest.TestCase):
         rig.command("resume")
         self.assertEqual([(h.why, h.moved) for h in rig.driver.handbacks],
                          [("start", False), ("person", True), ("person", True)])
+
+    def test_a_handback_after_a_playback_the_layer_already_handed_back_says_nothing_moved(self) -> None:
+        """The layer told the stack below the arm moved when it handed the arm back after its playback, so a
+        person's plain Pause and Resume after the model drove again must not say so a second time: that
+        would make the perception forget a release the model made since, and the skills model go back to
+        pick."""
+        rig = Rig(wrap=lambda driver, recorder, clock: PlayingBack(driver, drive=FPS, back_s=0.5, clock=clock,
+                                                                   hand_back=True))
+        self.addCleanup(rig.close)
+        rig.start_policy(ticks=1)
+        for _ in range(5 * FPS):
+            if rig.driver.played_to is not None:
+                break
+            rig.tick()
+        self.assertIsNotNone(rig.driver.played_to)
+        rig.tick(FPS)  # the model drives again
+        rig.command("pause")
+        rig.command("resume")
+        self.assertEqual([(h.why, h.moved) for h in rig.driver.handbacks], [("start", False), ("person", False)])
 
 
 def table_of(run_dir: Path) -> pd.DataFrame:

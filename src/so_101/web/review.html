@@ -52,6 +52,7 @@
   .buttons button b { font-weight: 650; }
   kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-left: 6px; color: var(--mut); }
   .go { border-color: var(--keep); background: color-mix(in srgb, var(--keep) 16%, transparent); }
+  #panel.waiting button:not(#skip):not([data-step]) { opacity: .45; cursor: progress; }
   .bad { border-color: var(--s-fault); background: color-mix(in srgb, var(--s-fault) 12%, transparent); }
   .step { text-align: left; padding: 8px 10px; }
   .step.on { border-color: var(--s-pause); background: color-mix(in srgb, var(--s-pause) 14%, transparent); }
@@ -118,9 +119,16 @@ let failed = {};  // camera -> why its frames couldn't be loaded
 let keep = null, touched = false;  // a demo's kept range in seconds [start, end], and whether it was changed
 let step = 0, pending = null;  // an attempt's step (an interruption, or its outcome at the end) and its changed suspect range
 let drag = null, deleting = false;
-// From a decision's POST until the next item's first frames show (or the decision's reply, when it
-// stays on this item): a second key press in that time would decide on an item nobody has seen.
-let busy = false;
+// A decision waits for `ready()`: no decision's POST on its way (`saving`), no item being fetched
+// (`opening`), and every camera of the item shown has its first frame, or has failed to load. A key
+// press or click before then would decide on an item nobody has seen.
+let saving = false, opening = false;
+
+function shown() {
+  return !!item && item.cameras.every((camera) => (urls[camera] && urls[camera][0]) || failed[camera]);
+}
+function ready() { return !saving && !opening && shown(); }
+function markReady() { const p = $("panel"); if (p) p.classList.toggle("waiting", !ready()); }
 
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function color(type) { let h = 0; for (const c of type) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; }
@@ -141,25 +149,26 @@ async function getJSON(path) {
 }
 
 async function decide(body) {
-  // Returns the reply when the decision was saved and its item is still the one shown, else null. It
-  // leaves `busy` set on success: suspect() clears it at once, as it stays on this item, and next()
-  // once the next item's first frames show.
-  if (busy || !item) return null;
-  busy = true;
+  // Returns the reply when the decision was saved and its item is still the one shown, else null. A
+  // caller that moves on calls next() as soon as it returns, before any key press can be handled, and
+  // open() then holds decisions until the next item shows.
+  if (!ready()) return null;
+  saving = true; markReady();
   const id = item.id, mine = token;
   try {
     const r = await fetch("/decision", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item: item.id, ...body }) });
     const reply = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-    if (!r.ok) { toast(reply.error || `HTTP ${r.status}`, false); busy = false; return null; }
+    if (!r.ok) { toast(reply.error || `HTTP ${r.status}`, false); saving = false; markReady(); return null; }
     toast("Saved: " + reply.saved, true);
     const n = items.findIndex((x) => x.id === reply.entry.id);
     if (n >= 0) items[n] = reply.entry;
-    if (!item || item.id !== id || mine !== token) { busy = false; renderList(); return null; }  // another item opened since
+    saving = false;
+    if (!item || item.id !== id || mine !== token) { renderList(); markReady(); return null; }  // another item opened since
     item = reply.item;
     renderList();
     return reply;
-  } catch (e) { toast("The reviewer didn't answer: " + e.message, false); busy = false; return null; }
+  } catch (e) { toast("The reviewer didn't answer: " + e.message, false); saving = false; markReady(); return null; }
 }
 
 // --- The list ----------------------------------------------------------------------------------------
@@ -182,7 +191,6 @@ function next() {
   const at = items.findIndex((x) => x.id === item.id);
   const after = items.slice(at + 1).find((x) => !x.reviewed) || items.find((x, n) => n !== at && !x.reviewed);
   if (after) { open(after.id); return; }
-  busy = false;
   if (!items[at].reviewed) {  // skipped the last one without a decision: stay on it
     toast("This is the last item without a decision: decide on it, or pick another in the list.", false);
     return;
@@ -200,12 +208,13 @@ function dropFrames() {
 // --- Opening an item and loading its frames -----------------------------------------------------------
 
 async function open(id) {
+  opening = true; markReady();  // before the first await: no decision on the item still shown meanwhile
   stop();
   let detail;
-  try { detail = await getJSON("/item/" + id); } catch (e) { toast(e.message, false); busy = false; return; }
+  try { detail = await getJSON("/item/" + id); } catch (e) { toast(e.message, false); opening = false; markReady(); return; }
   dropFrames();
   item = detail; frame = 0; deleting = false; pending = null; step = 0;
-  if (!item.cameras.length) busy = false;
+  opening = false;
   $("done").hidden = true; $("main").hidden = false;
   if (kind === "demos") resetKeep();
   $("item-title").textContent = item.title + ` (${item.seconds.toFixed(1)} s)`;
@@ -251,7 +260,7 @@ async function load(camera, mine) {
     if (mine !== token) return;
     if (body === null) {
       failed[camera] = `No picture from frame ${from} on: ${why}`;
-      busy = false; show(); draw(); return;
+      markReady(); show(); draw(); return;
     }
     const view = new DataView(body);
     let at = 0, n = from;
@@ -261,7 +270,7 @@ async function load(camera, mine) {
       at += 4 + length; n += 1;
     }
     from = n;
-    if (urls[camera][0]) busy = false;  // the first frame shows: the next decision may come
+    markReady();  // once every camera's first frame shows, the next decision may come
     show(); draw();
   }
 }
@@ -552,10 +561,10 @@ function runPanel() {
 
 async function suspect(body) {
   const i = item.interruptions[step];
-  if (await decide({ interruption: i.frame, ...body })) { busy = false; select(step + 1); }
+  if (await decide({ interruption: i.frame, ...body })) { markReady(); select(step + 1); }
 }
 function keepSuspect() {
-  if (busy) return;
+  if (!ready()) return;
   if (pending) suspect({ suspect: pending });
   else select(step + 1);
 }
@@ -579,6 +588,7 @@ function renderPanel() {
     on("keep-suspect", keepSuspect); on("clear-suspect", () => suspect({ suspect: [] }));
     on("auto-suspect", () => suspect({ auto: true })); on("confirm", () => outcome(item.outcome)); on("skip", next);
   }
+  markReady();
 }
 
 function renderEvents() {
@@ -610,7 +620,8 @@ document.addEventListener("keydown", (e) => {
   // A held key repeats: only the first press counts, so holding Enter can't decide on the next items too.
   if (e.repeat) { if (k === " " || k === "Enter") handled(); return; }
   if (k === " ") { handled(); playing ? stop() : play(); return; }
-  if (busy) { if (k === "Enter") handled(); return; }  // a decision is on its way: wait for its item to show
+  // A decision is on its way, or this item's pictures haven't shown yet: wait for them.
+  if (!ready()) { if (k === "Enter") handled(); return; }
   if (k === "[" || k === "]") { handled(); setEdge(k === "[" ? 0 : 1, k === "[" ? frame : frame + 1); return; }
   if (kind === "demos") {
     if (k === "Enter") { handled(); accept(); }

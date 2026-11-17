@@ -44,7 +44,9 @@ request, which the server may not have read, is never parsed as further requests
 Transfer-Encoding, and a GET that says it has a body (a Content-Length other than 0), is refused with
 400 for the same reason: the server reads a body only by Content-Length, and never a GET's. A
 connection that sends nothing for 10 s is closed. Every response forbids framing the page and names
-no server software.
+no server software. A route that raises before it has sent anything is answered 500 with the error's
+name (`Handler._route`), and the error is printed in the terminal, so a page never sees a dropped
+connection where it expects a reply.
 
 The messages name the page and the command that serves it through a `Site`, so the reviewer's say
 `so101 review` where the control page's say `so101 serve`.
@@ -476,14 +478,16 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:
+        self._sent = False
         if self._refuse_framing():
             return
         if (error := self._refuse_caller()) is not None:
             self._json(HTTPStatus.FORBIDDEN, {"error": error})
             return
-        self.get(urlsplit(self.path))
+        self._route(self.get, urlsplit(self.path))
 
     def do_POST(self) -> None:
+        self._sent = False
         if self._refuse_framing():
             return
         url = urlsplit(self.path)
@@ -493,7 +497,23 @@ class Handler(BaseHTTPRequestHandler):
         if (error := self._refuse_caller() or self._refuse_cross_site()) is not None:
             self._json(HTTPStatus.FORBIDDEN, {"error": error})
             return
-        self.post(url)
+        self._route(self.post, url)
+
+    def _route(self, handle: Callable[[SplitResult], None], url: SplitResult) -> None:
+        """Run a page's `get` or `post` after every check passed. An error it didn't answer itself is a 500
+        naming the error, when nothing was sent yet, and its message goes to the terminal; once a response
+        has started, the error closes the connection as before, since a second response can't follow."""
+        try:
+            handle(url)
+        except Exception as error:
+            if getattr(self, "_sent", True):  # `handle_error` deals with it, as with any error mid-reply
+                raise
+            with contextlib.suppress(OSError, ValueError):  # stderr gone or closed: the reply still goes
+                print(f"The {self.server.site.page} couldn't answer {self.command} {url.path}: "
+                      f"{type(error).__name__}: {error}", file=sys.stderr, flush=True)
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR,
+                       {"error": f"The {self.server.site.page} couldn't answer: {type(error).__name__}. "
+                                 f"The terminal running `{self.server.site.command}` says more."})
 
     def _read_json(self) -> dict:
         """The POST's body, a JSON object of at most MAX_BODY bytes, read by Content-Length. Raises
@@ -565,6 +585,7 @@ class Handler(BaseHTTPRequestHandler):
         request: its body may not have been read, and must never be parsed as further requests, which
         would skip every check above. `send_s` is how long the whole body may take to send, for one
         too big to send within `timeout`: a socket's timeout bounds a whole send, not each part of it."""
+        self._sent = True  # from here, an error can't be answered with another response (`_route`)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))

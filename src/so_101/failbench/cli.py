@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -11,8 +12,7 @@ from so_101 import settings
 from so_101.failbench import dataset, metrics, runner
 from so_101.vision import models
 from so_101.vision.env import load_env
-
-TASK = "block-container"  # the one task the prompt describes
+from so_101.vision.prompt import TASK_NAME
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class Paths:
         from so_101.data import Run
 
         out = s.outputs_dir / "failbench"
-        return cls(runs=s.data_dir / TASK / Run.FOLDER, env_file=s.path.parent / ".scratch" / "bench.env",
+        return cls(runs=s.data_dir / TASK_NAME / Run.FOLDER, env_file=s.path.parent / ".scratch" / "bench.env",
                    candidates=out / "candidates.csv", dataset=out / "dataset", results=out / "runs")
 
 
@@ -63,6 +63,19 @@ def pick_models(names: str | None) -> list[models.Model]:
             sys.exit(f"Unknown model {name!r}. `so101-failbench models` lists them.")
         chosen += [m for m in matches if m not in chosen]
     return chosen
+
+
+def max_cost(text: str) -> float:
+    """`--max-cost` as a number of dollars above 0. NaN, infinity and 0 or less are refused, because the cap
+    compares with it before each call: NaN and infinity would turn the cap off, and 0 or less would ask nothing."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a number of dollars.") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a spending cap: give a number of dollars above 0, "
+                                         "such as 5.")
+    return value
 
 
 def available(ms: list[models.Model], env_file: Path, log=print) -> list[models.Model]:
@@ -98,6 +111,7 @@ def cmd_candidates(a) -> None:
         sys.exit(f"No serve or run runs at {a.runs}. Record some with `uv run so101 serve` or `uv run so101 run`.")
     rows = candidates.from_runs(Path(a.runs), program.load(Path(a.program) if a.program else None),
                                 thresholds.load(Path(a.thresholds) if a.thresholds else None))
+    stale = candidates.unpicked(rows, Path(a.out))
     kept = candidates.write(rows, Path(a.out))
     counts = {}
     for row in rows:
@@ -105,6 +119,11 @@ def cmd_candidates(a) -> None:
     print(f"Wrote {len(rows)} candidates to {a.out}: " + ", ".join(f"{n} {m}" for m, n in sorted(counts.items()))
           + (f". It kept the {kept} labels already there" if kept else "")
           + ". Label them, then: so101-failbench build --labels " + str(a.out))
+    if stale:
+        print(f"{stale} labelled row{'' if stale == 1 else 's'} at the end of the file {'is' if stale == 1 else 'are'} "
+              "no longer picked: a moment the supervisor wouldn't check, as it now drops a check not yet sent at a "
+              "pause or resume or for a close a newer one replaced, or a run that's gone. Delete any that shouldn't "
+              "be scored.", flush=True)
 
 
 def cmd_models(a) -> None:
@@ -162,6 +181,9 @@ def cmd_run(a) -> None:
     budget = runner.Budget(a.max_cost)
     print(f"{len(ms)} models x {len(samples)} samples, variant {variant.name}, cap ${a.max_cost:.2f}, into {out}")
     result = runner.run(ms, samples, root, cache, variant, budget, workers=a.workers, retry_errors=a.retry_errors)
+    if result.stale:
+        sys.exit(f"{out} holds answers for {', '.join(result.stale)} asked under another prompt, adapter or model settings: "
+                 "run into a new --out folder, so the report compares answers to one question.")
     if len(result.skipped) == len(ms) and not cache.rows:
         sys.exit("No model could be asked: " + "; ".join(f"{key}: {why}" for key, why in result.skipped.items()))
     extra = [f"This invocation spent ${budget.spent:.2f}."]
@@ -206,7 +228,7 @@ def main(argv=None) -> None:
     except settings.ConfigError as e:
         sys.exit(str(e))
     p = argparse.ArgumentParser(prog="so101-failbench", allow_abbrev=False, description=(
-        "Benchmark vision models on telling when something has gone wrong in a frame of a block-container "
+        f"Benchmark vision models on telling when something has gone wrong in a frame of a {TASK_NAME} "
         f"attempt. API keys come from the environment or {paths.env_file}: OPENROUTER_API_KEY, GEMINI_API_KEY, "
         "OPENAI_API_KEY, TYPESAFE_API_KEY. Models whose key is missing are skipped. check and run bill those keys "
         "and send the dataset's frames to the providers."))
@@ -254,7 +276,8 @@ def main(argv=None) -> None:
 
     r = command("run", "run models over the dataset; answers are cached so a rerun resumes. It bills each model's "
                 "API key, up to --max-cost, and sends the frames to the providers")
-    r.add_argument("--max-cost", type=float, default=5.0, help="stop before this invocation spends more, in USD (default %(default)s)")
+    r.add_argument("--max-cost", type=max_cost, default=5.0, help="stop before this invocation spends more, in USD, admitting whole samples so each one asked "
+                        "is asked of every model (default %(default)s)")
     r.add_argument("--workers", type=int, default=4, help="parallel calls per provider (default %(default)s)")
     r.add_argument("--name", help=f"run folder name under {paths.results} (default: the time)")
     r.add_argument("--out", help="run folder (overrides --name)")

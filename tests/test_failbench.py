@@ -5,6 +5,8 @@ candidates' replay and merge, building from a recorded run, and the command line
 import _thread
 import contextlib
 import io
+import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -92,8 +94,38 @@ class ParseTest(unittest.TestCase):
         self.assertEqual((a["wrong"], a["p_wrong"], a["category"]), (True, 0.8, "missed_jar"))
 
     def test_fenced_json_and_unknown_category(self):
-        a = providers.parse_answer('```json\n{"wrong": "false", "p_wrong": 1.7, "category": "spill"}\n```')
-        self.assertEqual((a["wrong"], a["p_wrong"], a["category"]), (False, 1.0, "other"))
+        a = providers.parse_answer('```json\n{"wrong": "true", "p_wrong": 1.7, "category": "spill"}\n```')
+        self.assertEqual((a["wrong"], a["p_wrong"], a["category"]), (True, 1.0, "other"))
+
+    def test_a_probability_that_isnt_a_finite_number_is_no_probability(self):
+        # json reads NaN and Infinity as numbers; clamping NaN made it 0.0, a sure ok.
+        for p in ("NaN", "-Infinity", "Infinity", '"nan"', '"inf"', '"-inf"', '"most likely"', "null", "[0.2]"):
+            for wrong in ("true", "false"):
+                with self.subTest(p=p, wrong=wrong):
+                    a = providers.parse_answer(f'{{"wrong": {wrong}, "p_wrong": {p}, "category": "none"}}')
+                    self.assertIsNone(a["p_wrong"])
+                    self.assertNotIn("p_wrong_dropped", a)
+
+    def test_an_answer_whose_wrong_contradicts_its_probability_has_no_probability(self):
+        for wrong, p, kept in (("true", 0.05, 0.05), ("false", 0.95, 0.95), ("false", 1.7, 1.0), ("true", -3, 0.0)):
+            with self.subTest(wrong=wrong, p=p):
+                a = providers.parse_answer(f'{{"wrong": {wrong}, "p_wrong": {p}, "category": "none"}}')
+                self.assertIsNone(a["p_wrong"])
+                self.assertEqual(a["p_wrong_dropped"], kept)
+                self.assertEqual(a["wrong"], wrong == "true", "wrong is still scored")
+
+    def test_an_even_probability_agrees_with_either_answer(self):
+        for wrong in ("true", "false"):
+            with self.subTest(wrong):
+                a = providers.parse_answer(f'{{"wrong": {wrong}, "p_wrong": 0.5, "category": "none"}}')
+                self.assertEqual(a["p_wrong"], 0.5)
+
+    def test_probability(self):
+        cases = [(0.3, 0.3), ("0.3", 0.3), (1, 1.0), (1.7, 1.0), (-0.2, 0.0), (True, None), (None, None), ("x", None),
+                 (math.nan, None), (math.inf, None), (-math.inf, None), ("nan", None), ("Infinity", None), ([0.2], None)]
+        for value, want in cases:
+            with self.subTest(value=value):
+                self.assertEqual(providers.probability(value), want)
 
     def test_no_answer(self):
         with self.assertRaises(providers.ProviderError):
@@ -132,11 +164,13 @@ class DescribeTest(unittest.TestCase):
 
 class SDKs:
     """Stand-ins for the provider SDKs: each records the arguments of every client it makes and every
-    request it sends, and answers as the real one would. `usage=False` answers without usage."""
+    request it sends, and answers as the real one would. `usage=False` answers without usage; `p` is the
+    probability every decision model answers with, instead of its own."""
 
-    def __init__(self, usage: bool = True):
+    def __init__(self, usage: bool = True, p=None):
         self.calls: list[tuple[str, dict]] = []
         self.usage = usage
+        self.p = p
         ns = types.SimpleNamespace
         sdk = self
 
@@ -161,7 +195,7 @@ class SDKs:
             def decide(self, **kwargs):
                 sdk.calls.append(("openai.decisions", kwargs))
                 return ns(usage=ns(input_tokens=1000) if sdk.usage else None,
-                          answers=[ns(type="predicate", probability=0.2), ns(type="choice", choice="none")])
+                          answers=[ns(type="predicate", probability=0.2 if sdk.p is None else sdk.p), ns(type="choice", choice="none")])
 
         class Client:
             def __init__(self, **kwargs):
@@ -178,7 +212,7 @@ class SDKs:
             def decide(self, **kwargs):
                 sdk.calls.append(("genai.decisions", kwargs))
                 return ns(usage=ns(total_input_tokens=1000) if sdk.usage else None,
-                          answers={"wrong": ns(noul=0.7), "category": ns(choice="dropped", confidence=0.6)})
+                          answers={"wrong": ns(noul=0.7 if sdk.p is None else sdk.p), "category": ns(choice="dropped", confidence=0.6)})
 
         class TypeSafeClient:
             def __init__(self, **kwargs):
@@ -186,7 +220,7 @@ class SDKs:
 
             def system_one(self, **kwargs):
                 sdk.calls.append(("typesafe.system_one", kwargs))
-                return ns(usage=ns(input_tokens=1000) if sdk.usage else None, nouls={"wrong": ns(noul=0.3)},
+                return ns(usage=ns(input_tokens=1000) if sdk.usage else None, nouls={"wrong": ns(noul=0.3 if sdk.p is None else sdk.p)},
                           choices={"category": ns(choice="none")}, model="jev")
 
         genai_types = types.ModuleType("google.genai.types")
@@ -283,6 +317,25 @@ class AdapterTest(unittest.TestCase):
                 self.assertIsNone(self.predict(key, SDKs(usage=False)).get("cost_usd"))
                 providers._cache.clear()
                 self.assertGreater(self.predict(key, SDKs()).get("cost_usd"), 0)
+
+    def test_a_decision_model_s_probability_that_isnt_finite_is_an_error_not_an_answer(self):
+        for key in ("gemini-decision-1", "openai-decisions-luna", "jev"):
+            for p in (math.nan, math.inf, -math.inf, "nan"):
+                with self.subTest(key=key, p=p):
+                    providers._cache.clear()
+                    answer = self.predict(key, SDKs(p=p))
+                    self.assertIsNone(answer.get("p_wrong"))
+                    self.assertIsNone(answer["wrong"])
+                    self.assertIn("probability", answer["error"])
+                    self.assertGreater(answer["cost_usd"], 0, "a billed call still says what it cost")
+
+    def test_a_decision_model_s_probability_is_kept_in_range(self):
+        for key in ("gemini-decision-1", "openai-decisions-luna", "jev"):
+            for p, want in ((1.4, 1.0), (-0.1, 0.0), (0.6, 0.6)):
+                with self.subTest(key=key, p=p):
+                    providers._cache.clear()
+                    answer = self.predict(key, SDKs(p=p))
+                    self.assertEqual((answer["p_wrong"], answer["wrong"]), (want, want >= 0.5))
 
     def test_a_construction_error_is_a_provider_error_and_isnt_kept(self):
         m = models.Model("broken", models.OPENROUTER, "x/y", 1, 1, "test")
@@ -419,6 +472,52 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(len(lines), 10)
         self.assertTrue(all(json.loads(line)["model"] == "fake" for line in lines))
 
+    def test_answers_asked_under_another_prompt_are_never_resumed(self):
+        self.run_once(0.045)  # 4 answers under today's prompt
+        calls = self.fake.calls
+        other = runner.asked(self.model) | {"prompt_sha256": "another prompt"}
+        with mock.patch.object(runner, "asked", return_value=other):
+            self.run_once(1.0)
+        self.assertEqual(self.result.stale, ["fake"])
+        self.assertEqual(self.fake.calls, calls, "nothing asked")
+        self.assertTrue(any("another prompt" in line for line in self.logged), self.logged)
+        self.run_once(1.0)  # the same prompt resumes as before
+        self.assertEqual(self.result.stale, [])
+        self.assertEqual(self.fake.calls, 10)
+
+    def test_answers_asked_through_another_adapter_are_never_resumed(self):
+        # An adapter change can change what a model is sent or how its answer is read, as a prompt change can.
+        self.run_once(0.045)
+        calls = self.fake.calls
+        other = runner.asked(self.model) | {"providers_sha256": "another adapter"}
+        with mock.patch.object(runner, "asked", return_value=other):
+            self.run_once(1.0)
+        self.assertEqual(self.result.stale, ["fake"])
+        self.assertEqual(self.fake.calls, calls, "nothing asked")
+        self.assertTrue(any("adapter" in line for line in self.logged), self.logged)
+        self.run_once(1.0)  # the same adapters resume as before
+        self.assertEqual(self.result.stale, [])
+        self.assertEqual(self.fake.calls, 10)
+
+    def test_asked_names_the_adapter_file(self):
+        from so_101.vision import providers
+
+        self.assertEqual(runner.asked(self.model)["providers_sha256"],
+                         hashlib.sha256(Path(providers.__file__).read_bytes()).hexdigest())
+
+    def test_another_model_id_or_effort_is_never_resumed_either(self):
+        self.run_once(0.045)
+        changed = dataclasses.replace(self.model, effort="high")
+        self.run_once(1.0, [changed])
+        self.assertEqual(self.result.stale, ["fake"])
+
+    def test_an_answer_with_no_record_of_what_it_was_asked_under_is_never_resumed(self):
+        old = {"model": "fake", "variant": "top+wrist", "sample": self.samples[0].id, "wrong": False}
+        (self.root / "predictions.jsonl").write_text(json.dumps(old) + "\n")
+        self.run_once(1.0)
+        self.assertEqual(self.result.stale, ["fake"])
+        self.assertEqual(self.fake.calls, 0)
+
     def test_errors_are_recorded_and_retried_on_request(self):
         class Broken:
             def predict(self, images, moment):
@@ -439,6 +538,42 @@ class RunnerTest(unittest.TestCase):
         asked = [set(cache.for_model(m, "top+wrist")) for m in ("fake", "fake2")]
         self.assertEqual(asked[0], asked[1])
         self.assertEqual(len(asked[0]), 2)
+
+    def test_a_cap_leaves_models_on_different_providers_the_same_samples(self):
+        # Sol's case: each provider has its own queue and worker, and the first answers slowly. Admitting each
+        # call to the budget on its own let the fast provider spend the cap: 9 answers from it, 1 from the slow
+        # one, and one sample both answered. Admitting whole samples gives both models the same five.
+        import time
+
+        class Slow(FakeAdapter):
+            def predict(self, images, moment):
+                time.sleep(0.05)
+                return super().predict(images, moment)
+
+        slow = providers._cache[self.model.key] = Slow()
+        fast = models.Model("fake2", models.GEMINI, "fake/model2", 1, 1, "test", estimate=0.01)
+        providers._cache["fake2"] = FakeAdapter()
+        cache = self.run_once(0.10, [self.model, fast], workers=1)
+        asked = [set(cache.for_model(m, "top+wrist")) for m in ("fake", "fake2")]
+        self.assertEqual(asked[0], asked[1], "both models answered the same samples")
+        self.assertEqual(len(asked[0]), 5)
+        self.assertEqual(slow.calls, 5)
+        self.assertLessEqual(self.budget.spent, 0.10 + 1e-9)
+        self.assertTrue(self.result.capped)
+
+    def test_a_model_that_gives_up_hands_back_its_share_of_each_admitted_sample(self):
+        # Each admitted sample reserved a share for both models. Once one model gives up, the shares of its calls
+        # never made are given back, so what was spent is what the calls made cost, and the other model, with
+        # room for every sample once those shares are back, answers all ten.
+        providers._cache[self.model.key] = Scripted(bad_request())
+        other = models.Model("fake2", models.GEMINI, "fake/model2", 1, 1, "test", estimate=0.01)
+        providers._cache["fake2"] = FakeAdapter()
+        cache = self.run_once(0.01 * (runner.GIVE_UP_AFTER + 10), [self.model, other], workers=1)
+        failed = providers._cache[self.model.key].calls
+        self.assertEqual(failed, runner.GIVE_UP_AFTER)
+        self.assertIn("fake", self.result.skipped)
+        self.assertEqual(len(cache.for_model("fake2", "top+wrist")), 10)
+        self.assertAlmostEqual(self.budget.spent, 0.01 * (failed + 10))
 
     def test_a_call_without_usage_or_with_an_error_is_charged_the_estimate(self):
         providers._cache[self.model.key] = Scripted(None)
@@ -512,6 +647,33 @@ class RunnerTest(unittest.TestCase):
         cache = self.run_once(1.0, workers=1, stop=stop)
         self.assertEqual(first_call_stops.calls, 1)
         self.assertEqual(cache.rows, {}, "a call the stop cut short is left unasked, not cached as an error")
+
+    def test_a_cut_off_last_line_is_skipped_once_and_the_next_answer_stays_readable(self):
+        path = self.root / "predictions.jsonl"
+        good = {"model": "fake", "variant": "top+wrist", "sample": "s0", "wrong": False, "cost_usd": 0.01}
+        original = json.dumps(good) + "\n" + '{"model": "fake", "variant": "top+wrist", "sam'
+        path.write_text(original)  # a run killed while writing its second answer
+        logged = []
+        cache = runner.Cache(path, log=logged.append)
+        self.assertEqual(list(cache.rows), [("fake", "top+wrist", "s0")])
+        self.assertEqual(len(logged), 1, "one warning for the whole file")
+        self.assertIn("1 line", logged[0])
+        self.assertIn(str(path), logged[0])
+        self.assertEqual(path.read_text(), original, "loading never rewrites the file")
+        cache.put({"model": "fake", "variant": "top+wrist", "sample": "s1", "wrong": True, "cost_usd": 0.01})
+        self.assertTrue(path.read_text().startswith(original), "the cut-off line is kept, not deleted")
+        logged.clear()
+        again = runner.Cache(path, log=logged.append)
+        self.assertEqual(set(again.rows), {("fake", "top+wrist", "s0"), ("fake", "top+wrist", "s1")})
+        self.assertEqual(len(logged), 1, "only the cut-off line is skipped")
+
+    def test_a_whole_cache_says_nothing(self):
+        path = self.root / "predictions.jsonl"
+        path.write_text(json.dumps({"model": "fake", "variant": "top+wrist", "sample": "s0"}) + "\n")
+        logged = []
+        runner.Cache(path, log=logged.append).put({"model": "fake", "variant": "top+wrist", "sample": "s1"})
+        self.assertEqual(logged, [])
+        self.assertEqual(len(path.read_text().splitlines()), 2, "no blank line before an answer after a whole one")
 
     def test_ctrl_c_stops_the_run_and_returns(self):
         def interrupt():  # Ctrl+C while a call is in flight, which takes longer than the main thread's wait
@@ -589,6 +751,18 @@ class CommandTest(unittest.TestCase):
             self.main("run", "--models", "stand-in", "--max", "0.01")
         self.assertEqual(caught.exception.code, 2)
 
+    def test_a_max_cost_that_isnt_a_positive_number_is_refused(self):
+        providers._cache["stand-in"] = Scripted(0.01)
+        for value in ("nan", "inf", "-inf", "-1", "0"):
+            with self.subTest(value):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+                    self.main("run", "--models", "stand-in", f"--max-cost={value}", "--out", str(self.root / "run"))
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn(f"--max-cost: {value!r} ", err.getvalue())
+        self.assertEqual(providers._cache["stand-in"].calls, 0, "no model was asked")
+        self.assertFalse((self.root / "run").exists())
+
     def test_check_s_help_says_it_bills(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
@@ -636,19 +810,27 @@ class EnvTest(unittest.TestCase):
 
 FPS = 30
 NAMES = ["shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos", "wrist_roll.pos", "gripper.pos"]
-POLICY, WAITING, PLAYBACK, HOLD = 1, 2, 3, 4  # policy.base's drivers
+OTHER, POLICY, WAITING, PLAYBACK, HOLD = 0, 1, 2, 3, 4  # policy.base's drivers
+AUTONOMOUS, PAUSED, TELEOP = 1, 2, 4  # control.recorder.Phase
 
 
-def frames(seconds: float, pan: float, gripper: float, driver: int = POLICY, elbow: float = 0.0):
+def frames(seconds: float, pan: float, gripper: float, driver: int = POLICY, elbow: float = 0.0,
+           phase: int = AUTONOMOUS):
     n = round(seconds * FPS)
-    return [[pan, 0.0, elbow, 0.0, 0.0, gripper]] * n, [driver] * n
+    return [[pan, 0.0, elbow, 0.0, 0.0, gripper]] * n, [driver] * n, [phase] * n
+
+
+def paused(seconds: float, pan: float, gripper: float, phase: int = PAUSED, elbow: float = 0.0):
+    """Frames the controller had the arm in (a pause, a Teleop): no driver, not Autonomous."""
+    return frames(seconds, pan, gripper, OTHER, elbow, phase)
 
 
 def episode(*segments):
-    """Autonomous frames from (states, drivers) segments, as a run's columns."""
-    states = [row for s, _ in segments for row in s]
-    drivers = [d for _, ds in segments for d in ds]
-    return (np.ones(len(states), int), np.array([d != POLICY for d in drivers]), np.array(states, float),
+    """A run's columns from (states, drivers, phases) segments."""
+    states = [row for s, _, _ in segments for row in s]
+    drivers = [d for _, ds, _ in segments for d in ds]
+    phases = [p for _, _, ps in segments for p in ps]
+    return (np.array(phases, int), np.array([d != POLICY for d in drivers]), np.array(states, float),
             np.array(drivers))
 
 
@@ -699,6 +881,95 @@ class CandidatesTest(unittest.TestCase):
         self.assertTrue(moved)
         self.assertEqual(pose, dict(zip(NAMES, states[resumed_at], strict=True)))
 
+    def moments(self, *segments) -> list[tuple[str, int]]:
+        phases, waiting, states, drivers = episode(*segments)
+        return [(r["moment"], r["t"]) for r in self.pick(phases, waiting, states, drivers) if r["moment"] != "end"]
+
+    def test_a_check_not_yet_sent_at_a_pause_is_no_candidate(self):
+        # Live, a pause and resume drop the checks scheduled but not sent (`Supervisor._drop_scheduled`).
+        reach, close = frames(1, 20, 40), frames(0.3, 20, 10)  # 0.3 s of the close, under after_close_s
+        for name, gap in {"a pause": paused(2, 20, 10), "a Teleop that opened the jaws": paused(2, 20, 40, TELEOP)}.items():
+            with self.subTest(name):
+                after = frames(2, 20, 10 if name == "a pause" else 40)
+                self.assertNotIn("after_close", [m for m, _ in self.moments(reach, close, gap, after)])
+        self.assertIn("after_close", [m for m, _ in self.moments(reach, close, frames(2, 20, 10))], "without the pause")
+
+    def test_a_check_not_yet_sent_at_a_layer_hold_is_still_a_candidate(self):
+        # Live, the layer's own hold drops nothing it scheduled: the check is sent once the model drives again.
+        close_at = round(1 * FPS)
+        found = self.moments(frames(1, 20, 40), frames(0.3, 20, 10), frames(2, 20, 10, HOLD), frames(2, 20, 10))
+        [after_close] = [t for m, t in found if m == "after_close"]
+        hold = round(2 * FPS)
+        # The model's clock counts nothing for the hold, nor for the first frame after it (`Perception.run`).
+        self.assertEqual(after_close, close_at + round(self.program.after_close_s * FPS) + hold + 1,
+                         "after_close_s of the model's time after the close, the hold not counted")
+
+    def test_a_close_s_check_not_yet_sent_when_a_newer_close_comes_is_no_candidate(self):
+        found = self.moments(frames(1, 20, 40), frames(0.2, 20, 10), frames(0.2, 20, 40), frames(2, 20, 10))
+        second = round(1.4 * FPS)
+        self.assertEqual([t for m, t in found if m == "after_close"], [second + round(self.program.after_close_s * FPS)])
+
+    def test_a_release_s_check_not_yet_sent_at_a_pause_is_no_candidate(self):
+        grasp = (frames(2, 20, 40), frames(1, 20, 18), frames(2, 20, 18, elbow=40), frames(0.5, 20, 40, elbow=40))
+        self.assertIn("after_release", [m for m, _ in self.moments(*grasp, frames(2, 20, 40, elbow=40))],
+                      "without the pause")
+        self.assertNotIn("after_release", [m for m, _ in self.moments(*grasp, paused(2, 20, 40, elbow=40),
+                                                                      frames(2, 20, 40, elbow=40))])
+
+    def test_a_pause_and_resume_in_one_tick_drops_the_check_not_yet_sent(self):
+        # B4: a Pause and Resume taken in one tick leave every frame Autonomous; live, the supervisor still dropped
+        # the after_close check scheduled before them. `analysis.Attempt.handbacks` marks the frame.
+        reach, close, after = frames(1, 20, 40), frames(0.3, 20, 10), frames(2, 20, 10)
+        phases, waiting, states, drivers = episode(reach, close, after)
+        rows = self.pick(phases, waiting, states, drivers)
+        self.assertIn("after_close", [r["moment"] for r in rows], "without the handback")
+        marks = np.zeros(len(phases), dtype=bool)
+        marks[len(reach[0]) + len(close[0]) + 1] = True
+        dropped = candidates.pick("run1", 0, phases, waiting, states, NAMES, FPS, self.program, self.grasp,
+                                  drivers=drivers, handbacks=marks)
+        self.assertNotIn("after_close", [r["moment"] for r in dropped])
+
+    def test_an_id_names_the_moment(self):
+        phases, waiting, states, drivers = episode(frames(1, 20, 40), frames(0.3, 20, 10), frames(2, 20, 10))
+        rows = self.pick(phases, waiting, states, drivers)
+        for r in rows:
+            self.assertEqual(r["id"], f"run1-e0-t{r['t']}-{r['moment']}")
+        self.assertEqual(len({r["id"] for r in rows}), len(rows))
+
+    def test_a_label_never_moves_to_another_moment(self):
+        # B3: a labelled `end` row at frame 60; a rerun with other timings picks after_close at frame 60. The `end`
+        # label stays on its own row, and the after_close row waits for its own label.
+        row = lambda moment: {"id": f"r-e0-t60-{moment}", "src": "r", "ep": 0, "t": 60, "moment": moment,  # noqa: E731
+                              "label": "", "category": "", "gripper": 9.0, "note": "n"}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "candidates.csv"
+            candidates.write([row("end")], path)
+            path.write_text(path.read_text().replace("r-e0-t60-end,r,0,60,end,,,", "r-e0-t60-end,r,0,60,end,wrong,still_holding,"))
+            candidates.write([row("after_close")], path)
+            rows = {r["id"]: r for r in candidates._existing(path)}
+            self.assertEqual((rows["r-e0-t60-end"]["moment"], rows["r-e0-t60-end"]["label"]), ("end", "wrong"))
+            self.assertEqual(rows["r-e0-t60-after_close"]["label"], "")
+
+    def test_a_category_or_note_without_a_label_is_kept(self):
+        # B5: a person who wrote a category and note but no label yet keeps both after a rerun, picked or not.
+        row = lambda i: {"id": f"r-e0-t{i}-after_close", "src": "r", "ep": 0, "t": i, "moment": "after_close",  # noqa: E731
+                         "label": "", "category": "", "gripper": 9.0, "note": "close 1"}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "candidates.csv"
+            candidates.write([row(1), row(2)], path)
+            text = path.read_text()
+            text = text.replace("r-e0-t1-after_close,r,0,1,after_close,,,9.0,close 1",
+                                "r-e0-t1-after_close,r,0,1,after_close,,missed_grasp,9.0,looks open")
+            text = text.replace("r-e0-t2-after_close,r,0,2,after_close,,,9.0,close 1",
+                                "r-e0-t2-after_close,r,0,2,after_close,,dropped_it,9.0,unsure")
+            path.write_text(text)
+            self.assertEqual(candidates.unpicked([row(1)], path), 1, "t2 has a category and isn't picked")
+            self.assertEqual(candidates.write([row(1)], path), 2)
+            by_id = {r["id"]: r for r in candidates._existing(path)}
+            self.assertEqual((by_id["r-e0-t1-after_close"]["category"], by_id["r-e0-t1-after_close"]["note"]),
+                             ("missed_grasp", "looks open"))
+            self.assertEqual(by_id["r-e0-t2-after_close"]["category"], "dropped_it", "kept though no longer picked")
+
     def test_writing_again_keeps_every_label_by_id(self):
         row = lambda i, note="close 1": {"id": f"r-e0-t{i}", "src": "r", "ep": 0, "t": i, "moment": "after_close",  # noqa: E731
                                          "label": "", "category": "", "gripper": 9.0, "note": note}
@@ -709,6 +980,7 @@ class CandidatesTest(unittest.TestCase):
             text = text.replace("r-e0-t1,r,0,1,after_close,,,9.0,close 1", "r-e0-t1,r,0,1,after_close,wrong,missed_grasp,9.0,mine")
             text = text.replace("r-e0-t3,r,0,3,after_close,,,9.0,close 1", "r-e0-t3,r,0,3,after_close,ok,none,9.0,held")
             path.write_text(text)
+            self.assertEqual(candidates.unpicked([row(1), row(2), row(4)], path), 1, "t3 is labelled and not picked")
             self.assertEqual(candidates.write([row(1), row(2), row(4)], path), 2)
             rows = {s.id: s for s in dataset.read_labels(path)}
             self.assertEqual((rows["r-e0-t1"].label, rows["r-e0-t1"].note), ("wrong", "mine"))

@@ -666,8 +666,9 @@ def rest_pose_problem(s: Settings) -> str | None:
     return None
 
 
-def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] = "FAIL") -> None:
-    """The rest pose and the `[control]` settings, which `serve` and `run` need. Reads so101.toml and the
+def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] = "FAIL", task: str | None = None) -> None:
+    """The rest pose and the `[control]` settings, which `serve` and `run` need, and the supervisor's
+    files and mode for `task`, the tasks.toml task they run (`check_supervisor`). Reads so101.toml and the
     follower's calibration file only.
 
     `settings.load()` doesn't check them, so a bad value never stops the commands that fix it. Each
@@ -726,16 +727,19 @@ def check_control(report: Report, s: Settings, status: Literal["FAIL", "WARN"] =
             bad_value(key, "isn't allowed", "one of " + ", ".join(f'"{a}"' for a in rule.choices))
     if settings_ok:
         report.ok("control", "every [control] setting is in its range")
-    check_supervisor(report, s, problem)
+    check_supervisor(report, s, problem, task)
 
 
-def check_supervisor(report: Report, s: Settings, problem) -> None:
-    """The grasp thresholds every run's perception reads and the supervisor's program, whatever
-    `[supervisor] mode` is, since both load for every run: each must load (a FAIL in the preflight of `serve` and `run`,
-    through `problem`). With the supervisor on, a judge without its API key or its provider's SDK is a
-    warning: the supervisor runs without it. Reads files, the environment and the SDKs' imports only."""
+def check_supervisor(report: Report, s: Settings, problem, task: str | None = None) -> None:
+    """The grasp thresholds every run's perception reads, whatever `[supervisor] mode` is, and the
+    supervisor's program when the supervisor is on, since only then does a run load it: each must load (a
+    FAIL in the preflight of `serve` and `run`, through `problem`). With the supervisor on, `task` (the
+    tasks.toml task, when one is known) must be the one the judges' prompt is written for
+    (`vision.prompt.TASK_NAME`), also through `problem`, and a judge without its API key or its provider's
+    SDK is a warning: the supervisor runs without it. Reads files, the environment and the SDKs' imports
+    only."""
     from so_101.grasp import thresholds
-    from so_101.supervisor import program
+    from so_101.skills import RUN_LABEL_VERSION
 
     try:
         grasp = thresholds.load(s.perception.thresholds)
@@ -743,16 +747,27 @@ def check_supervisor(report: Report, s: Settings, problem) -> None:
         problem("perception", str(error), f"fix the file, or delete thresholds under [perception] in {s.path} for "
                 "the package's own")
         return
+    versions = (f"grasp thresholds [gripper] v{grasp.gripper.version} and [rules] v{grasp.rules.version}, "
+                f"run labels v{RUN_LABEL_VERSION}")
+    if s.supervisor.mode == "off":
+        report.ok("supervisor", f"off; {versions} load")
+        return
+    from so_101.supervisor import program
+
     try:
         loaded = program.load(s.supervisor.program)
     except program.ProgramError as error:
         problem("supervisor", str(error), f"fix the program, or delete program under [supervisor] in {s.path} for "
                 "the package's own")
         return
-    versions = (f"program v{loaded.version}, grasp thresholds [gripper] v{grasp.gripper.version} and [rules] "
-                f"v{grasp.rules.version}")
-    if s.supervisor.mode == "off":
-        report.ok("supervisor", f"off; {versions} load")
+    versions = f"program v{loaded.version}, {versions}"
+    from so_101.vision.prompt import TASK_NAME
+
+    if task is not None and task != TASK_NAME:
+        # The prompt, its moments and its failure categories name the block and the jar.
+        problem("supervisor", f"{s.supervisor.mode} mode judges every attempt as {TASK_NAME}, the one task its "
+                f"prompts describe, so it can't supervise {task}",
+                f"run {task} with `--supervisor off`, or set mode = \"off\" under [supervisor] in {s.path}")
         return
     from so_101.vision.env import load_env
     from so_101.vision.models import MODELS
@@ -790,10 +805,12 @@ def run_checks(
     control: Literal["FAIL", "WARN"] | None = None,
     teleop_only: tuple[ArmName, ...] = (),
     video: bool | None = None,
+    run_task: str | None = None,
 ) -> tuple[Report, list[CameraLookup]]:
     """Run the checks. `loop_fps` also times a recording step, which needs both arms and the cameras.
     With `control`, the rest pose and `[control]` settings are checked too, each problem getting that
-    status (`check_control`). The arms in `teleop_only` (of `arms`) are needed only for Teleop: each of
+    status (`check_control`), and the supervisor's mode against `run_task`, the task `serve` or `run`
+    runs, or else `task`'s. The arms in `teleop_only` (of `arms`) are needed only for Teleop: each of
     their failures is a WARN that says Teleop won't be available. With `video`, the video encoder's
     crash fix is checked too (`check_video`): True for a command that records. Every device the checks
     open, they close.
@@ -804,7 +821,7 @@ def run_checks(
     if video is not None:
         check_video(report, video)
     if control is not None:
-        check_control(report, s, control)
+        check_control(report, s, control, run_task or (task.name if task is not None else None))
     buses: dict[ArmName, SerialMotorsBus] = {}
     opened: dict[str, OpenCVCamera] = {}
     lookups: list[CameraLookup] = []

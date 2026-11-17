@@ -20,7 +20,6 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from so_101.control import autopilot
 from so_101.control.link import NOT_IN_CONTROL, ONLY_PAGES
 from so_101.control.recorder import OUTCOMES
 from so_101.control.states import Command, Event, State, Tool, step
@@ -45,15 +44,15 @@ TAKE_CONTROL = "take_control"
 PAGE_HIDDEN = "page_hidden"
 # Why the operator stepped in, as the page's pause reason chips offer them. `label` records one.
 LABELS = ("missed_grasp", "about_to_collide", "wrong_object", "dropped_it", "stuck", "other")
-# A person is saying how the open attempt went: the terminal sends it with the right arrow's question
-# and the page with its Reset sheet, renewed every 10 s while the sheet stays open, and each sends it
-# with open false when it closes without an answer. It lasts ANSWER_S, so a question left open never
-# stalls `so101 run`'s autopilot for good. Not logged: the Reset that answers it is.
+# A person started saying how the open attempt went: the terminal sends it once with the right arrow's
+# question and the page once as its Reset sheet opens. Accepted for the open attempt only, it hands that
+# attempt to the person in `so101 run` (`autopilot.HANDS_OVER`), as a Pause does, so the autopilot neither
+# resumes nor ends it, whether the person then answers or cancels. Logged like any command.
 ANSWERING = "answering"
-ANSWER_S = 30.0
-# `so101 run`'s Hold and Continue on the page, between attempts (`Controller.hold_autopilot`).
+# `so101 run`'s Hold and Continue on the page, which stop or let the next attempt start (`Controller.hold_autopilot`).
 AUTOPILOT_HOLD = "autopilot_hold"
-# The sources a person's commands come from; `so101 run`'s autopilot submits with source "autopilot".
+# The sources a person's commands come from; `so101 run`'s autopilot's carry source "autopilot"
+# (`Controller.pilot_command`).
 PEOPLE = ("terminal", "page", "signal")
 
 
@@ -139,12 +138,12 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     TAKE_CONTROL: (),
     TOGGLE: (),
     PAGE_HIDDEN: (),
-    ANSWERING: ("for_attempt", "open"),
+    ANSWERING: ("for_attempt",),
     AUTOPILOT_HOLD: ("hold",),
 }
 # Every option some command takes. The web server refuses a request carrying any other key before it
 # reaches the loop. for_attempt: the attempt the Reset sheet was opened for, or the time-limit prompt asked
-# about, or the one a person is answering for; open: whether they still are; hold: Hold (true) or Continue.
+# about, or the one a person started answering for; hold: Hold (true) or Continue.
 OPTIONS = tuple(dict.fromkeys(option for options in COMMANDS.values() for option in options))
 # The names of the state machine's commands, and of the read-only tools.
 TRANSITIONS = frozenset(command.value for command in Command)
@@ -157,16 +156,22 @@ TOOLS = frozenset(tool.value for tool in Tool)
 def intake(controller, name: str, source: str, client: str | None, who: str | None, options: dict) -> Result:
     """Take in one command on the loop's thread: check its options, then page control, then carry
     it out, and log it as a `command` event (page_hidden is logged only as the link's `page_hidden` event,
-    when it loses the link, and answering not at all). A person's command that's accepted goes on the
-    controller's `people` for this tick, which `so101 run`'s autopilot reads, and an answering one too.
-    Once one is, the autopilot's commands are refused for the rest of the tick: the autopilot decided
-    them from the last tick's facts, which that command may have changed, and it decides again from
-    the next tick's.
+    when it loses the link). Every command a person sends from the terminal, a signal or the page in control
+    goes on the controller's `people` for this tick, which `so101 run`'s autopilot reads, accepted or refused:
+    a refused Pause, Resume or Reset still says a person is at the arm and wants it. Each goes on with the
+    attempt open when it arrived, before it ran, so a Pause right after the Resume that opened an attempt, in
+    the same tick, hands that attempt over, and the Resume doesn't. A Quit goes on it only when accepted, and
+    nothing from a page that isn't in control does. page_hidden returns before that, since the page sends it
+    by itself.
+    The autopilot's commands come through here too, in the same tick, after people's
+    (`Controller.pilot_command`), so it decides from facts that already include them.
 
     Options are checked before anything else, and only known ones are logged: an option named like a
     field of the event (accepted, type, id) must neither crash the loop nor rewrite the log. A Quit
     earlier in this tick that exited refuses everything after it, unread."""
     via: dict = {}
+    # The attempt open as the command arrives: only a command sent while an attempt is open hands it over.
+    during = controller.attempt_number if controller.open_attempt is not None else None
     if controller.done:
         result = Result(name, False, f"{controller.command} is exiting.")
         options = {}
@@ -177,14 +182,6 @@ def intake(controller, name: str, source: str, client: str | None, who: str | No
         return _hidden(controller, name, source, client)
     elif name == ANSWERING:
         result = _answering(controller, name, source, client, who, options)
-        if result.accepted:
-            controller.people.append(name)
-        return result
-    elif source == autopilot.SOURCE and controller.people:  # decided from facts a person's command changed
-        result = Result(name, False, autopilot.GAVE_WAY)
-    elif name == Command.RESUME and source == autopilot.SOURCE and controller.autopilot is not None \
-            and controller.autopilot.held:  # a Hold taken earlier in this tick, after the autopilot sent it
-        result = Result(name, False, "The autopilot is held: Continue on the page lets the next attempt start.")
     elif name == Command.QUIT and source == "page":
         result = Result(name, False, "Quit only from the robot's terminal (Esc or Ctrl+C): whoever ends the "
                                      "process should see the arm. Reset ends the attempt from here.")
@@ -208,8 +205,12 @@ def intake(controller, name: str, source: str, client: str | None, who: str | No
                 result = controller.hold_autopilot(options)
             else:
                 result = Result(name, False, f"Unknown command {name!r}.")
-    if result.accepted and source in PEOPLE:
-        controller.people.append(name)
+    # A person at the arm or on the page in control; a page that isn't in control counts for nothing. A Quit
+    # counts only when accepted: a page's, always refused, never stops the autopilot.
+    in_control = source in ("terminal", "signal") or (source == "page" and client is not None
+                                                     and client == controller.link.client)
+    if in_control and (name != Command.QUIT or result.accepted):
+        controller.people.append((name, during))
     page = {"who": who} if source == "page" else {}
     controller.recorder.event("command", **options, command=name, accepted=result.accepted, reason=result.reason,
                               source=source, **page, **via, operator=controller.operator)
@@ -228,22 +229,24 @@ def _hidden(controller, name: str, source: str, client: str | None) -> Result:
 
 
 def _answering(controller, name: str, source: str, client: str | None, who: str | None, options: dict) -> Result:
-    """A person is saying how the open attempt went (`ANSWERING`), or stopped. Not logged."""
+    """A person started saying how the open attempt went (`ANSWERING`). It changes nothing in the controller:
+    being on `people` hands the attempt over (`autopilot.HANDS_OVER`). It never brings a lost link back
+    (`hear=False`): it isn't proof the page is in sight, and the page's next poll in sight, every 250 ms
+    (page.html's POLL_MS), is."""
     if source not in PEOPLE:
         return Result(name, False, "Only a person answers how an attempt went.")
-    if (refused := _control(controller, name, source, client, who)) is not None:
+    if (refused := _control(controller, name, source, client, who, hear=False)) is not None:
         return refused
-    attempt, still = options.get("for_attempt"), options.get("open", True)
-    if type(still) is not bool:
-        return Result(name, False, f"Answering's open must be true or false, not {still!r}.")
+    attempt = options.get("for_attempt")
     if controller.open_attempt is None or attempt != controller.attempt_number or type(attempt) is not int:
         return Result(name, False, f"Attempt {attempt!r} isn't the one open.")
-    controller.answering(still)
     return Result(name, True)
 
 
-def _control(controller, name: str, source: str, client: str | None, who: str | None) -> Result | None:
-    """Take control, or refuse a page's command for lack of it. None lets the command through."""
+def _control(controller, name: str, source: str, client: str | None, who: str | None, *,
+             hear: bool = True) -> Result | None:
+    """Take control, or refuse a page's command for lack of it. None lets the command through. With
+    `hear`, a command from the page in control counts as hearing it, as a poll does."""
     link = controller.link
     if source != "page":
         return Result(name, False, ONLY_PAGES) if name == TAKE_CONTROL else None
@@ -257,6 +260,6 @@ def _control(controller, name: str, source: str, client: str | None, who: str | 
         link.take(client, who, implicit=True)
     elif client != link.client:
         return Result(name, False, NOT_IN_CONTROL.format(who=link.who))
-    else:
+    elif hear:
         link.hear()  # a command shows the page is there as well as a poll does
     return None

@@ -331,7 +331,7 @@ class FullDisk:
 
 class NoRecorder:
     """The recorder of a controller with no run directory: it records nothing to disk. Events are still
-    numbered and kept in memory, so the status and the event list show them."""
+    numbered and kept in memory, so the status and the event list show them, and frames are counted."""
 
     attempt = None
     frames = 0
@@ -348,10 +348,10 @@ class NoRecorder:
             self.tail.number(jsonable({**own, **fields, **own}))
 
     def start_attempt(self, attempt: int) -> None:
-        pass
+        self.frames = 0
 
     def add_frame(self, *args, **kwargs) -> None:
-        pass
+        self.frames += 1  # numbered as `Recorder` numbers them, which `Tick.frame` and the Rewind history read
 
     def save_attempt(self, ended_by: str | None, outcome: str | None = None, **details) -> int | None:
         return None

@@ -36,11 +36,15 @@ from pathlib import Path
 
 # JSON: dir (the run's folder, <data_dir>/<task>/runs/<name>, not made yet), manifest (run.json's
 # contents: `control.fps`, `operator`, `mode` (serve or run), `autopilot` in run, and `policy` with its
-# type, revision, inference ("local" or "remote") and job; a remote run adds the checkpoint its server
-# admitted it to, `artifact_identity`) and, when given, supervisor (off, shadow or act, over
-# so101.toml's `[supervisor] mode`). The remote server itself is reached through `--inference.*`
+# type, revision, the Hub `commit` the model's files were read at (`commands.policy.policy_setup`),
+# inference ("local" or "remote") and job, and for a skills run its `skills` and the
+# `gripper_sha256` its model was checked against, which `require_run_skills` checks the files against
+# again; a remote run adds the checkpoint its server admitted it to, `artifact_identity`) and, when
+# given, supervisor (off, shadow or act, over so101.toml's `[supervisor] mode`). The remote server itself is reached through `--inference.*`
 # arguments; the manifest says what it serves. This process adds `grasp_thresholds` and
-# `supervisor_program` to the manifest: the files the perception and supervisor read, and their versions.
+# `supervisor_program` to the manifest: the files the perception and supervisor read, and their versions,
+# with how runs are labelled, the grasp detector included (`skills.RUN_LABEL_VERSION`), beside the thresholds',
+# and the supervisor's mode (with the supervisor off, the mode alone: no program is read).
 RUN_ENV = "SO101_RUN"
 # Ctrl+C, `kill` and a closed terminal all quit as Esc does:
 # the arm goes to rest before the motors turn off. Without a handler, SIGTERM and SIGHUP would end the
@@ -109,40 +113,43 @@ def interrupt_on_signals() -> None:
         signal.signal(signum, interrupt)
 
 
-def check_settings(s) -> None:
-    """Exit unless the rest pose and the `[control]` settings pass the checks `so101 serve`'s preflight
-    runs (`check.check_control`). `serve` runs them before it starts this process, but this process
-    reads so101.toml again, which may have changed since (downloading the policy can take minutes). The
-    checks read so101.toml and the follower's calibration file only."""
+def check_settings(s, task: str | None = None) -> None:
+    """Exit unless the rest pose, the `[control]` settings and the supervisor's files and mode for `task`
+    pass the checks `so101 serve`'s preflight runs (`check.check_control`). `serve` runs them before it
+    starts this process, but this process reads so101.toml again, which may have changed since
+    (downloading the policy can take minutes). The checks read so101.toml and the follower's calibration
+    file only."""
     from so_101.check import check_control
     from so_101.report import Report
 
     report = Report()
-    check_control(report, s, "FAIL")
+    check_control(report, s, "FAIL", task)
     if failures := report.failures:
         problems = "\n".join(f"  {r.group}: {r.detail}" + (f"\n    fix: {r.fix}" if r.fix else "") for r in failures)
         sys.exit(f"so101-control can't start with these settings from {s.path}:\n{problems}")
 
 
 def policy_parts(s):
-    """The grasp thresholds every run's perception uses, the supervisor's program (the perception reads
-    its `watch.near`), and, when `[supervisor] mode` isn't off, its judges, else None. Exits on a bad
-    thresholds file or program, before anything is connected. API keys come from the environment or .scratch/bench.env beside
-    so101.toml, as `so101-failbench` reads them; a judge without its key or SDK is left out, and the
-    start event names why."""
+    """The grasp thresholds every run's perception uses, and, when `[supervisor] mode` isn't off, the
+    supervisor's program and its judges; with the supervisor off, None for both, and the program isn't
+    read. Exits on a bad thresholds file, or a bad program with the supervisor on, before anything is
+    connected. API keys come from the environment or .scratch/bench.env beside so101.toml, as
+    `so101-failbench` reads them; a judge without its key or SDK is left out, and the start event names
+    why."""
     from so_101.grasp import thresholds
-    from so_101.supervisor import program
 
     try:
         grasp = thresholds.load(s.perception.thresholds)
     except thresholds.ThresholdsError as error:
         sys.exit(f"so101-control can't load the grasp thresholds its perception reads: {error}")
+    if s.supervisor.mode == "off":
+        return grasp, None, None
+    from so_101.supervisor import program
+
     try:
         loaded = program.load(s.supervisor.program)
     except program.ProgramError as error:
-        sys.exit(f"so101-control can't load the program its perception and supervisor read: {error}")
-    if s.supervisor.mode == "off":
-        return grasp, loaded, None
+        sys.exit(f"so101-control can't load the program its supervisor reads: {error}")
     from so_101.vision.env import load_env
     from so_101.supervisor import judges
 
@@ -151,6 +158,29 @@ def policy_parts(s):
     # The layer tells the operator once which judges are left out, and why, when it starts.
     print(f"Supervisor: {s.supervisor.mode} mode, program v{loaded.version}.", flush=True)
     return grasp, loaded, made
+
+
+def require_run_skills(policy: dict, task, gripper) -> None:
+    """Exit, before anything connects, unless a skills run's skills and `[gripper]` thresholds, as this
+    process loaded them, are the ones `serve` or `run` checked the model against and wrote in run.json
+    (`policy.skills` and `policy.gripper_sha256`). Either file may change while the policy downloads,
+    and the run would then switch skills where its model wasn't trained to, and record skills it didn't
+    use. One refusal names every difference. A run without skills checks nothing."""
+    from so_101 import skills
+
+    if not policy.get("skills"):
+        return
+    differ = []
+    here = json.loads(json.dumps([skill.record() for skill in task.skills]))
+    if here != policy["skills"]:
+        names = lambda records: ", ".join(f"{r.get('name')} ({r.get('prompt')!r})" for r in records) or "none"  # noqa: E731
+        differ.append(f"[{task.name}.skills] in tasks.toml now has {names(here)}, and the model was checked against "
+                      f"{names(policy['skills'])}")
+    if skills.gripper_hash(gripper) != policy.get("gripper_sha256"):
+        differ.append("the [gripper] thresholds in the grasp thresholds file aren't the ones the model was checked against")
+    if differ:
+        sys.exit(f"so101-control: {'; '.join(differ)}. They changed after the run's checks: put them back, or start "
+                 "the run again so its checks run on the files as they are now.")
 
 
 def leader_maker(arm):
@@ -193,21 +223,25 @@ def require_serve_env() -> None:
                  "`uv run so101 serve` or `uv run so101 run` instead.")
 
 
-def run_settings(s, run: dict):
-    """so101.toml's settings with this run's own over them: `run`'s supervisor mode over `[supervisor]
-    mode`, and `so101 run --duration` over `[control] attempt_limit_s`, where 0 lasts until a person
-    ends the attempt. Exits on a value `so101 run` or `so101 serve` shouldn't have passed."""
+def run_settings(s, run: dict, task: str | None = None):
+    """so101.toml's settings with this run's own over them, checked (`check_settings`, for `task`): `run`'s
+    supervisor mode over `[supervisor] mode`, checked with the file's settings, then `so101 run
+    --duration` over `[control] attempt_limit_s`, where 0 lasts until a person ends the attempt. The
+    duration goes on after the check, which refuses the infinite limit 0 stands for in a file. Exits on a
+    value `so101 run` or `so101 serve` shouldn't have passed."""
     from so_101 import settings
 
     if (mode := run.get("supervisor")) is not None:
         if mode not in settings.SUPERVISOR_MODES:
             sys.exit(f"so101-control: the supervisor mode {mode!r} isn't one of {', '.join(settings.SUPERVISOR_MODES)}.")
         s = dataclasses.replace(s, supervisor=dataclasses.replace(s.supervisor, mode=mode))
+    check_settings(s, task)  # before anything is connected or bound
     autopilot = run["manifest"].get("autopilot") or {}
     if (duration := autopilot.get("duration_s")) is not None:
-        if isinstance(duration, bool) or not isinstance(duration, int | float) or math.isnan(duration) or duration < 0:
-            sys.exit(f"so101-control: --duration is {duration!r}: it must be seconds of policy time per attempt, 0 or "
-                     "more (0 runs until you end it).")
+        if (isinstance(duration, bool) or not isinstance(duration, int | float) or not math.isfinite(duration)
+                or duration < 0):
+            sys.exit(f"so101-control: --duration is {duration!r}: it must be a finite number of seconds of policy "
+                     "time per attempt, 0 or more (0 runs until you end it).")
         s = dataclasses.replace(s, control=dataclasses.replace(s.control, attempt_limit_s=duration or math.inf))
     return s
 
@@ -327,31 +361,32 @@ def control(cfg) -> None:
     from so_101.control import terminal
     from so_101.control.controller import Controller
     from so_101.control.follower import pose_from_steps
+    from so_101.skills import RUN_LABEL_VERSION
     from so_101.policy.engine import EngineDriver
     from so_101.control.recorder import Recorder
     from so_101.control.server import ControlServer, resolve_bind, route_warning
     from so_101.control.watch import DeviceWatch
 
     init_logging(console_level="WARNING")  # a level name: LeRobot calls .upper() on it
-    # so101.toml, read once for the whole run.
-    s = run_settings(settings.load(), run)
-    check_settings(s)  # before anything is connected or bound
-    grasp, program, judges = policy_parts(s)
     folder, manifest = data.Run.at(Path(run["dir"])), run["manifest"]
+    # so101.toml, read once for the whole run, and checked before anything is connected or bound.
+    s = run_settings(settings.load(), run, folder.task)
+    grasp, program, judges = policy_parts(s)
     # What the perception and the supervisor read, so a run can be matched to the thresholds and
-    # program it ran under after either file changes.
+    # program it ran under after either file changes. With the supervisor off no program is read, and
+    # supervisor_program records only the mode.
     manifest["grasp_thresholds"] = {"path": str(grasp.path), "gripper_version": grasp.gripper.version,
-                                    "rules_version": grasp.rules.version}
-    manifest["supervisor_program"] = {"path": str(program.path), "version": program.version,
-                                      "mode": s.supervisor.mode}
+                                    "rules_version": grasp.rules.version, "run_labels": RUN_LABEL_VERSION}
+    manifest["supervisor_program"] = {"mode": s.supervisor.mode}
+    if program is not None:
+        manifest["supervisor_program"] |= {"path": str(program.path), "version": program.version}
     # `so101 run`: an autopilot starts and ends the attempts (docs/run.md), each lasting its --duration
     # of policy time (`run_settings`).
     autopilot = manifest.get("autopilot")
     control_settings = s.control
     policy, fps = manifest["policy"], manifest["control"]["fps"]
     task = tasks.load()[folder.task]
-    if policy.get("skills") and not task.skills:
-        sys.exit(f"so101-control: this run serves a skills model, but {task.name} has no [{task.name}.skills] in tasks.toml.")
+    require_run_skills(policy, task, grasp.gripper)
     # Worked out once, before the robot connects: it reads every training file, and one that can't be
     # read stops this process with nothing connected.
     start_pose = data.demo_start_pose(s, task)
@@ -451,7 +486,7 @@ def control(cfg) -> None:
         from so_101.policy import stack
         from so_101.policy.base import LayerContext
 
-        policy_layer = stack.build(driver, LayerContext(recorder.event, time.monotonic, grasp, program),
+        policy_layer = stack.build(driver, LayerContext(recorder.event, time.monotonic, grasp, program, fps),
                                    skills=task.skills if policy.get("skills") else (), judges=judges,
                                    mode=s.supervisor.mode, cameras=tuple(robot.inner.cameras))
         cleanup.callback(policy_layer.close)  # before the recorder closes: late verdicts are dropped
@@ -476,9 +511,11 @@ def control(cfg) -> None:
         if autopilot:
             from so_101.control.autopilot import Autopilot
 
-            # Stepped by the controller on every tick, after the status is published.
-            controller.autopilot = Autopilot(submit=controller.submit, say=lambda message: terminal.say(message, ""),
-                                             episodes=autopilot["episodes"], reset_s=autopilot["reset_s"])
+            # Stepped by the controller on every tick, after people's commands and the link check.
+            controller.autopilot = Autopilot(command=controller.pilot_command,
+                                             say=lambda message: terminal.say(message, ""),
+                                             episodes=autopilot["episodes"], reset_s=autopilot["reset_s"],
+                                             link_timeout_s=s.control.link_timeout_s)
         server.controller = controller
         server.start()
         cleanup.callback(interrupt_on_signals)

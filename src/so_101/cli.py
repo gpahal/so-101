@@ -549,9 +549,11 @@ def policy_flags(policy: str, base: tuple[str, str | None] | None) -> list[str]:
     return [f"--policy.pretrained_path={repo}", *([f"--policy.pretrained_revision={revision}"] if revision else []), *rest, *TRAIN_FLAGS]
 
 
-def check_base(repo: str, revision: str | None, policy: str, skills: bool = False) -> None:
-    """Stop before building, uploading or paying if the job couldn't start from this base model. With
-    `skills`, for `train --skills`: an ACT base must read the skill one-hot, and without it must not."""
+def check_base(repo: str, revision: str | None, policy: str, skills: int = 0) -> None:
+    """Stop before building, uploading or paying if the job couldn't start from this base model. `skills` is the
+    task's number of skills for `train --skills`, 0 otherwise: an ACT base must then read a skill one-hot of
+    exactly that size, and without it must read none. A base of another size would fail with a tensor-size
+    mismatch only once the GPU job loads it, after the upload and the job's startup were paid."""
     from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import (
         EntryNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,
@@ -575,11 +577,16 @@ def check_base(repo: str, revision: str | None, policy: str, skills: bool = Fals
         sys.exit(f"--base {name} is a model of type {config.get('type')}, not {policy}: train it with --policy {config.get('type')}.")
     from so_101.skills import STATE_KEY
 
-    if policy == "act" and (STATE_KEY in config.get("input_features", {})) != skills:
+    features = config.get("input_features", {})
+    if policy == "act" and (STATE_KEY in features) != bool(skills):
         sys.exit(f"--base {name} was trained on the skills dataset, so it reads a skill one-hot ({STATE_KEY}) the whole "
                  "dataset doesn't have: train it with --skills, or start from a whole-demo model." if not skills else
                  f"--base {name} was trained on the whole demos, so it has no input for the skill one-hot ({STATE_KEY}) "
                  "a skills model reads: start from a skills model (its repo ends in _skills), or leave out --base.")
+    if policy == "act" and skills and list((features.get(STATE_KEY) or {}).get("shape") or []) != [skills]:
+        shape = (features.get(STATE_KEY) or {}).get("shape")
+        sys.exit(f"--base {name} reads a skill one-hot of shape {shape}, and this task has {skills} skills in "
+                 "tasks.toml: start from a skills model trained on these skills, or leave out --base.")
 
 
 def check_pi05_access() -> None:
@@ -659,7 +666,7 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     kind = dataset_kind(ns, task)
     skills = kind == data.SKILLS
     if base:
-        check_base(*base, ns.policy, skills)
+        check_base(*base, ns.policy, len(task.skills) if skills else 0)
     if hint := data.old_build_hint(s, task):
         print(hint)
     sources = build_sources(ns)
@@ -669,10 +676,14 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     if not (data.build_is_current(s, task, sources, kind=kind)
             or data.build_is_current(s, task, sources, keep_labels=True, kind=kind)):
         run_build(s, task, sources, kind=kind)
-    kept = data.kept_episodes(s, task)
+    # Steps follow the demos in the build, not the demos recorded: a skills build leaves out a demo whose skills
+    # can't be cut, and each kept demo's skills are its episodes there.
+    kept = data.built_demos(s, task, kind)
+    if kept == 0:
+        sys.exit(f"The {kind} build of {task.name} holds no demos, so there is nothing to train on: its notes say why "
+                 f"each was left out (`uv run so101 build {task.name}{' --skills' if skills else ''}`).")
     if kept < task.episodes:
-        print(f"WARNING: {kept} of {task.episodes} demos; training anyway.", file=sys.stderr)
-    # Steps follow the demos for a skills model too: each demo's skills are its episodes there.
+        print(f"WARNING: {kept} of {task.episodes} demos in the build; training anyway.", file=sys.stderr)
     steps = recipe.steps(kept)
     root = data.dataset_root(s, task, kind)
     args = [
@@ -700,9 +711,11 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
         local, output = local_train_args(s, task, ns.policy, root, skills)
         args += local
         if skills:
-            # The checkpoint's train_config.json keeps it, and `run --skills` checks the skills against the
-            # build.json it names (`commands.policy.skills_build`). LeRobot reads the dataset from its root.
-            args.append(f"--dataset.revision={data.build_revision(data.build_manifest_path(s, task, kind))}")
+            # The checkpoint's train_config.json keeps the build's sha256, and `run --skills` checks the skills
+            # against the copy of the build.json kept under that name in outputs/train/builds/
+            # (`commands.policy.skills_build`), so a later build, which writes build.json anew, doesn't retire
+            # the model. LeRobot reads the dataset from its root.
+            args.append(f"--dataset.revision={data.snapshot_build(s, data.build_manifest_path(s, task, kind))}")
         if (forwarded(extra, "policy.push_to_hub") or "").lower() in ("true", "1", "yes"):
             from huggingface_hub import HfApi
 
@@ -977,7 +990,8 @@ def make_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_train, forwards=True)
 
     p = sub.add_parser("run", help="run a task's policy for several attempts on its own: serve's control center with an "
-                                   "autopilot that starts and ends each attempt, recorded to data/<task>/runs/")
+                                   "autopilot that starts and ends each attempt while a control page in control watches "
+                                   "the arm, recorded to data/<task>/runs/")
     add_task(p)
     p.add_argument("--episodes", type=int, help="how many attempts to make (default: [run] episodes in so101.toml)")
     p.add_argument("--duration", type=float, help="seconds of policy time per attempt; 0 runs until you end it "

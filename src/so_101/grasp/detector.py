@@ -7,8 +7,9 @@ action reached the arm. A tick where the policy sent nothing (a cloud GPU's late
 clock, but counts toward neither the hover and frozen rules nor the policy's driving time. Call
 `resumed(moved, pose)` when the policy drives again after anything else (a pause, a playback, Teleop),
 with whether the arm may have moved meanwhile and where it is now: the speed window and the rules'
-running timers start again, because the pose jumped. After a move with the jaws open, whatever was
-closed, carried or released is undone (a playback opened the jaws, or a person put the block back), so
+running timers start again, because the pose jumped. After a move with the jaws open (at `closed_below`
+or above, or above `hold_band`'s top after a carry or release), whatever was closed, carried or released is
+undone (a playback opened the jaws, or a person put the block back), so
 the next close starts a new grasp and nothing is inferred across the gap. When that undid a carry or
 release, `no_carry` counts the policy's driving time from the handback, as from a new start.
 
@@ -17,12 +18,20 @@ The signals, in the order they can happen in one attempt:
 - `carry`: after a close, the elbow moved `carry_elbow_deg` with the gripper still above
   `carry_open_above` (`how="elbow"`), or the gripper held steady in `hold_band` for `hold_s` (`how="hold"`).
 - `regrasp`: a close reopened without a carry.
-- `release`: after a carry, the gripper opened `release_above` past where it held. Nothing after a
-  release is a grasp: the arm is on its way back to rest.
+- `release`: after a carry, the gripper opened `release_above` past where it held and above `hold_band`'s
+  top. Where it held is the median of its readings over the last `hold_s` in which they all stayed in
+  `hold_band` and within `hold_steady` of each other (`_steady`), or its reading at the carry until it has
+  held that long. A block settling in the jaws moves that, and jaws that open quickly don't, so a release
+  that opens only a little past the band still counts. Jaws that open slower than about `hold_steady` per
+  `hold_s` (1.3 a second) carry the hold with them, as a settling block does, so such a release counts
+  only once the reading passes `release_above` over where the hold stopped. A reading inside the band,
+  where a held block keeps the gripper, is never a release. Nothing after a release is a grasp: the arm is
+  on its way back to rest.
 - `rule`: a stuck rule fired, once per attempt each. All but `not_released` apply only before a carry.
 """
 
 from collections import deque
+from statistics import median
 from dataclasses import dataclass, field
 
 from so_101.grasp.thresholds import Thresholds
@@ -30,6 +39,9 @@ from so_101.grasp.thresholds import Thresholds
 GRIPPER = "gripper.pos"
 ELBOW = "elbow_flex.pos"
 ARM = ("shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos", "wrist_flex.pos", "wrist_roll.pos")
+
+# A change to how the detector finds events from the same thresholds raises `skills.RUN_LABEL_VERSION`, since
+# it can move a run's labels, and `skills.CUT_RULES_VERSION` too when it moves a demo's cut.
 
 
 @dataclass(frozen=True)
@@ -56,7 +68,8 @@ class Detector:
         self._close: dict | None = None  # the open close: when, and the elbow then
         self._hold_value: float | None = None  # where the gripper is holding steady, and since when
         self._hold_since: float | None = None
-        self._carry_hold: float | None = None
+        self._carry_hold: float | None = None  # where the gripper held the carried block
+        self._held: deque[tuple[float, float]] = deque()  # the gripper's readings over the last hold_s
         self._hover_s = self._frozen_s = 0.0
         self.speed: float | None = None
 
@@ -65,8 +78,12 @@ class Detector:
     def resumed(self, moved: bool, pose: dict[str, float]) -> None:
         """The policy drives again after something else held the arm, or moved it (`moved`), leaving
         it at `pose`. With the jaws open after a move, the open close, the carry and the release are
-        forgotten, and the gripper's last reading is this one, so reopened jaws aren't a regrasp. With
-        them closed, the last reading stays the policy's: jaws a person closed count as a close.
+        forgotten, and the gripper's last reading is this one, so reopened jaws aren't a regrasp. Open means
+        at `closed_below` or above, or, after a carry or release, above `hold_band`'s top, where no block is
+        held: the line a release crosses, so a narrow release (18.9 to 23.8) followed by a person undoing it
+        re-arms too. The next close then needs the jaws opened past `closed_below` first, which a policy does
+        anyway to fit the block. With them closed, the last reading stays the policy's: jaws a person closed
+        count as a close.
 
         Forgetting a carry or a release also starts `no_carry` again, from the policy's driving time now:
         the block is back to be picked, as at the attempt's start, and the time before the handback was
@@ -77,10 +94,14 @@ class Detector:
         self._window.clear()
         self._crossings.clear()
         self._hold_value = self._hold_since = None
+        self._held.clear()
         self._hover_s = self._frozen_s = 0.0
-        g = pose[GRIPPER]
-        if moved and g >= self.p.gripper.closed_below:
-            if self.carried or self.released:
+        g, gp = pose[GRIPPER], self.p.gripper
+        # Jaws above the hold band hold no block (a release crosses the same line), so a carry or release is
+        # undone. With nothing carried, jaws a person closed below closed_below still count as a close.
+        held = self.carried or self.released
+        if moved and (g >= gp.closed_below or (held and g > gp.hold_band[1])):
+            if held:
                 self._no_carry_from = self.policy_s
             self.carried = self.released = False
             self._close = self._carry_hold = None
@@ -129,6 +150,7 @@ class Detector:
                 self._hold_value, self._hold_since = g, t
         else:
             self._hold_value = self._hold_since = None
+        steady = self._steady(t, g)
         if self._close is not None and not self.carried:
             self._close["travel"] = max(self._close["travel"], abs(pose[ELBOW] - self._close["elbow"]))
             if g > gp.carry_open_above and self._close["travel"] >= gp.carry_elbow_deg:
@@ -141,12 +163,32 @@ class Detector:
                 self._close = None
                 out.append(Signal("regrasp", t, detail={"regrasps": self.regrasps, "elbow_travel": travel}))
         elif self.carried:
-            if lo <= g <= hi:
-                self._carry_hold = g
-            if g > self._carry_hold + gp.release_above:
+            if steady is not None:
+                self._carry_hold = steady
+            if g > self._carry_hold + gp.release_above and g > hi:  # inside the band, a held block keeps it
                 self.released = True
                 out.append(Signal("release", t, detail={"gripper": round(g, 1), "held_at": round(self._carry_hold, 1)}))
         return out
+
+    def _steady(self, t: float, g: float) -> float | None:
+        """Where the gripper has held steady, with this tick's reading `g`: the median of its readings
+        over the last `hold_s`, when every one is in `hold_band` and within `hold_steady` of the others.
+        None while it hasn't held that long. The median, because the first readings of an opening are still
+        within `hold_steady` of the hold: the reading itself would follow the jaws open, as far as the
+        band's top, and an opening that stopped under `release_above` past that was never a release.
+        Jaws that open slower than about `hold_steady` per `hold_s` still move it, as a settling block
+        does. A release also needs the reading above the band's top (`_gripper`)."""
+        gp = self.p.gripper
+        self._held.append((t, g))
+        while len(self._held) > 1 and self._held[1][0] <= t - gp.hold_s:
+            self._held.popleft()
+        if t - self._held[0][0] < gp.hold_s:
+            return None
+        readings = [reading for _, reading in self._held]
+        low, high = min(readings), max(readings)
+        if low < gp.hold_band[0] or high > gp.hold_band[1] or high - low > gp.hold_steady:
+            return None
+        return median(readings)
 
     def _carry(self, t: float, g: float, how: str) -> Signal:
         self.carried = True
@@ -192,7 +234,3 @@ class Detector:
                 "no_carry": (self.policy_s - self._no_carry_from) / r.no_carry_s,
             }
         return {name: value for name, value in values.items() if name not in self.fired}
-
-    def near(self, within: float) -> list[str]:
-        """The rules not yet fired whose progress is at least `within` (the supervisor's `watch.near`)."""
-        return [name for name, value in self.progress().items() if value >= within]

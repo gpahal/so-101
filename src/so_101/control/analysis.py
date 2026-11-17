@@ -111,7 +111,7 @@ SOURCES = (CORRECTIONS, HUMAN_ATTEMPTS, POLICY_SUCCESSES)
 # The version of the rules that cut and label a run's frames, which build.json records. Raise it when
 # `training_cuts`, `intervention_mask` or `frame_labels` change what a build holds, so a build made
 # under other rules isn't current.
-RULES_VERSION = 8  # 8: only a stuck ask blames the frames before it
+RULES_VERSION = 1  # 1: the supervisor's playbacks undo frames, its pauses interrupt, and only a stuck ask blames the frames before it
 # What stops the policy for a judgement of it: an operator's step-in, or the policy asking for a person.
 STOPS = ASKED_OR_STEPPED_IN
 
@@ -208,6 +208,10 @@ class Attempt:
     rewinds: tuple[Range, ...]
     failure_fixes: tuple[FailureFix, ...]
     dropped_frames: dict[str, int] = field(default_factory=dict)  # video frames dropped per camera, from attempt_end
+    # Per frame: a Pause (or ask) and a Resume taken in the tick that recorded it, which leave the frame
+    # Autonomous; its `state` event out of Autonomous names the frame (`same_tick_handbacks`). The policy
+    # stack heard that handback, so the offline replays of its detector do too (`grasp.replay`).
+    handbacks: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     @property
     def frames(self) -> int:
@@ -578,6 +582,19 @@ def analyse_record(record: RunRecord, labels: Labels, blame_s: float) -> RunAnal
     return RunAnalysis(run, fps, tuple(attempts), tuple(notes))
 
 
+def same_tick_handbacks(phases: np.ndarray, events) -> np.ndarray:
+    """Per frame, whether a `state` event left Autonomous at it while the frame is still Autonomous: a Pause, an
+    ask or a lost link and a Resume applied in the tick that recorded it. An event names the frame its tick
+    records next, so a pause that lasts a tick leaves that frame Paused and isn't one."""
+    marks = np.zeros(len(phases), dtype=bool)
+    for e in events:
+        frame = e.get("frame")
+        if (e.get("type") == "state" and e.get("previous") == "autonomous" and isinstance(frame, int)
+                and 0 <= frame < len(phases) and phases[frame] == Phase.AUTONOMOUS):
+            marks[frame] = True
+    return marks
+
+
 def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame_s, labels) -> Attempt:
     phases = frames.phases
     segments = segments_of(phases)
@@ -667,6 +684,7 @@ def _attempt(number, episode, end, recorded, outcome, frames, events, fps, blame
         interruptions=tuple(interruptions),
         rewinds=tuple((e["start_frame"], e["end_frame"]) for e in rewinds + playbacks),
         failure_fixes=tuple(pairs), dropped_frames=dict((end or {}).get("dropped_frames") or {}),
+        handbacks=same_tick_handbacks(phases, events),
     )
 
 

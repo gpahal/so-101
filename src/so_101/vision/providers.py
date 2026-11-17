@@ -3,7 +3,13 @@
     {"wrong": bool | None, "p_wrong": float | None, "category": str | None, "observation": str | None,
      "tokens_in": int | None, "tokens_out": int | None, "cost_usd": float | None, "latency_s": float, "raw": str}
 
-and raises `ProviderError` (retryable or not) when there's no answer. `cost_usd` is None when the provider
+`p_wrong` is a finite number in [0, 1] or None (`probability`): a NaN once clamped to 0.0, a sure ok. A
+chat model's answer whose `wrong` contradicts its `p_wrong` (wrong with p_wrong under 0.5, or not wrong
+with it over 0.5) has `p_wrong` None and the number in `p_wrong_dropped`, so the supervisor acts on
+neither side of it while failbench still scores `wrong`. A decision model's probability that isn't a
+finite number is an error, not an answer.
+
+It raises `ProviderError` (retryable or not) when there's no answer. `cost_usd` is None when the provider
 reported no usage, so a caller keeping to a budget charges its own estimate instead of nothing. Each
 request starts with `prompt.describe(images)` and labels each image with `prompt.label`. SDKs are imported here,
 lazily, so every other module and the tests run without the `failbench` dependency group.
@@ -27,6 +33,7 @@ is installed.
 
 import base64
 import json
+import math
 import os
 import re
 import threading
@@ -70,6 +77,26 @@ def _cost(m: Model, tokens_in: int | None, tokens_out: int | None) -> float | No
     return None if tokens_in is None and tokens_out is None else m.cost(tokens_in, tokens_out)
 
 
+def probability(value) -> float | None:
+    """`value` as a probability: a finite number (or numeric string) clamped to [0, 1], else None. NaN and
+    infinities are None, never clamped: `max(0.0, nan)` is 0.0, which would read as sure ok."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        p = float(value)
+    except (TypeError, ValueError):
+        return None
+    return min(1.0, max(0.0, p)) if math.isfinite(p) else None
+
+
+def _decided(base: dict, raw, answer: dict) -> dict:
+    """A decision model's prediction from its raw probability `raw`: an error when it isn't a finite number."""
+    p = probability(raw)
+    if p is None:
+        return {**base, "wrong": None, "error": f"no usable probability: {raw!r}", "raw": ""}
+    return {**base, "wrong": p >= 0.5, "p_wrong": p, **answer, "raw": ""}
+
+
 def parse_answer(text: str) -> dict:
     """The JSON answer from a chat model; tolerates code fences or text around the object."""
     try:
@@ -89,14 +116,13 @@ def parse_answer(text: str) -> dict:
         wrong = wrong.strip().lower() in ("true", "yes", "1")
     if not isinstance(wrong, bool):
         raise ProviderError(f"answer has no boolean 'wrong': {str(data)[:200]}")
-    p = data.get("p_wrong")
-    try:
-        p = min(1.0, max(0.0, float(p))) if p is not None else None
-    except (TypeError, ValueError):
-        p = None
+    p = probability(data.get("p_wrong"))
     category = data.get("category")
-    return {"wrong": wrong, "p_wrong": p, "category": category if category in prompt.CATEGORIES else "other",
-            "observation": str(data.get("observation", ""))[:300]}
+    answer = {"wrong": wrong, "p_wrong": p, "category": category if category in prompt.CATEGORIES else "other",
+              "observation": str(data.get("observation", ""))[:300]}
+    if p is not None and (p < 0.5 if wrong else p > 0.5):  # it says one thing and its probability the other
+        answer["p_wrong"], answer["p_wrong_dropped"] = None, p
+    return answer
 
 
 class OpenRouterChat:
@@ -217,11 +243,10 @@ class GeminiDecisions:
             raise _error(e)
         latency = time.monotonic() - started
         tokens_in = getattr(r.usage, "total_input_tokens", None) if getattr(r, "usage", None) else None
-        p = float(r.answers["wrong"].noul)
+        base = {"tokens_in": tokens_in, "tokens_out": 0, "latency_s": round(latency, 3), "cost_usd": _cost(self.m, tokens_in, None)}
         cat = r.answers["category"]
-        return {"wrong": p >= 0.5, "p_wrong": p, "category": cat.choice, "category_confidence": getattr(cat, "confidence", None),
-                "tokens_in": tokens_in, "tokens_out": 0, "latency_s": round(latency, 3),
-                "cost_usd": _cost(self.m, tokens_in, None), "raw": ""}
+        return _decided(base, r.answers["wrong"].noul,
+                        {"category": cat.choice, "category_confidence": getattr(cat, "confidence", None)})
 
 
 class OpenAIDecisions:
@@ -252,12 +277,12 @@ class OpenAIDecisions:
             if a.type == "refusal":
                 return {**base, "wrong": None, "error": f"refused: {getattr(a, 'refusal', a)}", "raw": ""}
             if a.type == "predicate":
-                p = float(a.probability)
+                p = a.probability
             elif a.type == "choice":
                 category = a.choice
         if p is None:
             return {**base, "wrong": None, "error": f"no predicate answer: {str(r.answers)[:200]}", "raw": ""}
-        return {**base, "wrong": p >= 0.5, "p_wrong": p, "category": category, "raw": ""}
+        return _decided(base, p, {"category": category})
 
 
 class TypeSafeJev:
@@ -286,10 +311,9 @@ class TypeSafeJev:
             raise _error(e)
         latency = time.monotonic() - started
         tokens_in = getattr(r.usage, "input_tokens", None) if getattr(r, "usage", None) else None
-        p = float(r.nouls["wrong"].noul)
-        return {"wrong": p >= 0.5, "p_wrong": p, "category": r.choices["category"].choice, "tokens_in": tokens_in,
-                "tokens_out": 0, "latency_s": round(latency, 3), "cost_usd": _cost(self.m, tokens_in, None),
-                "served_by": getattr(r, "model", None), "raw": ""}
+        base = {"tokens_in": tokens_in, "tokens_out": 0, "latency_s": round(latency, 3),
+                "cost_usd": _cost(self.m, tokens_in, None), "served_by": getattr(r, "model", None)}
+        return _decided(base, r.nouls["wrong"].noul, {"category": r.choices["category"].choice})
 
 
 _ADAPTERS = {OPENROUTER: OpenRouterChat, GEMINI: GeminiChat, GEMINI_DECISIONS: GeminiDecisions,
@@ -328,9 +352,10 @@ def sdk_missing(provider: str) -> str | None:
 
 
 def openrouter_json(m: Model, system: str, image: bytes, text: str, name: str, schema: dict, *,
-                    timeout: float = 60, max_tokens: int = 4000, title: str = "so101") -> tuple[dict, float]:
+                    timeout: float = 60, max_tokens: int = 4000, title: str = "so101") -> tuple[dict, float | None]:
     """One OpenRouter chat call with a JPEG and text, answered as JSON matching `schema`. Returns the
-    answer and the call's cost in USD (OpenRouter's, or the model's prices without it). Raises on failure."""
+    answer and the call's cost in USD: OpenRouter's, or the model's prices times the tokens, or None when the
+    reply says neither, so the caller charges its estimate rather than nothing. Raises on failure."""
     from openai import OpenAI
 
     client = OpenAI(base_url=OPENROUTER_URL, api_key=os.environ[m.env], timeout=timeout, max_retries=1,
@@ -348,6 +373,9 @@ def openrouter_json(m: Model, system: str, image: bytes, text: str, name: str, s
     )
     usage = r.usage
     cost = getattr(usage, "cost", None) or (getattr(usage, "model_extra", None) or {}).get("cost")
-    cost = float(cost) if cost is not None else m.cost(getattr(usage, "prompt_tokens", None),
-                                                      getattr(usage, "completion_tokens", None))
+    tokens_in, tokens_out = getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None)
+    if cost is not None:
+        cost = float(cost)
+    elif tokens_in is not None and tokens_out is not None:
+        cost = m.cost(tokens_in, tokens_out)
     return json.loads(r.choices[0].message.content or "{}"), cost

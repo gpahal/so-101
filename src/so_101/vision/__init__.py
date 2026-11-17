@@ -6,6 +6,7 @@ Modules:
                escalation call; the only module that imports a provider SDK, and only lazily
 - `prompt`     the task description, moments, categories, the question and the answer schema
 - `env`        `load_env`, the API keys from `.scratch/bench.env`
+- `budget`     `Budget`, the spending cap both hold: a call starts only if its estimate fits under it
 
 The provider SDKs are in the `failbench` dependency group: `uv sync --group failbench`.
 """

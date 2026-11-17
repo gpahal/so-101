@@ -49,8 +49,11 @@ the run's `labels.toml`, so both ways write identical files. The recordings are 
 reason is joined by single spaces, as the terminal's words are, and `data.save_edits` drops control
 characters and parses its text before it replaces the file.
 
-From a decision's POST until the next item's first frames show, the page takes no other decision, and a
-held key counts once, so a second Enter can't decide on an item nobody has seen. A reply for an item the
+The page takes a decision only once the item shown has every camera's first frame on screen (or a camera
+has failed to load), with no decision's POST on its way and no item being fetched: from a click in the
+list, or a decision that moves on, until the next item's first frames show, Enter and the decision keys do
+nothing and the decision buttons are dimmed. A held key counts once, so a second Enter can't decide on an
+item nobody has seen. A reply for an item the
 page no longer shows only updates the list. A button clicked with the pointer gives up the focus, so
 Space and Enter then do what the keys say rather than press it again.
 
@@ -61,7 +64,9 @@ interruptions, suggestion and current decision), `GET /frames/<id>/<camera>?from
 `POST /decision` (`{"item", ...}`, naming its item: the server keeps no item "shown", so two tabs can each
 decide on their own; 404 for an item the review doesn't cover, 400 for a body it doesn't take). An
 `edits.toml` or `labels.toml` that can't be read answers any request with 409 and the file's error; a
-recording that can't be read, 500. `review --runs` leaves out an attempt whose episode isn't in the run's
+recording that can't be read, 500, including a video PyAV can't decode and a Parquet file that won't parse.
+Any other error a route raises before it has replied is a 500 naming the error (`web/server.py`'s
+`Handler._route`), with the error printed in the terminal, so the page never sees a dropped connection. `review --runs` leaves out an attempt whose episode isn't in the run's
 episode index, as after a kill during its save, and says so in the terminal and in `/items`' `notes`.
 Errors close the connection, as the control page's do. The full list is in `web/review.py`'s docstring.
 
@@ -74,5 +79,5 @@ checks on the reviewer's port. Also: every body the page's script sends (each ca
 against `review.html`), a decision for an item other than the one opened last, bodies of the wrong shape,
 a `labels.toml` and an `edits.toml` broken mid-review, a run hard-killed during its second save, frames
 decoded per chunk, a video cut short, a frames body sent slower than the connection's timeout, the
-driver bands' names, and `save_edits` with control characters. The script's own behaviour (keys, the busy
-flag, retries) needs a browser.
+driver bands' names, and `save_edits` with control characters. The script's own behaviour (keys, the wait for
+the first frames, retries) needs a browser.

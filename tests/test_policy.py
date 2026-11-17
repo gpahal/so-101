@@ -27,7 +27,7 @@ def judges(answers: dict | None = None):
 
 
 def context(events: list) -> LayerContext:
-    return LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: 0.0, GRASP, PROGRAM)
+    return LayerContext(lambda type_, **fields: events.append({"type": type_, **fields}), lambda: 0.0, GRASP, PROGRAM, FPS)
 
 
 KINDS = (("perception", {}), ("skills", {"skills": SKILLS}),
@@ -103,6 +103,29 @@ class ContractTest(unittest.TestCase):
                     self.assertIn(out.driver, (POLICY, WAITING, PLAYBACK, HOLD))
                     self.assertEqual(out.action, {"shoulder_pan.pos": float(row[0])}, "nothing to step in on yet")
                 self.assertIsInstance(policy.maintain(), list)
+
+    def test_every_playback_tick_names_the_frame_it_goes_back_to(self) -> None:
+        """The loop drops what a playback undid from a person's Rewind history by `Output.goal_frame`: every
+        PLAYBACK tick carries it, an earlier frame than its own, and no other tick does. The judges call every
+        close a miss, so the supervisor in act mode plays back."""
+        for name, policy, _ in stacks(answers={"after_close": 0.95}):
+            with self.subTest(name):
+                policy.begin_episode(1)
+                policy.run(Handback(START))
+                robot, rows, played = Robot(), trace(), 0
+                for n in range(300):
+                    out = policy.step(robot, tick(n, rows[min(n, len(rows) - 1)]))
+                    if out.driver == PLAYBACK:
+                        played += 1
+                        self.assertIsInstance(out.goal_frame, int)
+                        self.assertLess(out.goal_frame, n)
+                    else:
+                        self.assertIsNone(out.goal_frame)
+                    if out.asks is not None:
+                        break
+                    policy.maintain()
+                if name in ("supervisor act", "full stack"):
+                    self.assertGreater(played, 0, "the miss was played back")
 
     def test_nothing_reaches_the_arm_after_pause(self) -> None:
         for name, policy, leaf in stacks():

@@ -300,9 +300,10 @@ def describe(job) -> str:
              else "real-time chunking" if execution else "plain chunks from before real-time chunking")
     pin = {"true": ", unused action columns pinned", "false": ", unused action columns not pinned"}.get(
         labels.get(PIN_LABEL), ", started before the unused action columns setting" if labels.get("policy") == "pi05" else "")
+    commit = f" (commit {labels['commit'][:12]})" if labels.get("commit") else ""
     return (
         f"{labels.get('policy')} for {labels.get('task')}{' skills' if labels.get('dataset') == 'skills' else ''} "
-        f"at {labels.get('revision')}, {steps}{pin}, "
+        f"at {labels.get('revision')}{commit}, {steps}{pin}, "
         f"on {job.flavor} (job {job.id}, {job.status.stage})"
     )
 
@@ -329,14 +330,15 @@ def start_server(
     check_ssh_key()
     if server := active_server():
         sys.exit(f"A policy server is already running: {describe(server)}.\nStop it first: uv run so101 server stop")
+    commit = hub_commit(repo, revision)  # the server loads exactly this, and says so in its `commit` label
     skills = ()
     if dataset == "skills":
         from so_101 import tasks
 
         found = tasks.load()[task]
-        skills = skill_inputs(found.policy_config(revision, policy_type, True), found.require_skills(), repo)
+        skills = skill_inputs(found.policy_config(commit, policy_type, True), found.require_skills(), repo)
     setup, serve = setup_script(
-        policy_type, server_config(repo, policy_type, revision, image_sizes, action_steps, fps, skills), pin_unused_actions
+        policy_type, server_config(repo, policy_type, commit, image_sizes, action_steps, fps, skills), pin_unused_actions
     )
     api = HfApi()
     job = api.run_job(
@@ -346,7 +348,10 @@ def start_server(
         secrets={"HF_TOKEN": get_token()},
         flavor=target,
         timeout=timeout,
-        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps, pin_unused_actions, dataset)},
+        # `revision` stays the name asked for, so `run --revision main` matches; `commit` is what the server loaded,
+        # 40 hex characters. A real server hasn't been started with this label yet: starting one bills.
+        labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps, pin_unused_actions, dataset),
+                "commit": commit},
         ssh=True,
     )
     print(f"Started job {job.id} on {target}. It bills until `uv run so101 server stop`, or {timeout} at most.")
@@ -416,12 +421,52 @@ def stop_server() -> None:
                  + "\n  ".join(failed))
 
 
+def hub_commit(repo: str, revision: str) -> str:
+    """The Hub commit `revision` of the model `repo` names now. Exits with one line when there's no such
+    model or revision."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
+
+    try:
+        return HfApi().model_info(repo, revision=revision).sha
+    except RepositoryNotFoundError:
+        sys.exit(f"There's no model {repo} on the Hub, or your login can't see it.")
+    except RevisionNotFoundError:
+        sys.exit(f"{repo} has no revision {revision!r}.")
+
+
+def _start_command(task: str, policy_type: str, revision: str, dataset: str, action_steps: int | None = None) -> str:
+    steps = "" if action_steps is None else steps_flag(policy_type, action_steps)
+    return (f"uv run so101 server start {task} --policy {policy_type} --revision {revision}"
+            f"{steps}{' --skills' if dataset == 'skills' else ''}")
+
+
+def active_server_or_exit(task: str, policy_type: str, revision: str, dataset: str = "whole"):
+    """The running server, or exit saying how to start one. The start command leaves out --action-steps,
+    which comes from the model's config, read only after the server's commit is known."""
+    server = active_server()
+    if server is None:
+        sys.exit(f"No policy server is running. Start one first:\n  {_start_command(task, policy_type, revision, dataset)}")
+    return server
+
+
+def served_commit(server, task: str, policy_type: str, revision: str, dataset: str = "whole") -> str:
+    """The Hub commit the server loaded (its `commit` label), which a run reads the model's files at, so it
+    checks the model the server serves rather than whatever `revision` names now. Exits for a server started
+    before the label."""
+    commit = (server.labels or {}).get("commit")
+    if not commit:
+        sys.exit("The policy server was started before so101 recorded the commit it serves, so the run can't check "
+                 "the model it serves. Stop it (uv run so101 server stop) and start it again:\n  "
+                 f"{_start_command(task, policy_type, revision, dataset)}")
+    return commit
+
+
 def require_server(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool,
                    dataset: str = "whole"):
     """The running server, if it serves what this run asks for, as so101.toml sets it. Starting one
     bills, so never do it implicitly. A server started before the `dataset` label serves the whole-demo model."""
-    start = (f"uv run so101 server start {task} --policy {policy_type} --revision {revision}"
-             f"{steps_flag(policy_type, action_steps)}{' --skills' if dataset == 'skills' else ''}")
+    start = _start_command(task, policy_type, revision, dataset, action_steps)
     server = active_server()
     if server is None:
         sys.exit(f"No policy server is running. Start one first:\n  {start}")

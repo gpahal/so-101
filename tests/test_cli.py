@@ -146,7 +146,7 @@ class AllowListTest(unittest.TestCase):
     def test_serve_refuses_before_its_checks(self) -> None:
         task = types.SimpleNamespace(name="test", prompt="test", fps=30, reset_time_s=10)
         ns = argparse.Namespace(task="test", episodes=None, duration=None, reset_time=None, supervisor=None)
-        s = mock.Mock(run=mock.Mock(episodes=1))
+        s = mock.Mock(run=mock.Mock(episodes=1), control=mock.Mock(on_link_loss="pause"))
         with mock.patch.object(serve, "policy_task", return_value=task), \
                 mock.patch.object(serve, "policy_setup", side_effect=AssertionError("checked first")):
             for command in (serve.cmd_serve, serve.cmd_run):
@@ -158,7 +158,7 @@ class AllowListTest(unittest.TestCase):
         # A nan or inf reset time made the autopilot's next_in_s nan or inf, which the page's strict JSON
         # status can't hold: every /status failed once the arm reached rest.
         task = types.SimpleNamespace(name="test", prompt="test", fps=30, reset_time_s=10)
-        s = mock.Mock(run=mock.Mock(episodes=1))
+        s = mock.Mock(run=mock.Mock(episodes=1), control=mock.Mock(on_link_loss="pause"))
         cases = [("reset_time", "--reset-time", value) for value in (float("nan"), float("inf"), -1.0)] + \
                 [("duration", "--duration", value) for value in (float("nan"), float("inf"), float("-inf"), -1.0)]
         for key, flag, value in cases:
@@ -171,18 +171,29 @@ class AllowListTest(unittest.TestCase):
                 serve.cmd_run(s, ns, [])
             self.assertIn(flag, str(stop.exception.code))
 
+    def test_run_refuses_on_link_loss_continue_before_its_checks(self) -> None:
+        # With "continue", an attempt the autopilot started would keep driving after the page is lost.
+        task = types.SimpleNamespace(name="test", prompt="test", fps=30, reset_time_s=10)
+        ns = argparse.Namespace(task="test", episodes=None, duration=None, reset_time=None, supervisor=None)
+        s = mock.Mock(run=mock.Mock(episodes=1), control=mock.Mock(on_link_loss="continue"), path="so101.toml")
+        with mock.patch.object(serve, "policy_task", return_value=task), \
+                mock.patch.object(serve, "policy_setup", side_effect=AssertionError("checked first")), \
+                self.assertRaises(SystemExit) as stop:
+            serve.cmd_run(s, ns, [])
+        self.assertIn("on_link_loss", str(stop.exception.code))
+
 
 class LaunchTest(ConfigTest):
     """What `run` and `serve` hand `so101-control` and write in run.json's manifest."""
 
-    def launch(self, command: str, s: settings.Settings, **flags) -> dict:
-        task = types.SimpleNamespace(name="test", prompt="Put it in", fps=30, reset_time_s=10, skills=(),
+    def launch(self, command: str, s: settings.Settings, skills=(), **flags) -> dict:
+        task = types.SimpleNamespace(name="test", prompt="Put it in", fps=30, reset_time_s=10, skills=skills,
                                      policy_for=lambda policy, skills=False: "you/act_so101_test")
         ns = argparse.Namespace(task=None, policy="act", remote=False, revision=None, checkpoint=None,
                                 action_steps=None, operator=None, skills=False, episodes=None, duration=None,
                                 reset_time=None, supervisor=None)
         for key, value in flags.items():
-            setattr(ns, key, value)
+            setattr(ns, "skills" if key == "skills_flag" else key, value)
         self.checked: list[settings.Settings] = []
         self.ran: list[list[str]] = []
 
@@ -190,6 +201,7 @@ class LaunchTest(ConfigTest):
             self.checked.append(s)
             return types.SimpleNamespace(server=None, checkpoint=None, action_steps=10, arms=("follower", "leader"),
                                          found=[], report=None, sizes={}, args=["--robot.type=so101_follower"],
+                                         gripper_sha256="a1b2" if ns.skills else None, commit="c" * 40,
                                          steps_line=lambda s: "", run=lambda command, args, *_: self.ran.append(args))
 
         get_task = mock.Mock(return_value=task)
@@ -197,7 +209,7 @@ class LaunchTest(ConfigTest):
         with mock.patch("so_101.commands.policy.get_task", get_task), \
                 mock.patch.object(serve, "policy_setup", policy_setup), \
                 mock.patch.object(serve.data, "new_run", return_value=types.SimpleNamespace(path=self.root / "run")), \
-                mock.patch("so_101.recording.run_manifest", return_value={}), \
+                mock.patch("so_101.recording.run_manifest", side_effect=lambda *args, policy, **kw: {"policy": policy}), \
                 mock.patch.object(serve.signal, "signal"), \
                 mock.patch.dict(os.environ), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
@@ -211,6 +223,18 @@ class LaunchTest(ConfigTest):
         sent = self.launch("run", settings.load(), duration=0.0, reset_time=0.0)
         self.assertEqual(sent["manifest"]["autopilot"]["duration_s"], 0.0, "0 runs until you end it")
         self.assertEqual(sent["manifest"]["autopilot"]["reset_s"], 0.0)
+        self.assertEqual(sent["manifest"]["policy"]["commit"], "c" * 40, "run.json records the commit checked")
+
+    def test_a_skills_run_records_the_skills_and_gripper_thresholds_its_model_was_checked_against(self) -> None:
+        # so101-control checks them again after it reloads the files (`control.main.require_run_skills`).
+        self.config.write_text(ARMS)
+        skill = types.SimpleNamespace(record=lambda: {"name": "pick", "prompt": "Pick it up"})
+        for command in ("run", "serve"):
+            with self.subTest(command):
+                policy = self.launch(command, settings.load(), skills=(skill,), skills_flag=True)["manifest"]["policy"]
+                self.assertEqual((policy["skills"], policy["gripper_sha256"]), ([skill.record()], "a1b2"))
+                policy = self.launch(command, settings.load())["manifest"]["policy"]
+                self.assertEqual((policy["skills"], policy["gripper_sha256"]), (None, None))
 
     def test_the_supervisor_flag_overrides_the_file_for_the_checks_and_the_control_process(self) -> None:
         self.config.write_text(ARMS + '\n[supervisor]\nmode = "shadow"\n')

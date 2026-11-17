@@ -24,7 +24,9 @@ the leader's pose, not the capped goal). So a Teleop cut takes the run's `contro
 policy-success cut its `control.policy_action`, rather than the run's `action`, the capped goal
 (`ACTION_COLUMN`).
 With either, build.json records `analysis.RULES_VERSION`, so a build made under other cut or label
-rules isn't current.
+rules isn't current. A skills build also records `skills.contract` (`data.build_inputs`): the skills, the
+`[gripper]` thresholds' hash, `skills.CUT_RULES_VERSION` and, when it takes runs, `skills.RUN_LABEL_VERSION`
+(how runs were labelled, the grasp detector included), which a skills model is checked against before it runs (`commands.policy.require_skills_contract`).
 
 build.json sits inside the dataset and names no folder of this computer (`path_free`), since `train`
 uploads it with the dataset. The new build replaces the old by `swap`.
@@ -269,15 +271,21 @@ def run_skills(run: data.Run, attempt: analysis.Attempt, task: Task, grasp) -> t
     thresholds `grasp`.
 
     Frames a script moved (the move to the start pose, a Rewind, the return to rest, a layer's playback)
-    aren't replayed, and Teleop frames are replayed only while nothing is carried, as the runtime sees
-    neither. In a skills run, Autonomous frames take the skill the model was told (control.skill,
+    aren't replayed, as the live detector sees none of them. Of the rest, the replay feeds (`fed`) Teleop
+    frames, on purpose, since a person's grasp and release count (a re-grip is rolled back), and the frames
+    the live detector sees: Autonomous frames the model drove or waited on (`control.driver` POLICY or WAITING, or every Autonomous
+    frame of a run recorded before that column). Paused and Handover frames and a layer's hold aren't, and
+    count on no clock, and only frames the model drove (or Teleop frames, or every frame without the
+    column) count as driven for the stuck rules (`drove`). The masks are `grasp.replay.live_masks`'s, and a
+    Pause and Resume taken in one tick (`attempt.handbacks`) reach the replay as the live detector heard them.
+    In a skills run, Autonomous frames take the skill the model was told (control.skill,
     indexed in its own run.json's policy.skills and mapped onto the task's by name; of those, the ones the
     model didn't drive, waiting or a layer's hold, are in no cut anyway, `control.analysis`); every other frame,
     such as a correction in Teleop, takes the skill the replay finds, so a person who grasps during pick
     is in place from the carry on, whatever the model was told, and a person who opens the jaws on a
     carried block and closes them again is still in place."""
     from so_101 import skills
-    from so_101.policy.base import PLAYBACK
+    from so_101.grasp.replay import live_masks
 
     names = list(run.meta.features["observation.state"]["names"])
     table = episode_table(run.meta, attempt.episode)
@@ -285,10 +293,14 @@ def run_skills(run: data.Run, attempt: analysis.Attempt, task: Task, grasp) -> t
     phases = attempt.phases
     if len(state) != len(phases):
         return None, f"its {len(state)} frames of joint readings don't match its {len(phases)} phases"
-    scripted = np.isin(phases, (Phase.STARTING, Phase.REWINDING, Phase.RETURNING))
+    driver = None
     if "control.driver" in table and not table["control.driver"].isna().any():
         driver = np.array([int(np.ravel(v)[0]) for v in table["control.driver"]])
-        scripted |= (phases == Phase.AUTONOMOUS) & (driver == PLAYBACK)
+    # What the live detector saw (`grasp.replay.live_masks`), plus Teleop frames, fed on purpose.
+    live, model_drove, moved = live_masks(phases, driver)
+    teleop = phases == Phase.TELEOP
+    scripted = np.isin(phases, (Phase.STARTING, Phase.REWINDING, Phase.RETURNING)) | (moved & (phases == Phase.AUTONOMOUS))
+    fed, drove = teleop | live, teleop | model_drove
     told = None
     recorded = (run.manifest().get("policy") or {}).get("skills")
     if recorded and (attempt.skills >= 0).any():
@@ -299,7 +311,7 @@ def run_skills(run: data.Run, attempt: analysis.Attempt, task: Task, grasp) -> t
         told = np.array([index.get(int(k), -1) if p == Phase.AUTONOMOUS else -1
                          for k, p in zip(attempt.skills, phases, strict=True)], dtype=np.int8)
     return skills.label_run(task.skills, state, names, run.meta.fps, grasp, scripted, told,
-                            teleop=phases == Phase.TELEOP), ""
+                            teleop=teleop, fed=fed, drove=drove, handbacks=attempt.handbacks), ""
 
 
 def split_by_skill(per_frame: np.ndarray, start: int, stop: int) -> list[tuple[int, int, int]]:

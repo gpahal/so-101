@@ -39,8 +39,22 @@ import numpy as np
 EVENTS = ("start", "close", "lift", "carry", "release", "widest", "end")
 HANDOVERS = ("carry", "release")  # what the detector sees as the policy drives and can switch skills on
 # Raise with any change to LIFT_DEG, WIDEST_WITHIN_S, MIN_SPAN_S or how `events` and `spans` cut a demo, or
-# `label_run` a run: a skills build records it (`data.build_inputs`), so one made under other rules is stale.
-CUT_RULES_VERSION = 4
+# to how the detector finds a close, a carry or a release from the same thresholds (`grasp.detector`) that
+# moves a cut: a skills build records it (`data.build_inputs`), so one made under other rules is stale, and a
+# skills model trained on one is refused (`contract`). Version 5 is the detector's median hold
+# (`Detector._steady`). The band guard after it (a release must also leave `hold_band`) moved no event in the
+# 180 recorded demos, so it kept 5: a detector change that moves no demo cut raises only
+# `RUN_LABEL_VERSION`, which a skills build with runs records, since it can still move their labels.
+CUT_RULES_VERSION = 5
+# Raise with any change to how `label_run` labels a run's frames, to what `build.run_skills` gives it, or to how
+# the grasp detector (`grasp.detector`) finds events from the same thresholds, which can move a run's labels
+# without moving any demo's cut: a skills build that takes runs records it (`data.build_inputs`), so one
+# labelled under other rules is stale, and a skills model trained on one is refused (`contract`). Each run's
+# run.json records it too, beside the thresholds' versions. A demos-only build doesn't record it.
+# 1 feeds Teleop frames and the Autonomous frames the live detector sees (the model drove or waited on),
+# through `grasp.replay.LiveFeed`: on the live clock (nothing for the first frame after a handback), and
+# hearing a Pause and Resume taken in one tick.
+RUN_LABEL_VERSION = 1
 LIFT_DEG = 4.0  # shoulder_lift travel after the close that counts as the block leaving the mat
 WIDEST_WITHIN_S = 2.0  # the widest opening is looked for this long after the release
 MIN_SPAN_S = 0.5  # a skill's shortest span in any demo
@@ -131,10 +145,18 @@ def gripper_hash(gripper) -> str:
     return hashlib.sha256(fields.encode()).hexdigest()
 
 
-def contract(skills: tuple[Skill, ...], gripper) -> dict:
-    """What a skills model is tied to at runtime: each skill's name and prompt, in order, and the
-    `[gripper]` thresholds whose events switch them. A skills build records it in build.json."""
-    return {"skills": [{"name": s.name, "prompt": s.prompt} for s in skills], "gripper_sha256": gripper_hash(gripper)}
+def contract(skills: tuple[Skill, ...], gripper, runs: bool = False) -> dict:
+    """What decides when a skills model's skills switch, and so what it is checked against at runtime
+    (`commands.policy.require_skills_contract`): each skill as `Skill.record` gives it (name, prompt,
+    from, to and handover), in order; the `[gripper]` thresholds whose events cut the demos and switch
+    the skills, by `gripper_hash`; the cut rules (CUT_RULES_VERSION); and, for a build that takes runs
+    (`runs`), how their frames were labelled, by `label_run` and the detector (RUN_LABEL_VERSION). A
+    skills build records exactly this in build.json's inputs (`data.build_inputs`), so the two can't drift."""
+    out = {"skills": [s.record() for s in skills], "gripper_sha256": gripper_hash(gripper),
+           "cut_rules": CUT_RULES_VERSION}
+    if runs:
+        out["run_labels"] = RUN_LABEL_VERSION
+    return out
 
 
 def state_feature(skills: tuple[Skill, ...]) -> dict:
@@ -223,7 +245,9 @@ def spans(skills: tuple[Skill, ...], at: dict[str, int], fps: float, length: int
 
 
 def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fps: float, thresholds,
-              scripted: np.ndarray, told: np.ndarray | None = None, teleop: np.ndarray | None = None) -> np.ndarray:
+              scripted: np.ndarray, told: np.ndarray | None = None, teleop: np.ndarray | None = None,
+              fed: np.ndarray | None = None, drove: np.ndarray | None = None,
+              handbacks: np.ndarray | None = None) -> np.ndarray:
     """Each frame's skill, as an index in `skills`, for one attempt of a run, or -1 for a frame in none:
     what happened, found as the runtime finds it (`policy.skills.SkillSequencer` over the perception).
 
@@ -241,51 +265,68 @@ def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fp
     release, what was held or let go was undone, and the replay starts again on the first skill, as the
     sequencer does.
 
+    `fed` is, per frame, whether to replay it: an Autonomous frame the model drove or waited on, which the
+    live detector sees, or a Teleop frame, which it doesn't but the replay feeds on purpose (above). A frame neither scripted nor fed (Paused, Handover, a layer's hold) isn't
+    replayed either: it keeps the current skill, and the next frame fed tells the detector the arm was held
+    (`resumed(False)`), as the perception is told after a plain pause, unless a script or a person moved it
+    since, which wins. `drove` is, per frame fed, whether the model drove it rather than waited, which only
+    the stuck rules read. `handbacks` marks the frames before which a Pause and Resume came in one tick
+    (`analysis.Attempt.handbacks`): the detector is told the arm was held there too, as the perception was.
+    The detector is fed through `grasp.replay.LiveFeed`, on the perception's clock: 1/fps per frame fed, and
+    nothing for the first after a handback. Without `fed`, every frame not scripted is fed; without `drove`,
+    every frame fed was driven.
+
     `told` is, per frame, the skill a skills model was told to do (control.skill, mapped onto `skills`),
     -1 where it wasn't driving: it labels those frames, and the replay labels the rest. Last, each skill's
     `to` bound applies, from the events of the replay its frame belongs to: a frame past it is in no skill,
     as in a demo, where the return to rest after a place that ends at the widest opening is in none. A
     bound whose event didn't happen doesn't apply."""
-    from so_101.grasp.detector import Detector
+    from so_101.grasp.replay import LiveFeed
 
     labels = np.zeros(len(state), dtype=np.int8)
     replays = []  # (first frame, one past the last, closes, first carry and release) of each replay
     current, start, closes, found = 0, 0, [], {}
-    detector = Detector(thresholds)
-    gap = handback = False  # frames since the last one fed weren't fed; a script or a person had the arm
+    feed = LiveFeed(thresholds, fps)
+    after_person = False  # the frame fed last was a person's in Teleop: the next of the model's is a handback
     # While a person in Teleop has a carried block: the replay as it was before their first frame with it,
     # and that stretch's first frame, to roll back to if they re-grip it (`_regripped`).
     saved: tuple | None = None
     for i, row in enumerate(state):
         person = teleop is not None and bool(teleop[i])
         if saved is not None and not person:
-            detector, current, closes, found = _regripped(saved, detector, current, closes, found, state[i - 1],
-                                                          names, thresholds, labels, i)
+            feed, current, closes, found = _regripped(saved, feed, current, closes, found, state[i - 1],
+                                                      names, thresholds, labels, i)
             saved = None
+        if handbacks is not None and handbacks[i]:
+            feed.handback(False)
         if scripted[i]:
-            gap = handback = True
+            feed.handback(True)
             labels[i] = current
             continue
-        if person and saved is None and detector.carried and not detector.released:
-            saved = (copy.deepcopy(detector), current, list(closes), dict(found), i)
+        if fed is not None and not fed[i]:
+            feed.handback(False)
+            labels[i] = current
+            continue
+        if person and saved is None and feed.detector.carried and not feed.detector.released:
+            saved = (copy.deepcopy(feed), current, list(closes), dict(found), i)
         pose = dict(zip(names, map(float, row), strict=True))
-        if gap or (handback and not person):
-            detector.resumed(True, pose)
-            gap, handback = False, person
-            if not (detector.carried or detector.released) and (current or found):
-                replays.append((start, i, closes, found))
-                current, start, closes, found = 0, i, [], {}
-        for signal in detector.step(i / fps, pose, True):
+        if after_person and not person:
+            feed.handback(True)
+        after_person = person
+        if feed.resume(pose) and not (feed.detector.carried or feed.detector.released) and (current or found):
+            replays.append((start, i, closes, found))  # what was held or let go was undone: start again
+            current, start, closes, found = 0, i, [], {}
+        signals = feed.step(pose, True if drove is None else bool(drove[i]))
+        for signal in signals:
             if signal.kind == "close":
                 closes.append(i - start)
             elif signal.kind in ("carry", "release") and signal.kind not in found:
                 found[signal.kind] = i - start
             if current + 1 < len(skills) and signal.kind == skills[current + 1].handover:
                 current += 1
-        handback |= person
         labels[i] = current
     if saved is not None:
-        detector, current, closes, found = _regripped(saved, detector, current, closes, found, state[-1],
+        feed, current, closes, found = _regripped(saved, feed, current, closes, found, state[-1],
                                                       names, thresholds, labels, len(state))
     replays.append((start, len(state), closes, found))
     if told is not None:
@@ -301,20 +342,20 @@ def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fp
     return labels
 
 
-def _regripped(saved: tuple, detector, current: int, closes: list, found: dict, last: np.ndarray, names: list[str],
+def _regripped(saved: tuple, feed, current: int, closes: list, found: dict, last: np.ndarray, names: list[str],
                thresholds, labels: np.ndarray, end: int):
     """At the end of a person's Teleop stretch that began with a carried block: if a release happened in it
     and the gripper is back in the hold band by its last frame (`last`), on a block, not shut as at rest,
     the person re-gripped the block. The replay
     goes back to `saved`, and the stretch's frames take the skill it was on then. Returns the replay's
-    detector, skill, closes and events, rolled back or not."""
+    feed (`grasp.replay.LiveFeed`), skill, closes and events, rolled back or not."""
     before, skill, kept_closes, kept_found, first = saved
     low, high = thresholds.gripper.hold_band
     holding = low <= float(last[names.index("gripper.pos")]) <= high
-    if detector.released and holding:
+    if feed.detector.released and holding:
         labels[first:end] = skill
         return before, skill, kept_closes, kept_found
-    return detector, current, closes, found
+    return feed, current, closes, found
 
 
 @dataclass(frozen=True)

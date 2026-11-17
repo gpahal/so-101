@@ -9,6 +9,9 @@ images it carries, in order (`describe`), and labels each one (`label`).
 
 import re
 
+# The tasks.toml task this prompt, its moments and its categories describe. The supervisor runs only on
+# it (`check.check_supervisor`), and `so101-failbench` reads only its runs.
+TASK_NAME = "block-container"
 TASK = "Pick up the red block and put it in the cylindrical container"
 
 # When the frame was taken, in the words the model sees. The controller always knows which of these it

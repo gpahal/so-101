@@ -40,24 +40,30 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
 - **`Output`**, returned by `step`: `action` (the model's action when it reached the arm, else None),
   `driver` (`POLICY`, `WAITING` when the model sent nothing, `PLAYBACK` or `HOLD` when a layer drove),
   `signals` (the perception's events this tick), `readings` (the perception's state: policy seconds,
-  rules near firing, closes, regrasps, carried, released, fired) and `asks` (an `Ask(kind, text)` when a layer
+  closes, regrasps, carried, released, fired) and `asks` (an `Ask(kind, text)` when a layer
   wants a person, else None: `kind` is `stuck`, `done` or `layer`, and the loop logs it as `ask` in the
   `state` event for `policy_asked`) and `skill` (the skill the model is conditioned on, or None for no change: the controller keeps the
   last one for the attempt, so a playback, a hold or a person's Teleop is recorded under the skill it
-  interrupted). Outputs flow up the stack, so a layer reads the signals of the one below and adds its own.
+  interrupted) and `goal_frame` (on a `PLAYBACK` tick, the episode frame, as `Tick.frame` numbered it,
+  whose measured pose is this tick's goal, else None: the controller drops every moment after that frame
+  from the history a person's Rewind plays back, so a Rewind never replays what the playback undid, even
+  when the path turned back on itself and one slow tick passed several moments). Outputs flow up the stack, so a layer reads the signals of the one below and adds its own.
 - **`Handback(why, moved)`**: `why` is `START` (the stack's first handback in an attempt, even one a person
   began in Teleop), `PERSON` (a person resumed) or `LAYER` (a layer above gave the arm back after a
   playback or a hold); `moved` is whether the arm may have moved while someone else had it. The controller
   sets `moved` when the attempt had Teleop, Rewind or Returning ticks, or a layer's playback, since the
-  stack last drove. A layer's playback takes back the controller's history of the motion it undid, and its
+  stack last drove, and clears it once the model drives again after a playback, since the layer already
+  told the stack below with its own `Handback(LAYER, moved=True)`: a plain Pause and Resume after that
+  says nothing moved. A playback that stopped short holds instead, so its next handback still says moved. A layer's playback takes back the controller's history of the motion it undid, and its
   hold adds none, so a person's Rewind afterwards never replays either.
 - **`Conditioning(prompt, skills, index)`**: what the model is told. Only `EngineDriver` acts on it: it
   sets the engine's task (`set_task`, which pi0.5 reads), adds the one-hot `observation.environment_state`
   to the frame it builds (which ACT reads), and, while the model drives, clears the queued actions, so no
   action for the old skill reaches the arm.
 - **`LayerContext`**, the same for every layer: `event(type, **fields)` (the run's event log), `clock`,
-  `grasp` (the gripper and rule thresholds, `grasp/grasp.toml`) and `program` (the supervisor's program,
-  `supervisor/program.toml`, whose `watch.near` the perception reads).
+  `grasp` (the gripper and rule thresholds, `grasp/grasp.toml`), `program` (the supervisor's program,
+  `supervisor/program.toml`, which loads only when the supervisor runs, else None) and `fps` (the task's, at which
+  each tick the model drove counts as 1/fps of its time).
 - A layer's own exceptions are its own (`Layer.safely`): logged once as an `error` event, announced once
   through `maintain`, and the layer becomes a pass-through. `safely` wraps only the layer's own logic:
   every call down the stack runs outside it, so an exception from the arm or the model reaches the loop
@@ -71,10 +77,14 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
 - **`Perception`** (`policy/perception.py`): one detector (`grasp/detector.py`, a pure module that
   `so101 skills`, `build --skills` and `so101-failbench candidates` run too) per attempt, fed on each tick
   the model drove,
-  with the policy's own seconds. Logs a `grasp` event for each close, carry, regrasp and release, and a
+  with the policy's own seconds: the ticks the model drove, counted at the task's fps, the first after a
+  handback adding nothing. It runs `grasp.replay.LiveFeed`, the feed the offline replays run over recorded
+  frames (which LeRobot stamps at frame_index / fps), so the live and offline clocks agree at any loop
+  speed. A loop slower than the fps doesn't stretch a rule: at 25 Hz with a 30 fps task, `no_carry`'s 14 s
+  is 420 ticks, live and replayed, where summing real gaps fired it at 350. Logs a `grasp` event for each close, carry, regrasp and release, and a
   `rule` event when a stuck rule fires. After a handback, on the next tick it feeds, it calls
   `Detector.resumed(moved, pose)`: the detector's timers start again, and after a move with the jaws open
-  it forgets the open close, the carry and the release, so a close a playback undid is no regrasp and a
+  (at `closed_below` or above, or, after a carry or release, above `hold_band`'s top) it forgets the open close, the carry and the release, so a close a playback undid is no regrasp and a
   second grasp is seen in full; forgetting a carry or release also gives `no_carry` its full 14 s of
   driving again, from the handback, since the time spent carrying was never counted. The detector (`grasp/detector.py`) counts hover and frozen time only on
   ticks the model's action reached the arm.
@@ -88,7 +98,8 @@ Supervisor     with [supervisor] mode shadow or act: vision checks, playback, ho
   undid a grasp, your own Rewind, and a block let go outside the jar and rewound to before the close.
 - **`Supervisor`** (`supervisor/layer.py`): as before, but reads the perception's signals and readings
   instead of keeping its own detector, hands the arm back with `Handback(LAYER, moved=True)` after a
-  playback and `moved=False` after a hold, and returns its requests for a person in `Output.asks`.
+  playback that arrives (one that stops short hands nothing back: it holds and asks for a person) and
+  `moved=False` after a hold, and returns its requests for a person in `Output.asks`.
 
 `policy/stack.py`'s `build(driver, ctx, skills=, judges=, mode=, cameras=)` composes them in this order and
 is the only place that knows the order. `control/main.py` calls it.
@@ -114,7 +125,8 @@ Every `serve` and `run` recording gets two columns:
 `build --skills --with corrections,policy-successes,...` cuts runs as `build --with` does, then splits each
 cut where the skill changes, by what happened (`build.run_skills`, `skills.label_run`): the attempt's joint
 readings go through one detector as the perception's do, frames a script or a layer's playback moved aren't
-replayed, Teleop frames are (a re-grip in Teleop, the jaws back on the block when it ends, is rolled
+replayed, nor are Paused, Handover and a layer's hold, which the perception never sees (the detector's clock
+counts only the frames it's fed), Teleop frames are (a re-grip in Teleop, the jaws back on the block when it ends, is rolled
 back to place), the sequencer's handback rule applies after each,
 each skill's `to` bound applies, and only the frames a skills model drove keep the skill it was told
 (`control.skill`). So a person's correction is cut by what the arm did, whatever the model was told, and a

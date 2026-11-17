@@ -12,7 +12,8 @@ tick it feeds after the handback, the perception tells its detector the arm move
 (`Detector.resumed`), and the Output's readings say whether a carry or a release still stands. If
 neither does, whatever the current skill, the sequencer starts again on the first skill, as for a
 missed grasp: a block dropped outside the jar and rewound to before the close is picked again. With
-the jaws closed after the move the detector keeps what it had, so a block still held keeps its skill,
+the jaws closed after the move (inside `hold_band` once a block was carried or let go, `Detector.resumed`)
+the detector keeps what it had, so a block still held keeps its skill,
 and a block a person closed the jaws on counts as a close, whose carry switches to the next skill as
 usual. A person who teleoperates after a real release, with the jaws open, also sends the attempt back
 to the first skill: the perception can't tell a release from a block put back. The model drove that

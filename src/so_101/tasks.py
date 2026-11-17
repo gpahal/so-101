@@ -70,8 +70,10 @@ class Task:
         folder = config_path().parent / "outputs" / "policies" / self.policy_for("act", skills)
         return folder.with_name(f"{folder.name}@{revision.replace('/', '_')}") if revision else folder
 
-    def download_policy(self, revision: str | None, skills: bool = False) -> Path:
-        """Download the checkpoint and make its config loadable by the installed LeRobot.
+    def download_policy(self, revision: str | None, skills: bool = False, *, folder: str | None) -> Path:
+        """Download the checkpoint at `revision` (a run passes the commit it checked, `policy_commit`) and make its
+        config loadable by the installed LeRobot. It goes in the folder of `folder`, the revision the user asked
+        for (None for main, `local_policy_dir`), so each new commit doesn't leave another copy of the model.
 
         Checkpoints saved by newer LeRobot versions can carry config fields this version doesn't
         know, which LeRobot rejects. Fields left unset (null) are dropped; anything else is an error.
@@ -85,7 +87,8 @@ class Task:
         # Training checkpoints are several times the size of the final model, and running doesn't use them.
         path = Path(
             snapshot_download(
-                self.policy_for("act", skills), revision=revision, local_dir=self.local_policy_dir(revision, skills),
+                self.policy_for("act", skills), revision=revision,
+                local_dir=self.local_policy_dir(folder, skills),
                 ignore_patterns=["checkpoints/**"],
             )
         )
@@ -101,6 +104,23 @@ class Task:
         if unknown:
             config_file.write_text(json.dumps({k: v for k, v in config.items() if k in known}, indent=4))
         return path
+
+    def policy_commit(self, revision: str | None, policy_type: str, skills: bool = False) -> str:
+        """The Hub commit `revision` (main without one) of the model names now: a run reads the model's config,
+        its skills build and its checkpoint at this one commit, so a push to main meanwhile can't mix two models."""
+        from huggingface_hub import HfApi
+        from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
+
+        repo = self.policy_for(policy_type, skills)
+        try:
+            return HfApi().model_info(repo, revision=revision or "main").sha
+        except RepositoryNotFoundError as e:
+            raise ConfigError(
+                f"There's no model {repo} on the Hub, or your login can't see it. Train it first: "
+                f"uv run so101 train {self.name} --policy {policy_type}{' --skills' if skills else ''}"
+            ) from e
+        except RevisionNotFoundError as e:
+            raise ConfigError(f"{repo} has no revision {revision!r}.") from e
 
     def policy_config(self, revision: str | None, policy_type: str, skills: bool = False) -> dict:
         """The checkpoint's config.json."""

@@ -9,6 +9,7 @@ program's own; the tests check what the rules do, not that the numbers are right
 import dataclasses
 import os
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import Future
@@ -26,9 +27,12 @@ from so_101.policy import stack
 from so_101.policy.base import PERSON, PLAYBACK, POLICY, START, WAITING, Handback, Health, LayerContext, Output, Tick
 from so_101.grasp import thresholds as T
 from so_101.grasp.detector import ARM, GRIPPER, Detector
+from so_101.control.rewind import REWIND_SETTLE_S
 
 FPS = 30
 PROGRAM = P.load()
+FIRST_S, SECOND_S = PROGRAM.miss_rewind_s[:2]  # the first two miss playbacks' seconds
+MISS_1 = f"miss 1: rewind {FIRST_S:g} s and retry"
 GRASP = T.load()
 NAMES = [*ARM, GRIPPER]
 
@@ -110,6 +114,10 @@ class ProgramTest(unittest.TestCase):
                                                        "watch.lookback_s.*4 s"),
             "a first playback that can't reach the close": (
                 text.replace("after_close_answer_s = 1.5", "after_close_answer_s = 3.0"), "miss_rewind_s"),
+            "a first playback that reaches the close with no margin": (
+                text.replace("miss_rewind_s = [3.0, 5.0]", "miss_rewind_s = [2.5, 5.0]"), r"miss_rewind_s\[0\] is 2.5 s"),
+            "a later playback that can't reach the close": (
+                text.replace("miss_rewind_s = [3.0, 5.0]", "miss_rewind_s = [3.0, 2.0]"), r"miss_rewind_s\[1\] is 2 s"),
             "no hold deadline": (text.replace("hold_deadline_s = 5.0", ""), "timing.hold_deadline_s"),
         }
         with tempfile.TemporaryDirectory() as folder:
@@ -172,6 +180,41 @@ class DetectorTest(unittest.TestCase):
         trace = grasp().to(1, gripper=10).to(20)  # closes on the way back to rest, then sits
         self.assertEqual(kinds(trace.run(Detector(GRASP))), ["close", "carry", "release"])
 
+    def test_jaws_that_open_slowly_and_only_a_little_still_release(self) -> None:
+        # A recorded demo's release: held at 18.9, opened to 23.8 over 0.3 s, the block slid into the jar,
+        # and the jaws closed again 0.4 s later. The opening's first readings are still in the hold band.
+        trace = Trace().to(3, pan=20).to(1, gripper=18.9).to(2, elbow=40).to(2, pan=40)
+        trace.to(0.3, gripper=23.8).to(0.4).to(0.4, gripper=1)
+        signals = trace.run(Detector(GRASP))
+        self.assertEqual(kinds(signals), ["close", "carry", "release"])
+        self.assertEqual(signals[-1].detail["held_at"], 18.9, "where it held, not where the opening passed")
+        self.assertLess(signals[-1].detail["gripper"], 23.8, "seen as the jaws passed 4 over the hold")
+
+    def test_a_block_settling_in_the_jaws_is_not_a_release(self) -> None:
+        # The reading creeps up 4.1 over 6 s with the block still held, all of it inside the hold band.
+        settled = Trace().to(3, pan=20).to(1, gripper=17.5).to(2, elbow=40).to(6, gripper=21.6, pan=40)
+        detector = Detector(GRASP)
+        self.assertEqual(kinds(settled.run(detector)), ["close", "carry"])
+        t0 = len(settled.poses) / FPS
+        opening = Trace(settled.poses[-1]).to(0.3, gripper=27)
+        [release] = [s for i, p in enumerate(opening.poses[1:], start=1) for s in detector.step(t0 + i / FPS, p)]
+        self.assertEqual(release.kind, "release")
+        self.assertGreater(release.detail["held_at"], 20.5, "the hold followed the block as it settled")
+
+    def test_a_release_must_leave_the_hold_band(self) -> None:
+        # Carried at 17.0, the reading rises fast enough that the hold stays at 17.0, then stays put for 3 s.
+        # To 21.5 it is more than release_above over the hold but still inside the band, where a held block
+        # keeps the gripper: no release. To 22.5 it is past the band's top as well: a release.
+        for seconds in (0.3, 1, 2):
+            for to, expected in ((21.5, ["close", "carry"]), (22.5, ["close", "carry", "release"])):
+                with self.subTest(seconds=seconds, to=to):
+                    trace = Trace().to(3, pan=20).to(1, gripper=17.0).to(2, elbow=40).to(2, pan=40)
+                    trace.to(seconds, gripper=to).to(3)
+                    signals = trace.run(Detector(GRASP))
+                    self.assertEqual(kinds(signals), expected)
+                    if expected[-1] == "release":
+                        self.assertEqual(signals[-1].detail["held_at"], 17.0)
+
     def test_a_resume_restarts_the_running_timers(self) -> None:
         detector = Detector(GRASP)
         trace = Trace().to(2, pan=20).to(3)
@@ -208,6 +251,38 @@ class DetectorTest(unittest.TestCase):
         for i, (p, drove) in enumerate(zip(again.poses, again.drove, strict=True)):
             out += detector.step(t0 + i / FPS, p, drove)
         self.assertEqual(kinds(out), ["close", "carry", "release", "close", "carry", "release"])
+
+    def test_a_narrow_release_then_a_handback_above_the_band_re_arms(self) -> None:
+        # The council's case: a release at 23.8, under closed_below (25), then a person undoes it and hands the
+        # arm back with the jaws still at 23.8. Above the hold band no block is held, so the next grasp counts.
+        detector = Detector(GRASP)
+        narrow = Trace().to(3, pan=20).to(1, gripper=18.9).to(2, elbow=40).to(2, pan=40).to(0.3, gripper=23.8)
+        out = narrow.run(detector)
+        self.assertEqual(kinds(out), ["close", "carry", "release"])
+        back = pose(gripper=23.8, pan=20.0)
+        detector.resumed(True, back)
+        self.assertFalse(detector.carried or detector.released)
+        again = Trace(back).to(1, gripper=40).to(1, gripper=18).to(2, elbow=40).to(1, gripper=40)
+        t0 = len(narrow.poses) / FPS
+        for i, p in enumerate(again.poses):
+            out += detector.step(t0 + i / FPS, p)
+        self.assertEqual(kinds(out), ["close", "carry", "release", "close", "carry", "release"])
+
+    def test_a_carry_then_a_handback_above_the_band_undoes_it(self) -> None:
+        detector = Detector(GRASP)
+        carried = Trace().to(2, pan=20).to(1, gripper=18).to(2, elbow=40)
+        self.assertEqual(kinds(carried.run(detector)), ["close", "carry"])
+        before = detector.policy_s
+        detector.resumed(True, pose(gripper=23.0, elbow=40.0, pan=20.0))  # a person set the block down, jaws ajar
+        self.assertFalse(detector.carried)
+        self.assertEqual(detector.progress()["no_carry"], 0.0, "no_carry counts from the handback")
+        self.assertGreater(before, 0.0)
+
+    def test_a_carry_then_a_handback_inside_the_band_keeps_it(self) -> None:
+        detector = Detector(GRASP)
+        Trace().to(2, pan=20).to(1, gripper=18).to(2, elbow=40).run(detector)
+        detector.resumed(True, pose(gripper=20.0, elbow=40.0, pan=20.0))  # still holding the block
+        self.assertTrue(detector.carried)
 
     def test_undoing_a_carry_gives_no_carry_its_full_time_again(self) -> None:
         cases = {
@@ -265,10 +340,12 @@ class DetectorTest(unittest.TestCase):
             out += detector.step(t0 + i / FPS, closed)
         self.assertEqual(kinds(out), ["close"])
 
-    def test_progress_tells_the_watch_when_a_rule_is_near(self) -> None:
+    def test_progress_tells_how_near_each_rule_is_to_firing(self) -> None:
         detector = Detector(GRASP)
         Trace().to(2, pan=20).to(3).run(detector)
-        self.assertEqual(detector.near(PROGRAM.watch.near), ["frozen"])
+        progress = detector.progress()
+        self.assertGreaterEqual(progress["frozen"], 0.7)
+        self.assertEqual([name for name, value in progress.items() if value >= 0.7], ["frozen"])
 
 
 class FakeModel:
@@ -280,6 +357,24 @@ class FakeModel:
     def predict(self, images, moment):
         self.asked.append((moment, [name for name, _ in images]))
         return {"p_wrong": self.answers.get(moment, 0.05), "category": "none", "cost_usd": self.cost, "latency_s": 0.1}
+
+
+class ChatText:
+    """A chat judge that answers with `text` through the real answer parser, as OpenRouterChat does."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def predict(self, images, moment):
+        from so_101.vision import providers
+        return {**providers.parse_answer(self.text), "cost_usd": 0.001, "latency_s": 0.1}
+
+
+# Chat answers the supervisor must take as no answer: a NaN once clamped to 0.0, a sure ok, and an
+# answer whose wrong contradicts its p_wrong.
+NO_ANSWERS = {"NaN": '{"wrong": false, "p_wrong": NaN, "category": "none", "observation": ""}',
+              "-Infinity": '{"wrong": false, "p_wrong": -Infinity, "category": "none", "observation": ""}',
+              "contradictory": '{"wrong": true, "p_wrong": 0.02, "category": "none", "observation": ""}'}
 
 
 class FakeEscalation:
@@ -383,8 +478,12 @@ class JudgesTest(unittest.TestCase):
         j = judges({}, program=program)
         j._adapters["jev"].cost = None  # the provider reported no usage
         answers = [j.ask("jev", [("top", b"x")], "end") for _ in range(4)]
-        self.assertEqual([a.error is None for a in answers], [True, True, True, False])
-        self.assertAlmostEqual(j.spent, 3 * estimate)
+        # One budget rule with failbench's (`vision.budget.Budget`): a call starts only if its estimate fits under
+        # the cap. The third call's would take the run to 3 estimates, past 2.5, so it never starts; under the old
+        # rule, which let a call start while the run had spent under the cap, it did, and this read [True, True,
+        # True, False] and 3 estimates spent.
+        self.assertEqual([a.error is None for a in answers], [True, True, False, False])
+        self.assertAlmostEqual(j.spent, 2 * estimate)
 
         class Failing:
             def predict(self, images, moment):
@@ -393,6 +492,108 @@ class JudgesTest(unittest.TestCase):
         j = J.Judges(program, adapters={"jev": Failing()}, pool=Pool())
         j.ask("jev", [("top", b"x")], "end")
         self.assertAlmostEqual(j.spent, estimate, msg="a failed call may still have been billed")
+
+    def test_a_call_whose_estimate_would_pass_the_cap_never_starts(self) -> None:
+        program = dataclasses.replace(PROGRAM, judges=dataclasses.replace(PROGRAM.judges, max_cost_usd=2.0))
+        called = []
+
+        class Counting:
+            def predict(self, images, moment):
+                called.append(moment)
+                return {"p_wrong": 0.05, "category": "none", "cost_usd": 0.02}
+
+        j = J.Judges(program, adapters={"jev": Counting()}, pool=Pool())
+        j.budget.spent = 1.999
+        estimate = 0.02
+        with mock.patch.dict(j.models, {"jev": dataclasses.replace(j.models["jev"], estimate=estimate)}):
+            verdict = j.ask("jev", [("top", b"x")], "end")
+        self.assertEqual(verdict.error, "the run has spent its $2 on checks (max_cost_usd)")
+        self.assertEqual(called, [], "the call never started")
+        self.assertAlmostEqual(j.spent, 1.999, msg="nothing reserved")
+        self.assertEqual(j.out_of_budget(), "the run has spent its $2 on checks (max_cost_usd)")
+
+    def test_calls_out_together_can_t_all_pass_the_cost_cap(self) -> None:
+        from so_101.vision.models import MODELS
+
+        estimate = MODELS["jev"].estimate
+        program = dataclasses.replace(PROGRAM, judges=dataclasses.replace(PROGRAM.judges, max_cost_usd=estimate))
+        started, release = threading.Barrier(4), threading.Event()
+
+        class Slow:
+            calls = 0
+
+            def predict(self, images, moment):
+                Slow.calls += 1
+                release.wait(5)  # still out while the other three ask
+                return {"p_wrong": 0.05, "category": "none", "cost_usd": estimate}
+
+        j = J.Judges(program, adapters={"jev": Slow()}, pool=Pool())
+        answers = []
+
+        def ask() -> None:
+            started.wait(5)
+            answers.append(j.ask("jev", [("top", b"x")], "end"))
+
+        threads = [threading.Thread(target=ask) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 5
+        while len(answers) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(Slow.calls, 1, "only one call fits the cap")
+        self.assertEqual(sorted(a.error is None for a in answers), [False, False, False, True])
+        self.assertTrue(all("max_cost_usd" in a.error for a in answers if a.error))
+        self.assertAlmostEqual(j.spent, estimate)
+
+    def test_a_call_is_settled_to_what_it_cost_and_an_escalation_that_raises_keeps_its_estimate(self) -> None:
+        from so_101.vision import providers
+        from so_101.vision.models import MODELS
+
+        j = judges({})
+        j._adapters["jev"].cost = 0.0001
+        j.ask("jev", [("top", b"x")], "end")
+        self.assertAlmostEqual(j.spent, 0.0001, msg="the reserved estimate is replaced by the cost reported")
+
+        j = J.Judges(PROGRAM, adapters={"claude-opus-5.5": None}, pool=Pool())
+        with mock.patch.object(providers, "openrouter_json", side_effect=TimeoutError("no answer")):
+            answer = j.escalate(b"sheet", "log")
+        self.assertIn("TimeoutError", answer["error"])
+        self.assertAlmostEqual(j.spent, MODELS["claude-opus-5.5"].estimate, msg="a failed call may still have been billed")
+
+    def test_an_escalation_without_usage_keeps_its_estimate(self) -> None:
+        import sys
+        import types
+
+        from so_101.vision import providers
+        from so_101.vision.models import MODELS
+
+        estimate = MODELS["claude-opus-5.5"].estimate
+        j = J.Judges(PROGRAM, adapters={"claude-opus-5.5": None}, pool=Pool())
+        answer = {"choice": next(iter(J.CHOICES)), "reason": "r", "observation": "o"}
+        with mock.patch.object(providers, "openrouter_json", return_value=(answer, None)):
+            j.escalate(b"sheet", "log")
+        self.assertAlmostEqual(j.spent, estimate, msg="a reply without usage may still have been billed")
+
+        class Stand:
+            def escalate(self, sheet, log):
+                return {"choice": "x"}  # no cost_usd
+
+        j = J.Judges(PROGRAM, adapters={"claude-opus-5.5": Stand()}, pool=Pool())
+        j.escalate(b"sheet", "log")
+        self.assertAlmostEqual(j.spent, estimate)
+
+        # The call itself: a reply whose usage is missing has no cost, not $0.
+        reply = types.SimpleNamespace(usage=None, choices=[types.SimpleNamespace(
+            message=types.SimpleNamespace(content="{}"))])
+        client = mock.Mock()
+        client.chat.completions.create.return_value = reply
+        fake = types.SimpleNamespace(OpenAI=lambda **kw: client)
+        with mock.patch.dict(sys.modules, {"openai": fake}), mock.patch.dict(os.environ, {MODELS["claude-opus-5.5"].env: "k"}):
+            _, cost = providers.openrouter_json(MODELS["claude-opus-5.5"], "s", b"x", "t", "n", {})
+        self.assertIsNone(cost)
 
     def test_the_judges_own_adapters_time_out_when_the_layer_stops_waiting(self) -> None:
         from test_failbench import SDKs
@@ -413,6 +614,16 @@ class JudgesTest(unittest.TestCase):
         clients = [kw for name, kw in sdks.calls if name in ("typesafe.Client", "openai.OpenAI")]
         self.assertEqual([kw.get("timeout") for kw in clients], [None, PROGRAM.judges.answer_within_s,
                                                                 PROGRAM.judges.answer_within_s])
+
+    def test_an_answer_with_no_usable_probability_is_no_answer_and_says_why(self) -> None:
+        for name, text in NO_ANSWERS.items():
+            with self.subTest(name):
+                j = judges({}, models={"gemini-3.8-flash": ChatText(text)})
+                verdict = j.ask("gemini-3.8-flash", [("top", b"x")], "stuck")
+                self.assertIsNone(verdict.p_wrong)
+                self.assertIsNone(verdict.call(PROGRAM))
+                if name == "contradictory":
+                    self.assertIn("contradicts", verdict.error)
 
     def test_a_missing_judge_answers_with_an_error_not_an_exception(self) -> None:
         j = J.Judges(PROGRAM, adapters={}, pool=Pool())
@@ -493,7 +704,10 @@ class Harness:
     layer last sent it. When the layer asks for a person, the harness pauses it, as serve does."""
 
     def __init__(self, mode: str, decision: dict[str, float], chat=None, pool=None, program=PROGRAM,
-                 models: dict | None = None) -> None:
+                 models: dict | None = None, tick_s: float = 1 / FPS) -> None:
+        """`tick_s` is how far the loop's clock moves each tick: more than 1/FPS is a loop slower than the task's
+        fps."""
+        self.tick_s = tick_s
         self.logged: list[dict] = []
         self.said: list[str] = []
         self.asked: list[str] = []
@@ -503,8 +717,9 @@ class Harness:
         self.now, self.frame, self.pose = 0.0, -1, pose()
         self.rest: dict | None = None  # where Tick.at_rest is true, within 1 deg
         self.ignore_asks = False  # step on after an ask, as if nobody paused
+        self.blocked = False  # something blocks the arm: it stays where it is instead of following the layer's goals
         ctx = LayerContext(lambda type_, **fields: self.logged.append({"type": type_, **fields}), lambda: self.now,
-                           GRASP, program)
+                           GRASP, program, FPS)
         self.layer = stack.build(self.driver, ctx, judges=self.judges, mode=mode, cameras=("top", "wrist"))
         self.layer.begin_episode(1)
         self.layer.run(Handback(START))
@@ -516,13 +731,13 @@ class Harness:
         i = 0
         while i < len(moves) and limit and not self.paused and not (until and until()):
             limit -= 1
-            self.now += 1 / FPS
+            self.now += self.tick_s
             self.frame += 1
             self.said.extend(self.layer.maintain())
             if self.layer.doing == "pass":
                 p, self.driver.drove = moves[i]
             else:
-                p = self.robot.goals[-1] if self.robot.goals else self.pose
+                p = self.robot.goals[-1] if self.robot.goals and not self.blocked else self.pose
             steps = self.driver.steps
             rest = self.rest is not None and max(abs(p[k] - self.rest[k]) for k in p) <= 1.0
             out = self.layer.step(self.robot, Tick(self.now, self.frame, {**p, "top": FRAME, "wrist": FRAME}, dict(p),
@@ -589,7 +804,7 @@ class LayerTest(unittest.TestCase):
         h = Harness("shadow", {"after_close": 0.95})
         trace = miss()
         h.feed(trace)
-        self.assertEqual(h.decisions(), ["miss 1: rewind 2.5 s and retry"])
+        self.assertEqual(h.decisions(), [MISS_1])
         self.assertFalse(h.kinds("decision")[0]["acted"])
         self.assertEqual(h.driver.calls, ["run"], "never paused")
         self.assertEqual(h.driver.steps, len(trace.poses))
@@ -602,7 +817,7 @@ class LayerTest(unittest.TestCase):
         self.assertEqual(h.driver.calls, ["run", "pause", "run"])
         [rewind] = h.kinds("playback")
         self.assertLess(rewind["start_frame"], rewind["end_frame"])
-        self.assertAlmostEqual(rewind["seconds"], 2.5, delta=0.05)
+        self.assertAlmostEqual(rewind["seconds"], FIRST_S, delta=0.05)
         self.assertEqual(rewind["cause"], "arrived")
         self.assertEqual(h.robot.goals[-1][GRIPPER], 40.0, "back to before the close: the jaws open")
         self.assertTrue(any("missed grasp 1" in line for line in h.said))
@@ -614,13 +829,92 @@ class LayerTest(unittest.TestCase):
         out = h.layer.step(h.robot, Tick(h.now, h.frame, {**h.robot.goals[-1], "top": FRAME, "wrist": FRAME}, h.robot.goals[-1]))
         self.assertEqual((out.action, out.driver), (None, PLAYBACK))
 
+    def test_each_playback_tick_names_the_frame_its_goal_was_measured_in(self) -> None:
+        h = Harness("act", {"after_close": 0.95})
+        poses: dict[int, dict] = {}  # the pose measured in each frame the policy drove
+        h.feed(miss(), until=lambda: (poses.setdefault(h.frame, dict(h.pose)), h.rewinding())[1])
+        played = []
+        while h.rewinding():
+            h.now += 1 / FPS
+            h.frame += 1
+            p = h.robot.goals[-1] if h.robot.goals else h.pose
+            out = h.layer.step(h.robot, Tick(h.now, h.frame, {**p, "top": FRAME, "wrist": FRAME}, dict(p)))
+            self.assertEqual(out.driver, PLAYBACK)
+            self.assertIsNotNone(out.goal_frame)
+            self.assertEqual(h.robot.goals[-1], poses[out.goal_frame], "the goal is the pose measured in that frame")
+            played.append(out.goal_frame)
+        self.assertEqual(played, sorted(played, reverse=True), "newest first")
+        self.assertEqual(played[-1], h.kinds("playback")[0]["start_frame"])
+
+    def test_a_close_check_scheduled_before_a_pause_never_fires_after_resume(self) -> None:
+        h = Harness("act", {"after_close": 0.95})
+        h.feed(Trace().to(2, pan=20).to(0.5, gripper=10).to(0.2))  # closed, check not yet due
+        self.assertEqual(h.kinds("check"), [])
+        h.layer.pause()
+        h.pose = pose(gripper=40.0, pan=5.0)  # the person opened the jaws and moved the arm back
+        h.resume()
+        h.feed(h.here().to(4, pan=25))  # the model drives on, jaws open, with no new close
+        self.assertEqual(h.decisions(), [])
+        self.assertEqual([(c["moment"], c["stale"], c["sent"]) for c in h.kinds("check")],
+                         [("after_close", "paused_or_resumed", False)], "dropped at the pause, never sent")
+        self.assertEqual(h.robot.goals, [], "nothing played back")
+
+    def test_a_release_a_person_undid_is_no_longer_done(self) -> None:
+        h = Harness("act", {"after_release": 0.02}, chat={"after_release": 0.03})
+        h.rest = pose(gripper=40.0)
+        h.feed(grasp().to(2))
+        self.assertTrue(next(c for c in h.kinds("check") if c["moment"] == "after_release")["success"])
+        h.layer.pause()
+        h.pose = pose(gripper=40.0, pan=20.0)  # rewound to before the close
+        h.resume()
+        h.feed(h.here().to(2, pan=0).to(0.5))  # the model drives to rest without grasping
+        self.assertEqual(h.ask_kinds, [])
+
+    def test_a_pause_and_resume_that_moved_nothing_keeps_a_release_done(self) -> None:
+        h = Harness("act", {"after_release": 0.02}, chat={"after_release": 0.03})
+        h.rest = pose(gripper=40.0)
+        h.feed(grasp().to(2))
+        self.assertTrue(next(c for c in h.kinds("check") if c["moment"] == "after_release")["success"])
+        h.layer.pause()
+        h.layer.run(Handback(PERSON, moved=False))
+        h.feed(h.here().to(2, pan=0, elbow=0).to(0.5))
+        self.assertEqual(h.ask_kinds, ["done"])
+
+    def test_a_miss_answered_as_late_as_it_can_be_still_plays_back_to_open_jaws(self) -> None:
+        self.assert_latest_miss_reaches_open_jaws(1 / FPS)
+
+    def test_on_a_slow_loop_the_latest_miss_still_plays_back_to_open_jaws(self) -> None:
+        # The loop ticks at 25 Hz while the task's fps is 30. The perception's clock and the playback history
+        # both count each tick the model drove as 1/fps, so the reach guarantee (miss_rewind_s[0] = after_close_s
+        # + after_close_answer_s + REACH_MARGIN_S) holds in ticks, whatever the loop's real rate.
+        self.assert_latest_miss_reaches_open_jaws(1 / 25)
+
+    def assert_latest_miss_reaches_open_jaws(self, tick_s: float) -> None:
+        # The after_close verdict may come up to after_close_answer_s after the check was sent, which is up to a
+        # tick after it was due, and the playback starts a tick after the verdict: the first rung must still
+        # reach back to before the jaws began to close, or the retry starts from jaws already closed.
+        played = {}
+        for late in range(round(PROGRAM.after_close_answer_s * FPS) - 3, round(PROGRAM.after_close_answer_s * FPS) + 4):
+            pool = Pool(now=False)
+            h = Harness("act", {"after_close": 0.95}, pool=pool, tick_s=tick_s)
+            h.feed(Trace().to(2, pan=20).to(0.5, gripper=10).to(4.0), until=lambda pool=pool: bool(pool.waiting))
+            h.feed(_still(h.pose, late), limit=late)
+            pool.run()
+            h.feed(_still(h.pose, 1), limit=1)
+            h.through_playback()
+            if h.kinds("playback"):
+                played[late] = h.robot.goals[-1][GRIPPER]
+        self.assertTrue(played, "some verdict came in time")
+        self.assertLess(max(played), round(PROGRAM.after_close_answer_s * FPS) + 3, "and a later one was dropped")
+        self.assertGreaterEqual(played[max(played)], GRASP.gripper.closed_below + 10, "the jaws are open again")
+
     def test_the_second_miss_plays_back_further(self) -> None:
         h = Harness("act", {"after_close": 0.95})
         h.feed(miss(), until=h.rewinding)
         h.settle()
         h.feed(Trace().to(0.5, gripper=10).to(1.5), until=h.rewinding)  # closes on nothing again
         h.settle()
-        self.assertEqual([d.get("rewind_s") for d in h.kinds("decision")], [2.5, 5.0])
+        self.assertEqual([d.get("rewind_s") for d in h.kinds("decision")], [FIRST_S, SECOND_S])
 
     def test_an_ok_close_does_nothing(self) -> None:
         h = Harness("act", {"after_close": 0.05})
@@ -666,7 +960,7 @@ class LayerTest(unittest.TestCase):
             h.feed(h.here().to(1, pan=h.pose["shoulder_pan.pos"] + 12).to(0.5, gripper=10, pan=h.pose["shoulder_pan.pos"] + 15)
                    .to(1.5, pan=h.pose["shoulder_pan.pos"] + 22), until=lambda: h.rewinding() or h.holding())
             h.through_playback()
-        self.assertEqual(h.decisions()[:3], ["miss 1: rewind 2.5 s and retry", "miss 2: rewind 5 s and retry",
+        self.assertEqual(h.decisions()[:3], [MISS_1, f"miss 2: rewind {SECOND_S:g} s and retry",
                                              "hold: miss 3"])
         self.assertEqual([e["name"] for e in h.kinds("rule")], [], "no stuck rule fired first")
         self.assertEqual([e["grasp"] for e in h.kinds("grasp")], ["close"] * 3, "a close it undid is no regrasp")
@@ -695,7 +989,7 @@ class LayerTest(unittest.TestCase):
         h.feed(h.here().to(1, gripper=18).to(2, elbow=40).to(1, gripper=40).to(0.5))
         self.assertEqual([e["grasp"] for e in h.kinds("grasp")[start:]], ["close", "carry", "release"])
         self.assertEqual(h.kinds("grasp")[start]["close"], 2)
-        self.assertEqual(h.decisions(), ["miss 1: rewind 2.5 s and retry"])
+        self.assertEqual(h.decisions(), [MISS_1])
 
     def test_a_playback_never_goes_back_past_where_a_person_handed_the_arm_back(self) -> None:
         h = Harness("act", {"after_close": 0.95})
@@ -703,7 +997,7 @@ class LayerTest(unittest.TestCase):
         h.layer.pause()  # serve's Pause: a person may move the arm now
         h.layer.run(Handback(PERSON, moved=True))
         handed_back = h.frame + 1
-        h.feed(Trace().to(0.3, gripper=10).to(1.5), until=h.rewinding)  # 1.2 s since, under the 2.5 s asked for
+        h.feed(Trace().to(0.3, gripper=10).to(1.5), until=h.rewinding)  # 1.2 s since, under the FIRST_S asked for
         h.settle()
         [rewind] = h.kinds("playback")
         self.assertEqual(rewind["start_frame"], handed_back)
@@ -715,8 +1009,27 @@ class LayerTest(unittest.TestCase):
         h.layer.pause()
         [rewind] = h.kinds("playback")
         self.assertEqual(rewind["cause"], "paused")
-        self.assertLess(rewind["seconds"], 2.5)
+        self.assertLess(rewind["seconds"], FIRST_S)
         self.assertEqual(h.layer.doing, "pass")
+
+    def test_a_playback_that_stops_short_holds_and_asks_for_a_person(self) -> None:
+        h = Harness("act", {"after_close": 0.95})
+        h.feed(miss(), until=h.rewinding)
+        h.blocked = True  # something stops the arm where the playback found it: jaws closed
+        steps = h.driver.steps
+        h.settle(int((FIRST_S + REWIND_SETTLE_S + 1) * FPS))
+        [rewind] = h.kinds("playback")
+        self.assertEqual((rewind["cause"], rewind["farthest"]), ("stopped_short", "gripper"))
+        self.assertEqual(h.ask_kinds, ["stuck"])
+        self.assertEqual(h.asked, ["Supervisor: the playback stopped short: gripper is 30 away from the pose it went "
+                                   "back to. Paused for you; asking for advice."])
+        self.assertTrue(h.paused, "the runner pauses on the ask, and holds where the arm stopped")
+        self.assertEqual(h.driver.steps, steps, "the model below never drove again")
+        self.assertEqual(h.driver.calls, ["run", "pause", "pause"],
+                         "paused for the playback, then by the runner on the ask: never handed back between")
+        self.assertEqual(h.decisions(), [MISS_1, "ask a person: the playback stopped short: "
+                                         "gripper is 30 away from the pose it went back to"])
+        self.assertEqual(h.judges._adapters["claude-opus-5.5"].calls, 1, "the escalation model is asked for advice")
 
     def test_a_stuck_rule_holds_the_arm_and_a_sure_ok_watch_check_hands_it_back(self) -> None:
         pool = Pool(now=False)  # the watch check takes its time
@@ -730,6 +1043,17 @@ class LayerTest(unittest.TestCase):
         self.assertEqual(h.driver.calls, ["run", "pause", "run"])
         self.assertEqual((h.layer.doing, h.kinds("escalation"), h.asked), ("pass", [], []))
 
+    def test_a_chat_answer_with_no_usable_probability_never_ends_a_hold(self) -> None:
+        # Without the decision model, the watch check asks the chat model: an answer it can't use must go
+        # to a person, never resume the policy.
+        for name, text in NO_ANSWERS.items():
+            with self.subTest(name):
+                h = Harness("act", {}, models={"jev": None, "gemini-3.8-flash": ChatText(text)})
+                h.feed(Trace().to(2, pan=20).to(4.5))
+                self.assertEqual(h.decisions()[0], "hold: frozen")
+                self.assertNotIn("resume: the watch check saw nothing wrong", h.decisions())
+                self.assertEqual(h.asked, ["Supervisor: stuck (frozen). Paused for you; asking for advice."])
+
     def test_a_confirmed_stuck_rule_asks_for_a_person_and_the_advice_follows(self) -> None:
         h = Harness("act", {"stuck": 0.9})
         h.feed(Trace().to(2, pan=20).to(4.5))
@@ -740,6 +1064,33 @@ class LayerTest(unittest.TestCase):
         self.assertEqual(h.kinds("escalation")[0]["choice"], "teleop")
         watch = h.judges._adapters["jev"].asked[-1]
         self.assertEqual(watch, ("stuck", ["top", "wrist", "top_2s_ago", "wrist_2s_ago"]))
+
+    def test_after_a_person_resumes_from_an_ask_the_rules_not_yet_fired_hold_and_ask_again(self) -> None:
+        h = Harness("act", {"stuck": 0.9})
+        h.feed(Trace().to(2, pan=20).to(4.5))  # frozen: holds, the watch check confirms it, asks
+        self.assertEqual(h.ask_kinds, ["stuck"])
+        h.resume()
+        h.feed(h.here().to(6, pan=50))  # then creeps on, jaws open: a hover
+        self.assertEqual(h.decisions(), ["hold: frozen", "ask a person: stuck (frozen)", "hold: hover",
+                                         "ask a person: stuck (hover)"])
+        self.assertEqual(h.asked, ["Supervisor: stuck (frozen). Paused for you; asking for advice.",
+                                   "Supervisor: stuck (hover). Paused for you."])
+        self.assertEqual(h.ask_kinds, ["stuck", "stuck"])
+        self.assertEqual(h.judges._adapters["claude-opus-5.5"].calls, 1, "advice is asked for once an attempt")
+        h.layer.end_episode()
+        self.assertIs(h.kinds("attempt_end")[0]["asked"], True)
+
+    def test_after_a_person_resumes_from_an_ask_a_done_release_still_asks_once_home(self) -> None:
+        h = Harness("act", {"stuck": 0.9, "after_release": 0.02}, chat={"stuck": 0.9, "after_release": 0.03})
+        h.rest = pose(gripper=40.0)
+        h.feed(Trace().to(2, pan=20).to(4.5))  # frozen: asks
+        h.resume()
+        h.feed(h.here().to(1, gripper=18).to(2, elbow=40).to(1, gripper=40).to(2))  # grasp, carry, release
+        self.assertTrue(next(c for c in h.kinds("check") if c["moment"] == "after_release")["success"])
+        self.assertEqual(h.ask_kinds, ["stuck"], "the policy still drives the arm home")
+        h.feed(h.here().to(2, pan=0, elbow=0).to(0.5))
+        self.assertEqual(h.ask_kinds, ["stuck", "done"])
+        self.assertEqual(h.asked[-1], "Supervisor: the block looks in the container. Reset and label the attempt.")
 
     def test_the_escalation_model_is_asked_once_an_attempt(self) -> None:
         h = Harness("shadow", {"stuck": 0.9, "after_close": 0.95})
@@ -761,6 +1112,23 @@ class LayerTest(unittest.TestCase):
         self.assertTrue(checks[0]["stale"])
         self.assertEqual(h.driver.calls, ["run"])
 
+    def test_a_check_scheduled_for_a_close_is_never_sent_for_a_newer_one(self) -> None:
+        h = Harness("act", {"after_close": 0.95})
+        h.feed(Trace().to(2, pan=20).to(.2, gripper=10).to(.2, gripper=40).to(.2, gripper=10).to(1.2),
+               until=h.rewinding)  # two closes 0.4 s apart
+        h.through_playback()
+        h.settle()
+        closes = [e["policy_t"] for e in h.kinds("grasp") if e["grasp"] == "close"]
+        self.assertEqual(len(closes), 2)
+        checks = [c for c in h.kinds("check") if c["moment"] == "after_close"]
+        self.assertEqual([(c.get("stale"), c.get("sent")) for c in checks], [("newer_close", False), (None, None)],
+                         "the first close's check is dropped unsent, the second's sent")
+        self.assertEqual(checks[1]["call"], "wrong")
+        self.assertGreaterEqual(checks[1]["policy_t"] - closes[1], PROGRAM.after_close_s - 0.01,  # logged to 0.01 s
+                                "sent after_close_s after the close it is about")
+        self.assertEqual(h.decisions(), [MISS_1])
+        self.assertEqual(len(h.kinds("playback")), 1)
+
     def test_a_done_release_asks_a_person_once_the_arm_is_home(self) -> None:
         h = Harness("act", {"after_release": 0.02}, chat={"after_release": 0.03})
         h.rest = pose(gripper=40.0)
@@ -774,6 +1142,15 @@ class LayerTest(unittest.TestCase):
         self.assertLess(h.kinds("decision")[0]["policy_t"], 11.5, "asked on arrival")
         h.layer.end_episode()
         self.assertEqual(h.kinds("attempt_end")[0]["released"], True)
+
+    def test_a_chat_answer_with_no_usable_probability_never_calls_a_release_done(self) -> None:
+        for name, text in NO_ANSWERS.items():
+            with self.subTest(name):
+                h = Harness("act", {"after_release": 0.02}, models={"gemini-3.8-flash": ChatText(text)})
+                h.feed(grasp().to(12))
+                check = next(c for c in h.kinds("check") if c["moment"] == "after_release")
+                self.assertFalse(check["success"])
+                self.assertNotIn("done", h.ask_kinds)
 
     def test_a_done_release_asks_after_home_within_s_if_the_arm_never_gets_home(self) -> None:
         h = Harness("act", {"after_release": 0.02}, chat={"after_release": 0.03})
@@ -970,6 +1347,99 @@ class CandidatesTest(unittest.TestCase):
         self.assertTrue(all(r["label"] == "" and r["src"] == "run1" for r in rows))
 
 
+class ScheduleTest(unittest.TestCase):
+    """`supervisor.schedule.Schedule`, the one copy of when the after_close and after_release checks fall due."""
+
+    def test_each_check_falls_due_at_its_delay(self) -> None:
+        from so_101.supervisor.schedule import Schedule
+
+        schedule = Schedule(1.0, 1.5)
+        schedule.signal("close", 2.0)
+        schedule.signal("carry", 2.5)  # schedules nothing
+        schedule.signal("release", 4.0)
+        self.assertEqual(schedule.due(2.9), [])
+        self.assertEqual(schedule.due(3.0), [("after_close", 1, False)], "due exactly at its delay")
+        self.assertEqual(schedule.due(5.5), [("after_release", 1, False)])
+        self.assertEqual(schedule.due(100.0), [], "each is taken once")
+
+    def test_a_newer_close_makes_the_older_after_close_stale(self) -> None:
+        from so_101.supervisor.schedule import Schedule
+
+        schedule = Schedule(1.0, 1.5)
+        schedule.signal("close", 2.0)
+        schedule.signal("close", 2.5)
+        self.assertEqual(schedule.due(3.5), [("after_close", 1, True), ("after_close", 2, False)])
+        self.assertEqual(schedule.closes, 2)
+
+    def test_a_pause_or_resume_drops_what_isn_t_sent(self) -> None:
+        from so_101.supervisor.schedule import Schedule
+
+        schedule = Schedule(1.0, 1.5)
+        schedule.signal("close", 2.0)
+        schedule.signal("release", 2.2)
+        self.assertEqual(schedule.drop(), ["after_close", "after_release"])
+        self.assertEqual(schedule.due(100.0), [])
+        self.assertEqual(schedule.closes, 1, "the closes so far stay counted")
+
+
+class SchedulesMatchTest(unittest.TestCase):
+    """The live supervisor and `failbench.candidates` pick the same check moments from one attempt: a close on
+    nothing that reopens, a person's pause before its check was sent, then two quick closes (the first one's check
+    stale), a carry and a release."""
+
+    def test_the_supervisor_and_the_candidates_check_the_same_frames(self) -> None:
+        from so_101.control.recorder import Phase
+        from so_101.policy.base import OTHER
+        from so_101.supervisor.layer import Supervisor
+
+        before = Trace().to(2, pan=20).to(0.5, gripper=10).to(0.5, gripper=40)  # a close on nothing, reopened
+        after = Trace(before.poses[-1]).to(0.3, gripper=10).to(0.3, gripper=40).to(0.5, gripper=18)
+        after.to(2, elbow=40).to(1, gripper=40).to(2)  # two quick closes, the second carries, then a release
+        script = [(p, Phase.AUTONOMOUS) for p in before.poses] + [(before.poses[-1], Phase.PAUSED)] * FPS
+        script += [(p, Phase.AUTONOMOUS) for p in after.poses[1:]]
+
+        h = Harness("shadow", {"top": 0.0})
+        sent: list[tuple[int, str]] = []
+        stamps: list[int] = []  # the frame number stamped on the image each check sent, mod 256
+        send = Supervisor._send
+
+        def recording(layer, moment, a, futures, seq=None, **extra):
+            if moment in ("after_close", "after_release"):
+                sent.append((h.frame, moment))
+                stamps.append(int(extra["frames"]["top"].flat[0]))
+            return send(layer, moment, a, futures, seq, **extra)
+
+        away = False
+        with mock.patch.object(Supervisor, "_send", recording):
+            for p, phase in script:
+                h.now += 1 / FPS
+                h.frame += 1
+                if phase != Phase.AUTONOMOUS:
+                    if not away:
+                        h.layer.pause()
+                    away = True
+                    continue
+                if away:
+                    h.layer.run(Handback(PERSON, moved=False))
+                    away = False
+                h.layer.maintain()
+                # Each tick's image is its own, stamped with its frame number, so the frames a check sends can be
+                # told from an older tick's.
+                stamp = np.full_like(FRAME, h.frame % 256)  # FRAME is uint8
+                h.layer.step(h.robot, Tick(h.now, h.frame, {**p, "top": stamp, "wrist": stamp}, dict(p)))
+
+        phases = np.array([phase for _, phase in script])
+        drivers = np.array([POLICY if phase == Phase.AUTONOMOUS else OTHER for _, phase in script])
+        states = np.array([[p[k] for k in NAMES] for p, _ in script])
+        rows = candidates.pick("run1", 0, phases, np.zeros(len(script), bool), states, NAMES, FPS, PROGRAM, GRASP,
+                               drivers=drivers)
+        picked = [(r["t"], r["moment"]) for r in rows if r["moment"] in ("after_close", "after_release")]
+        self.assertEqual([m for _, m in sent], ["after_close", "after_release"],
+                         "the first close's check dropped at the pause, the second's stale")
+        self.assertEqual(picked, sent)
+        self.assertEqual(stamps, [frame % 256 for frame, _ in sent], "each check sent the frames of its own tick")
+
+
 class SettingsTest(ConfigTest):
     def test_the_supervisor_is_off_unless_the_file_turns_it_on(self) -> None:
         self.config.write_text(ARMS)
@@ -1000,16 +1470,43 @@ class SettingsTest(ConfigTest):
             check.check_supervisor(report, settings.load(), lambda *args: problems.append(args))
         return problems, report
 
-    def test_the_thresholds_and_program_are_checked_even_with_the_supervisor_off(self) -> None:
+    # The supervisor's program loads only when the supervisor runs (`control.main.policy_parts`), so the check
+    # reads it only then; the thresholds load for every run's perception, and are checked in every mode.
+    def test_the_thresholds_are_checked_even_with_the_supervisor_off(self) -> None:
         (self.root / "bad.toml").write_text("version = 1\n")
-        for table in ("perception]\nthresholds", "supervisor]\nprogram"):
-            with self.subTest(table):
-                problems, _ = self.supervisor_check(f'\n[{table} = "bad.toml"\n')
-                [(group, detail, _fix)] = problems
-                self.assertIn("bad.toml", detail)
+        problems, _ = self.supervisor_check('\n[perception]\nthresholds = "bad.toml"\n')
+        [(group, detail, _fix)] = problems
+        self.assertIn("bad.toml", detail)
         problems, report = self.supervisor_check()
         self.assertEqual(problems, [])
         self.assertEqual([r.status for r in report.results], ["PASS"])
+
+    def test_the_program_is_checked_only_with_the_supervisor_on(self) -> None:
+        (self.root / "bad.toml").write_text("version = 1\n")
+        for name in ("bad.toml", "missing.toml"):  # one that won't load, and one that doesn't exist
+            with self.subTest(name, mode="off"):
+                problems, report = self.supervisor_check(f'\n[supervisor]\nprogram = "{name}"\n')
+                self.assertEqual(problems, [])
+                [result] = report.results
+                self.assertEqual(result.status, "PASS")
+                self.assertNotIn("program", result.detail)
+            with self.subTest(name, mode="shadow"):
+                problems, _ = self.supervisor_check(f'\n[supervisor]\nmode = "shadow"\nprogram = "{name}"\n')
+                [(group, detail, _fix)] = problems
+                self.assertEqual(group, "supervisor")
+                self.assertIn(name, detail)
+
+    def test_a_run_with_the_supervisor_off_reads_no_program(self) -> None:
+        from so_101.control import main
+
+        self.config.write_text(ARMS + '\n[supervisor]\nprogram = "missing.toml"\n')
+        grasp, loaded, made = main.policy_parts(settings.load())
+        self.assertEqual(grasp.path, T.DEFAULT)
+        self.assertEqual((loaded, made), (None, None))
+        self.config.write_text(ARMS + '\n[supervisor]\nmode = "shadow"\nprogram = "missing.toml"\n')
+        with self.assertRaises(SystemExit) as stop:
+            main.policy_parts(settings.load())
+        self.assertIn("missing.toml", str(stop.exception.code))
 
     def test_a_judge_whose_sdk_is_missing_is_a_warning(self) -> None:
         sdk = lambda provider: "the typesafe-sdk SDK isn't installed" if provider == "typesafe" else None  # noqa: E731
@@ -1033,14 +1530,15 @@ class InServeTest(unittest.TestCase):
         from so_101.control import analysis
         from so_101.data import Run
 
-        # Open the jaws while sweeping the pan, then close them on nothing and stay there.
-        opened = [{**START_POSE, "shoulder_pan.pos": i / 4, GRIPPER: min(10.0 + 2 * i, 50.0)} for i in range(1, 81)]
+        # Open the jaws while sweeping the pan, then close them on nothing and stay there. The sweep is long
+        # enough that the second playback has more motion to undo than the first undid.
+        opened = [{**START_POSE, "shoulder_pan.pos": i / 8, GRIPPER: min(10.0 + 2 * i, 50.0)} for i in range(1, 161)]
         closed = [{**opened[-1], GRIPPER: 50.0 - 4 * i} for i in range(1, 11)]
         actions = [[a[k] for k in START_POSE] for a in opened + closed]
         made = []
 
         def wrap(driver, recorder, clock):
-            made.append(stack.build(driver, LayerContext(recorder.event, clock, GRASP, PROGRAM),
+            made.append(stack.build(driver, LayerContext(recorder.event, clock, GRASP, PROGRAM, FPS),
                                     judges=judges({"after_close": 0.95, "stuck": 0.95}), mode="act",
                                     cameras=("top", "wrist")))
             return made[0]
@@ -1053,8 +1551,8 @@ class InServeTest(unittest.TestCase):
             rig.controller.close()
             playbacks = rig.events("playback")
             self.assertEqual(len(playbacks), 2, "two misses played back; the third asks for a person")
-            self.assertAlmostEqual(playbacks[0]["seconds"], 2.5, delta=0.05)
-            self.assertGreater(playbacks[1]["seconds"], 2.5, "the second goes further back")
+            self.assertAlmostEqual(playbacks[0]["seconds"], FIRST_S, delta=0.05)
+            self.assertGreater(playbacks[1]["seconds"], FIRST_S, "the second goes further back")
             self.assertEqual([e["cause"] for e in rig.events("state") if e["state"] == "paused"], ["policy_asked"])
             self.assertEqual([e for e in rig.events("command") if e.get("source") not in ("terminal",)], [])
             [attempt] = analysis.analyse(Run.at(rig.run_dir), 1.0).attempts

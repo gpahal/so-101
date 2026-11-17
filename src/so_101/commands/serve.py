@@ -66,6 +66,10 @@ def cmd_run(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) -> N
                                                               "finite number 0 or more")):
         if value is not None and not (math.isfinite(value) and value >= 0):
             sys.exit(f"{flag} is {value:g}: give {what}.")
+    if s.control.on_link_loss != "pause":
+        sys.exit(f'so101 run needs on_link_loss = "pause" under [control] in {s.path}: with '
+                 f'"{s.control.on_link_loss}", an attempt the autopilot started keeps driving after the control page '
+                 'is lost, with nobody watching. Set it to "pause", or use so101 serve.')
     autopilot = {
         "episodes": s.run.episodes if ns.episodes is None else ns.episodes,
         "reset_s": task.reset_time_s if ns.reset_time is None else ns.reset_time,
@@ -96,6 +100,8 @@ def launch(s: settings.Settings, ns: argparse.Namespace, extra: list[str], mode:
         "repo": None if ns.checkpoint else task.policy_for(ns.policy, ns.skills),
         # A skills model: so101-control's policy stack switches skills (`policy.skills.SkillSequencer`).
         "skills": [skill.record() for skill in task.skills] if ns.skills else None,
+        # The [gripper] thresholds the model was checked against, which so101-control checks again.
+        "gripper_sha256": setup.gripper_sha256 if ns.skills else None,
         "revision": None if ns.checkpoint else ns.revision or "main",
         "checkpoint": str(setup.checkpoint) if ns.checkpoint else None,  # a model saved on this Mac
         "action_steps": setup.action_steps,
@@ -114,7 +120,9 @@ def launch(s: settings.Settings, ns: argparse.Namespace, extra: list[str], mode:
     run = data.new_run(s, task)
     manifest = run_manifest(
         s, task, setup.found, setup.report,
-        policy={**policy, "commit": policy_commit(setup.checkpoint) if setup.checkpoint else None},
+        # The Hub commit every file of the model was read at (`PolicySetup.commit`): for a remote run, the one its
+        # server loaded. A --checkpoint folder says its own, if it came from the Hub.
+        policy={**policy, "commit": setup.commit or (policy_commit(setup.checkpoint) if setup.checkpoint else None)},
         image_sizes=setup.sizes,
     )
     manifest["operator"] = ns.operator

@@ -142,6 +142,10 @@ class Facts:
     outcome: bool  # the command came with an outcome to record (Reset's)
     fault_saved: bool  # the last fault saved an attempt, which an outcome given with Reset in Fault labels
     fault_labelled: str | None  # that attempt's outcome, when it already has one: Reset in Fault won't relabel it
+    # Why no page watches the arm: none is in control, or the one in control is out of reach (no poll for
+    # link_timeout_s, or hidden), whatever on_link_loss says. None when a page is in control and its link is
+    # live. The autopilot's Resume and Reset are refused while it's set (`step`).
+    unwatched: str | None
 
 
 @dataclass(frozen=True)
@@ -168,6 +172,9 @@ def _fault_refusal(facts: Facts) -> str:
 # Commands that start the arm moving on its own, under the policy, a human or a rewind. A missing
 # required device refuses them.
 NEEDS_DEVICES = frozenset({"resume", "rewind", "teleop"})
+# The autopilot's commands that move the arm: refused while no page in control watches it (`Facts.unwatched`).
+# Its Quit isn't, since it quits only from rest at the rest pose, which moves nothing.
+WATCHED_ONLY = frozenset({"resume", "reset"})
 
 
 # A quit at rest waits for the leader's move to rest: nothing starts meanwhile, or the quit, still under
@@ -445,6 +452,12 @@ def step(state: State, given: Command | Event, facts: Facts) -> Transition:
     transition = _RULES[given](state, facts)
     if transition.accepted and given in NEEDS_DEVICES and facts.device_missing:
         return _refuse(state, facts.device_missing)
+    # The autopilot never starts motion (Resume, or Reset from a pause) unless a page in control watches: with
+    # none in control, or the one in control out of reach, only a person (r at the terminal, or a page's command,
+    # which takes control or brings its link back) does. A return to rest already under way finishes even if the
+    # page is lost, as every return to rest does, because stopping halfway would leave the arm held in mid-air.
+    if transition.accepted and facts.source == "autopilot" and facts.unwatched and given in WATCHED_ONLY:
+        return _refuse(state, facts.unwatched)
     if transition.accepted and Action.OPEN_ATTEMPT in transition.actions and facts.recording:
         return _refuse(state, facts.recording)
     return transition

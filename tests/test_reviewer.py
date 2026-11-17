@@ -489,6 +489,29 @@ class ReviewerTest(unittest.TestCase):
         # Nothing that failed was kept: once the video reads, the same frames are sent.
         self.assertEqual(len(reviewer.unpack(page.get(f"/frames/{DEMO}/top?from=45&to=52"))), 7)
 
+    def test_a_video_pyav_can_t_read_or_a_recording_that_won_t_parse_is_a_500_that_says_why(self) -> None:
+        import av
+
+        page = Page(self, self.demos())
+        for error in (av.error.EOFError(-541478725, "End of file"), av.error.UndefinedError(-1, "Unknown error")):
+            def broken(meta, episode, key, start=0, stop=None, error=error):
+                raise error
+                yield
+
+            with self.subTest(error=type(error).__name__), mock.patch.object(reviewer, "episode_frames", broken):
+                code, body = page.request("GET", f"/frames/{DEMO}/top?from=0&to=5")
+                self.assertEqual(code, 500)
+                self.assertIn(str(error), body["error"])
+        with mock.patch.object(page.server.source, "detail", side_effect=ValueError("Parquet magic bytes not found")):
+            code, body = page.request("GET", f"/item/{DEMO}")
+        self.assertEqual(code, 500)
+        self.assertIn("Parquet magic bytes not found", body["error"])
+        with mock.patch.object(page.server.source, "video", side_effect=av.error.UndefinedError(-1, "Unknown error")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            code, body = page.request("GET", f"/frames/{DEMO}/wrist?from=0&to=5")
+        self.assertEqual(code, 500, "the page server's own fallback, for an error no route caught")
+        self.assertIn("UndefinedError", body["error"])
+
     def test_a_frames_body_may_take_longer_to_send_than_a_silent_connection_may_last(self) -> None:
         page = Page(self, self.demos())
         jpegs = [bytes([i % 256]) * 60_000 for i in range(reviewer.FRAMES_PER_REQUEST)]  # 9 MB: more than the loopback's socket buffers hold

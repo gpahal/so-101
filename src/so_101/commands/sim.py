@@ -266,4 +266,4 @@ def _policy(ns: argparse.Namespace, task) -> Path:
         if ns.revision:
             sys.exit("--checkpoint runs a model saved on this Mac, so it doesn't take --revision.")
         return local_checkpoint(ns.checkpoint, ns.policy)
-    return task.download_policy(ns.revision)
+    return task.download_policy(ns.revision, folder=ns.revision)

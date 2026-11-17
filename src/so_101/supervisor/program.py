@@ -17,6 +17,12 @@ from so_101.settings import ConfigError
 
 DEFAULT = Path(__file__).with_name("program.toml")
 RING_S = 4.0  # the supervisor keeps this many seconds of frames, so the watch check's lookback is at most this
+# How much further back than after_close_s + after_close_answer_s every miss playback must reach. The check
+# is sent up to a tick after it's due, the playback starts a tick after the verdict, and the jaws close over
+# several ticks before the detector sees a close: with no margin, a verdict at the last moment it counts
+# played back to the gripper at 26 against closed_below 25 on a 30 fps test, one tick short of the close.
+# 0.33 s back already read fully open (40).
+REACH_MARGIN_S = 0.5
 
 
 class ProgramError(ConfigError):
@@ -25,7 +31,6 @@ class ProgramError(ConfigError):
 
 @dataclass(frozen=True)
 class Watch:
-    near: float
     lookback_s: float
 
 
@@ -84,9 +89,7 @@ def load(path: Path | None = None) -> Program:
 
 def _parse(data: dict, path: Path, models: dict) -> Program:
     t, w, j = _section(data, "timing"), _section(data, "watch"), _section(data, "judges")
-    watch = Watch(near=_number(w, "near", "watch"), lookback_s=_number(w, "lookback_s", "watch"))
-    if watch.near > 1:
-        raise ProgramError(f"watch.near is {watch.near:g}: a rule's progress runs from 0 to 1.")
+    watch = Watch(lookback_s=_number(w, "lookback_s", "watch"))
     if watch.lookback_s > RING_S:
         raise ProgramError(f"watch.lookback_s is {watch.lookback_s:g}: the supervisor keeps only {RING_S:g} s of frames.")
     roles = ("decision", "chat", "escalation")
@@ -126,8 +129,10 @@ def _parse(data: dict, path: Path, models: dict) -> Program:
         watch=watch, judges=judges, miss_rewind_s=tuple(float(n) for n in rewinds),
     )
     reach = program.after_close_s + program.after_close_answer_s
-    if program.miss_rewind_s and program.miss_rewind_s[0] < reach:
-        raise ProgramError(f"responses.miss_rewind_s starts at {program.miss_rewind_s[0]:g} s, under timing.after_close_s "
-                           f"+ timing.after_close_answer_s ({reach:g} s): a playback that late wouldn't reach back past "
-                           "the close.")
+    for n, seconds in enumerate(program.miss_rewind_s):
+        if seconds < reach + REACH_MARGIN_S:
+            raise ProgramError(
+                f"responses.miss_rewind_s[{n}] is {seconds:g} s, under timing.after_close_s + timing.after_close_answer_s "
+                f"({program.after_close_s:g} + {program.after_close_answer_s:g} s) + {REACH_MARGIN_S:g} s: a miss answered "
+                "that late would be played back to jaws still closed, or past the close not at all.")
     return program

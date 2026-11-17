@@ -57,7 +57,6 @@ class Readings:
     """What the perception has seen this attempt, as of its last tick."""
 
     t: float = 0.0  # seconds the model has driven
-    near: tuple[str, ...] = ()  # stuck rules within the supervisor program's `watch.near` of firing
     closes: int = 0
     regrasps: int = 0
     carried: bool = False
@@ -76,6 +75,9 @@ class Output:
     # change: the loop keeps the last one for the attempt, so a layer's playback and a person's Teleop
     # are recorded under the skill they interrupted.
     skill: int | None = None
+    # On a PLAYBACK tick, the episode frame (`Tick.frame`) its goal pose was measured in: the loop drops
+    # every moment after it from the history a person's Rewind plays back. None on every other tick.
+    goal_frame: int | None = None
 
 
 @dataclass(frozen=True)
@@ -106,12 +108,15 @@ class Health:
 @dataclass(frozen=True)
 class LayerContext:
     """What every layer gets: the run's event log, the loop's clock, the gripper and rule thresholds,
-    and the supervisor's program (its `watch.near` says which rules the perception reports as near)."""
+    the supervisor's program when the supervisor runs, and the task's fps."""
 
     event: Callable[..., None]  # event(type, **fields): the recorder's
     clock: Callable[[], float]
     grasp: object  # grasp.thresholds.Thresholds
-    program: object  # supervisor.program.Program
+    program: object  # the supervisor's program (`supervisor.program.Program`), or None when the supervisor is off
+    # The task's fps: each tick the model drove counts as 1/fps of its time, in the perception's clock and the
+    # supervisor's playback history, as the offline replays count each recorded frame (`grasp.replay.LiveFeed`).
+    fps: float
 
 
 class Policy(Protocol):

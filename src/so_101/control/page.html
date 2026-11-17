@@ -132,7 +132,7 @@
       <p id="state-sentence"></p>
     </div>
 
-    <!-- so101 run's autopilot: how far it is, and Hold or Continue between attempts. Hidden in serve. -->
+    <!-- so101 run's autopilot: how far it is, and Hold or Continue, which stop or let the next attempt start. Hidden in serve. -->
     <div class="card row between" id="autopilot-box" hidden>
       <div><div class="title" style="font-size:14px" id="autopilot-made"></div><div class="small" id="autopilot-text"></div></div>
       <button class="take" id="autopilot-hold">Hold</button>
@@ -292,24 +292,18 @@ let toastTimer = null;
 let camsBuilt = false;
 let previewsOn = true;
 let sheetAttempt = null;  // the attempt the Reset sheet was opened for
-// While the Reset sheet is open, the page tells serve a person is answering, every 10 s (the server
-// forgets it after 30 s), so so101 run's autopilot doesn't end the attempt unlabelled meanwhile.
-const ANSWERING_RENEW_MS = 10000;
-let answeringTimer = null;
-
-function tellAnswering(open) {
+// As the Reset sheet opens, the page tells the control center once that a person started saying how the
+// attempt went (commands.ANSWERING): so101 run's autopilot hands that attempt over to them, as a Pause
+// does, whether they then answer or cancel. Only a click sends it, never a timer.
+function tellAnswering() {
   fetch("/command", {
     method: "POST", headers: { ...HEADERS, "Content-Type": "application/json" },
-    body: JSON.stringify({ command: "answering", for_attempt: sheetAttempt, open }),
+    body: JSON.stringify({ command: "answering", for_attempt: sheetAttempt }),
   }).catch(() => {});
 }
 
-// Close the Reset sheet. Unless it was `answered` with an outcome, tell serve nobody is answering now.
-function closeSheet(answered) {
+function closeSheet() {
   $("reset-sheet").hidden = true;
-  clearInterval(answeringTimer);
-  answeringTimer = null;
-  if (!answered) tellAnswering(false);
 }
 
 function deviceName(device) {
@@ -432,7 +426,7 @@ function render(st, ms) {
   renderTools(st);
 
   // The sheet ends only the attempt it was opened for; the server refuses it for any other.
-  if (!$("reset-sheet").hidden && (!st.allowed.reset || st.attempt !== sheetAttempt)) closeSheet(false);
+  if (!$("reset-sheet").hidden && (!st.allowed.reset || st.attempt !== sheetAttempt)) closeSheet();
   $("sheet-pause").hidden = !st.allowed.pause;
   if (st.last_event > lastSeen) loadEvents();
 }
@@ -443,14 +437,18 @@ function renderAutopilot(st) {
   if (!pilot) return;
   $("autopilot-made").textContent = `Autopilot: ${pilot.made} of ${pilot.of} attempts made`;
   let text = pilot.waiting || "";
-  if (!text && pilot.held) text = "Held: no attempt starts until Continue.";
+  if (!text && pilot.held) text = st.attempt_open ? "Held: this attempt runs on as before, and the next doesn't start until Continue." : "Held: the next attempt doesn't start until Continue.";
   else if (!text && pilot.next_in_s != null) text = pilot.next_in_s > 0 ? `The next attempt starts in ${Math.ceil(pilot.next_in_s)} s.` : "The next attempt is starting.";
-  else if (!text && st.attempt_open) text = "It ends this attempt at its time limit, or 10 s after a pause nobody takes over. Your Pause, Resume, Rewind, Teleop or Reset takes it over.";
+  // limit_s is null with no time limit (so101 run --duration 0): then only you or a done verdict ends it.
+  else if (!text && st.attempt_open) text = (st.limit_s == null
+    ? "This attempt has no time limit: the autopilot ends it only when the supervisor judges it done. Any other pause waits for you."
+    : "It ends this attempt at its time limit, or when the supervisor judges it done. Any other pause waits for you.")
+    + " Your Pause, Resume, Rewind, Teleop or Reset takes it over.";
   $("autopilot-text").textContent = text;
   const button = $("autopilot-hold");
   button.textContent = pilot.held ? "Continue" : "Hold";
   button.disabled = !st.allowed.autopilot_hold;
-  button.title = st.refusals.autopilot_hold || "";
+  button.title = st.refusals.autopilot_hold || (pilot.held ? "Let the next attempt start after the reset time." : "Keep the next attempt from starting. An attempt running now carries on as before.");
 }
 
 const TOOL_NAMES = { check: "Run checks", pose: "Check pose" };
@@ -780,8 +778,7 @@ for (const button of document.querySelectorAll("[data-command]")) {
       sheetAttempt = status.attempt;
       $("sheet-attempt").textContent = status.attempt;
       $("reset-sheet").hidden = false;
-      tellAnswering(true);
-      answeringTimer = setInterval(() => tellAnswering(true), ANSWERING_RENEW_MS);
+      tellAnswering();
       return;
     }
     send({ command });
@@ -789,13 +786,11 @@ for (const button of document.querySelectorAll("[data-command]")) {
 }
 for (const button of document.querySelectorAll("[data-reset]")) {
   button.onclick = () => {
-    // An outcome's Reset ends the attempt: saying the answer is over first could let so101 run's
-    // autopilot end it unlabelled between the two requests.
-    closeSheet(!!button.dataset.reset);
+    closeSheet();
     if (button.dataset.reset) send({ command: "reset", outcome: button.dataset.reset, for_attempt: sheetAttempt });
   };
 }
-$("reset-sheet").onclick = (event) => { if (event.target === $("reset-sheet")) closeSheet(false); };
+$("reset-sheet").onclick = (event) => { if (event.target === $("reset-sheet")) closeSheet(); };
 $("autopilot-hold").onclick = () => { if (status && status.autopilot) send({ command: "autopilot_hold", hold: !status.autopilot.held }); };
 // Pause leaves the sheet open, so the operator can still say how the attempt went.
 $("sheet-pause").onclick = () => send({ command: "pause" });
@@ -834,7 +829,7 @@ function onKey(event) {
     if (spaceDown) return;
     spaceDown = true;
   }
-  if (key === "Escape") { if (!$("reset-sheet").hidden) closeSheet(false); $("results-sheet").hidden = true; return; }
+  if (key === "Escape") { if (!$("reset-sheet").hidden) closeSheet(); $("results-sheet").hidden = true; return; }
   if (!status) return;
   const refusal = (command) => status.refusals[command];
   const sheetOpen = !$("reset-sheet").hidden || !$("results-sheet").hidden;

@@ -33,6 +33,12 @@ class PolicySetup:
     report: Report
     checkpoint: Path | None  # the local checkpoint; None with a remote server
     args: list[str]  # the strategy, policy, robot and camera arguments, and the step cap
+    # A skills run's `[gripper]` thresholds hash (`skills.gripper_hash`), as checked against the model's build;
+    # run.json records it, and so101-control checks the thresholds it loads against it. None otherwise.
+    gripper_sha256: str | None = None
+    # The Hub commit every file of the model was read at: the server's for a remote run (`remote.served_commit`),
+    # else the one the revision named when the run started. None with --checkpoint.
+    commit: str | None = None
 
     def steps_line(self, s: settings.Settings) -> str:
         n, cap = self.action_steps, s.teleop.max_relative_target
@@ -81,24 +87,37 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task)
     With --remote, the server must already serve this model: starting one bills until `so101 server
     stop`, so it's never done here. The leader is checked too when it's plugged in, and its failures
     are only warnings, since only Teleop needs it, and the checks also fail on a bad rest pose or
-    `[control]` setting."""
+    `[control]` setting.
+
+    The model is read at one Hub commit (`commit`): a remote run's is the one its server loaded, so a server
+    started before a newer model reached main is checked as the model it serves; a local run's is the one
+    the revision names now, so a push meanwhile can't mix two models' files."""
     skills = bool(getattr(ns, "skills", False))
     if skills:
         task.require_skills()
-    local = local_checkpoint(ns.checkpoint, ns.policy) if ns.checkpoint else None
-    config = json.loads((local / "config.json").read_text()) if local else task.policy_config(ns.revision, ns.policy, skills)
-    check_skills_model(s, ns, task, config, local, skills)
     if ns.remote:
         remote.refuse_action_steps(ns.policy, ns.action_steps)
+    dataset, revision = ("skills" if skills else "whole"), ns.revision or "main"
+    local = local_checkpoint(ns.checkpoint, ns.policy) if ns.checkpoint else None
+    commit = None
+    if local is None:
+        if ns.remote:
+            running = remote.active_server_or_exit(task.name, ns.policy, revision, dataset)
+            commit = remote.served_commit(running, task.name, ns.policy, revision, dataset)
+        else:
+            commit = task.policy_commit(ns.revision, ns.policy, skills)
+    config = json.loads((local / "config.json").read_text()) if local else task.policy_config(commit, ns.policy, skills)
+    gripper_sha256 = check_skills_model(s, ns, task, config, local, skills, commit)
     action_steps = resolve_action_steps(ns.action_steps, config)
     server = None
     if ns.remote:
         if ns.policy not in s.remote:
             sys.exit(f"No [remote.{ns.policy}] section in {s.path}.")
         server = remote.require_server(
-            task.name, ns.policy, ns.revision or "main", action_steps, s.remote[ns.policy].pin_unused_actions,
-            "skills" if skills else "whole",
+            task.name, ns.policy, revision, action_steps, s.remote[ns.policy].pin_unused_actions, dataset,
         )
+        if (server.labels or {}).get("commit") != commit:
+            sys.exit("The policy server changed while the run was being checked. Start the run again.")
 
     # Capture each camera at the size the checkpoint was trained on.
     sizes = tasks.image_sizes(config)
@@ -112,9 +131,9 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task)
     except PortNotFoundError:
         pass  # the leader is optional: only Teleop needs it
     found, report = preflight(s, "running the policy", arms=arms, cameras=[s.camera(name) for name in task.cameras],
-                              control="FAIL", teleop_only=("leader",), video=True)
+                              control="FAIL", teleop_only=("leader",), video=True, run_task=task.name)
     specs = [cam.lerobot_spec(width=sizes[cam.name][0], height=sizes[cam.name][1]) for cam in found]
-    checkpoint = None if server else local or task.download_policy(ns.revision, skills)
+    checkpoint = None if server else local or task.download_policy(commit, skills, folder=ns.revision)
     args = [
         "--strategy.type=base",  # LeRobot's default; so101-control runs its own loop, never a strategy
         # A remote server sets the action steps itself, and its client rejects --policy flags.
@@ -128,14 +147,17 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task)
         f"--fps={task.fps}",
         *([] if server else [f"--device={s.run.device}"]),
     ]
-    return PolicySetup(task, action_steps, server, sizes, arms, found, report, checkpoint, args)
+    return PolicySetup(task, action_steps, server, sizes, arms, found, report, checkpoint, args, gripper_sha256, commit)
 
 
 def check_skills_model(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task, config: dict,
-                       local: Path | None, skills: bool) -> None:
+                       local: Path | None, skills: bool, commit: str | None = None) -> str | None:
     """Exit unless the model fits how it's run: a model that reads the skill one-hot only with --skills,
     an ACT skills model only with it, with one value per skill in tasks.toml, and a skills model only
-    with the skills and gripper thresholds its dataset was cut with (`require_skills_contract`)."""
+    with the skills, gripper thresholds, cut rules and run labelling its dataset was built with
+    (`require_skills_contract`), its train_config.json read at `commit`, the Hub commit the run checked.
+    Returns the hash of the `[gripper]` thresholds it checked a skills model
+    against, for run.json, else None."""
     def model() -> str:
         return str(local or task.policy_for(ns.policy, skills))
 
@@ -143,7 +165,7 @@ def check_skills_model(s: settings.Settings, ns: argparse.Namespace, task: tasks
     if one_hot and not skills:
         sys.exit(f"{model()} reads a skill one-hot ({STATE_KEY}): it's a skills model. Run it with --skills.")
     if not skills:
-        return
+        return None
     if not one_hot and ns.policy == "act":
         sys.exit(f"{model()} has no {STATE_KEY} input, so it can't be told which skill it's on: train it with "
                  "`so101 train --skills`.")
@@ -151,18 +173,22 @@ def check_skills_model(s: settings.Settings, ns: argparse.Namespace, task: tasks
         sys.exit(f"{model()} reads a one-hot of {one_hot['shape'][0]} skills, and [{task.name}.skills] in tasks.toml "
                  f"lists {len(task.skills)} ({', '.join(k.name for k in task.skills)}). Train it again with --skills, "
                  "or run it with the skills it was trained on.")
+    from so_101 import skills as skill_rules
     from so_101.grasp import thresholds
 
-    build = skills_build(local, None if local else task.policy_for(ns.policy, skills), ns.revision)
-    require_skills_contract(model(), task, thresholds.load(s.perception.thresholds).gripper, build)
+    build = skills_build(s, local, None if local else task.policy_for(ns.policy, skills), commit)
+    gripper = thresholds.load(s.perception.thresholds).gripper
+    require_skills_contract(model(), task, gripper, build)
+    return skill_rules.gripper_hash(gripper)
 
 
-def skills_build(local: Path | None, repo: str | None, revision: str | None) -> dict:
+def skills_build(s: settings.Settings, local: Path | None, repo: str | None, revision: str | None) -> dict:
     """The build.json of the skills build a model was trained on, pinned by the dataset revision that
     `train --skills` records in its train_config.json:
     - after a Hub job, the commit of the Hub dataset it uploaded and trained from: build.json at that commit;
-    - after `--target local`, `data.build_revision` of the build.json it trained on: the one beside its
-      dataset (`dataset.root`), which must still be that file, since every build replaces it.
+    - after `--target local`, `data.build_revision` of the build.json it trained on: the copy `train` kept
+      under that name (`data.trained_build_path`), which must still be that file. A later build doesn't
+      touch it, so it doesn't retire the model.
     Exits when the model records neither, as one trained before `train` recorded them does, or when the
     build can't be read: which skills it was trained on would be a guess."""
     from huggingface_hub import hf_hub_download
@@ -181,12 +207,13 @@ def skills_build(local: Path | None, repo: str | None, revision: str | None) -> 
     dataset = train.get("dataset") if isinstance(train, dict) else None
     dataset = dataset if isinstance(dataset, dict) else {}
     pinned, source, root = dataset.get("revision"), dataset.get("repo_id"), dataset.get("root")
-    if isinstance(pinned, str) and pinned.startswith(data.BUILD_REVISION) and root:
-        build = Path(root) / "build.json"
+    if isinstance(pinned, str) and pinned.startswith(data.BUILD_REVISION):
+        build = data.trained_build_path(s, pinned)
         if not build.is_file() or data.build_revision(build) != pinned:
-            sys.exit(f"{model} was trained on the skills dataset in {root}, which was rebuilt after this model was "
-                     "trained (or removed), so its build.json no longer says which skills the model was trained "
-                     f"on. {retrain} --target local.")
+            why = "changed" if build.is_file() else "missing"
+            sys.exit(f"{model} was trained on build {pinned}, whose copy {build} is {why}, so which skills it was "
+                     "trained on is unknown. Copy it there from the computer that trained the model, or train again "
+                     "with `so101 train --skills --target local`.")
         return json.loads(build.read_text())
     if not (isinstance(pinned, str) and re.fullmatch(r"[0-9a-f]{40}", pinned)) or not source or source.startswith("local/"):
         sys.exit(f"{model} recorded no build it was trained on: its train_config.json's dataset.revision is "
@@ -202,29 +229,68 @@ def skills_build(local: Path | None, repo: str | None, revision: str | None) -> 
                  "uploads it with the dataset.")
 
 
+_MISSING = object()  # a field a build.json's skill record leaves out
+
+
 def require_skills_contract(model: str, task: tasks.Task, gripper, build: dict) -> None:
-    """Exit unless the skills dataset's `build` (its build.json) has the task's skills, by name and prompt in
-    the same order, cut with the same `[gripper]` thresholds: the model switches skills on those events
-    and is told those prompts, so a model trained on other skills or other cuts would be told the wrong
-    skill at the wrong time."""
+    """Exit unless the skills dataset's `build` (its build.json) recorded the same `skills.contract` as this
+    checkout: every skill as `Skill.record` gives it (name, prompt, from, to and handover) in the same
+    order, the same `[gripper]` thresholds, the same cut rules and, when the build took runs (`so101 build
+    --with`), the same run labelling and grasp detector. Those decide where the demos were cut, how runs were labelled and
+    when a skill switches, so a model trained under others would be told the wrong skill at the wrong
+    time. A build.json missing any of them is refused, naming what's missing. One refusal names every
+    difference."""
     from so_101 import skills
 
     inputs = build.get("inputs") or {}
-    trained = {"skills": [{"name": r.get("name"), "prompt": r.get("prompt")} for r in inputs.get("skills") or ()],
-               "gripper_sha256": inputs.get("gripper_sha256")}
-    want = skills.contract(task.skills, gripper)
-    differ = []
-    if trained["skills"] != want["skills"]:
-        differ.append("its skills were " + ", ".join(f"{r['name']} ({r['prompt']!r})" for r in trained["skills"])
+    runs = any(source != "demos" for source in inputs.get("sources") or ())
+    want = skills.contract(task.skills, gripper, runs=runs)
+    differ, definitions = [], False
+
+    def show(field: str, value) -> str:
+        if value is _MISSING:
+            return "nothing"
+        if value is None:
+            return "none"
+        return repr(value) if field == "prompt" else str(value)
+
+    trained = inputs.get("skills")
+    if not (isinstance(trained, list) and trained and all(isinstance(r, dict) for r in trained)):
+        differ.append("its build recorded no skills")
+        definitions = True
+    elif [r.get("name") for r in trained] != [r["name"] for r in want["skills"]]:
+        differ.append("its skills were " + ", ".join(f"{r.get('name')} ({r.get('prompt')!r})" for r in trained)
                       + f", and [{task.name}.skills] in tasks.toml has "
                       + ", ".join(f"{r['name']} ({r['prompt']!r})" for r in want["skills"]))
-    if trained["gripper_sha256"] != want["gripper_sha256"]:
+        definitions = True
+    else:
+        for here, there in zip(want["skills"], trained, strict=True):
+            for field, value in here.items():
+                if field != "name" and there.get(field, _MISSING) != value:
+                    differ.append(f"{here['name']}: {field} {show(field, value)} here, "
+                                  f"{show(field, there.get(field, _MISSING))} in the model's build")
+                    definitions = True
+    if inputs.get("gripper_sha256") != want["gripper_sha256"]:
         differ.append("its demos were cut with other [gripper] thresholds than the ones this run switches skills with"
-                      if trained["gripper_sha256"] else
+                      if inputs.get("gripper_sha256") else
                       "its build recorded no [gripper] thresholds, as builds from before they were recorded")
+        definitions = True
+    if "cut_rules" not in inputs:
+        differ.append("its build recorded no cut_rules (skills.CUT_RULES_VERSION), as builds from before it was "
+                      "recorded")
+    elif inputs["cut_rules"] != want["cut_rules"]:
+        differ.append(f"its demos were cut under cut rules {inputs['cut_rules']}, and this checkout cuts under "
+                      f"{want['cut_rules']}")
+    if runs and "run_labels" not in inputs:
+        differ.append("its build took runs and recorded no run_labels (skills.RUN_LABEL_VERSION), as skills builds "
+                      "with runs from before it was recorded")
+    elif runs and inputs["run_labels"] != want["run_labels"]:
+        differ.append(f"its runs were labelled under run labels {inputs['run_labels']}, and this checkout labels "
+                      f"them under {want['run_labels']}")
     if differ:
+        back = ", or put the skills or thresholds it was trained on back" if definitions else ""
         sys.exit(f"{model} doesn't match this task's skills: {'; '.join(differ)}. Train it again with "
-                 "`so101 train --skills`, or put the skills or thresholds it was trained on back.")
+                 f"`so101 train --skills`{back}.")
 
 
 def local_checkpoint(text: str, policy: str) -> Path:
