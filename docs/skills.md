@@ -82,12 +82,10 @@ faults were commonest, and the 11 weakest left at three nearer spots went instea
 The release to the widest opening takes 0.50 s, and the widest opening to the demo's end 4.13 s (median).
 
 One of the 36 edge cases opens the jaws only 4.9 past its hold, from 18.9 to 23.8 over 0.3 s, and the block slides
-into the jar. The detector first took the hold to be the gripper's last reading inside the hold band, which
-followed those jaws up to 21.6 as they opened, so it wanted 25.6 and saw no release: the demo couldn't be
-cut. The hold is now the median reading over the last 1.5 s the gripper held steady (`Detector._steady`),
-which a block settling in the jaws still moves and opening jaws don't. That demo cuts, and in the other
-179 recorded demos only the release moved, by 0 to 2 frames earlier; no other event did. The demo itself is
-among the 55 deleted, for that narrow release. A release also needs the reading above the hold band's top
+into the jar. The hold is the median reading over the last 1.5 s the gripper held steady (`Detector._steady`),
+which a block settling in the jaws still moves and opening jaws don't: the gripper's last reading inside the
+hold band would follow those jaws up to 21.6 as they open, ask for 25.6 and see no release, and the demo
+couldn't be cut. That demo is among the 55 deleted, for that narrow release. A release also needs the reading above the hold band's top
 (22): a held block keeps the gripper inside the band, and a carried block whose reading rises 4.5 inside it
 within 2 s, from 17.0 to 21.5, is still held, where the median hold alone called it a release. That demo
 still releases, at 23.8, and the guard moved no event in any of the 180 recorded demos, so the cut rules
@@ -277,8 +275,7 @@ only while they're unchanged:
   record it, so it stays current across a change, and a build with runs made before it was recorded is
   stale and rebuilt on its next `build`. It covers the grasp detector too, since a detector change can
   move a run's labels without moving any demo's cut: the band guard, which kept the cut rules at 5, was
-  measured on the demos only. An earlier, separate detector version was folded in before any build
-  recorded it.
+  measured on the demos only.
 
 `skills.contract` is the one definition of these fields: `data.build_inputs` records it and the
 skills-model check below compares it, so the two can't drift.

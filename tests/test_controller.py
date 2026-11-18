@@ -1180,7 +1180,7 @@ class LoopSafetyTest(RigTest):
         self.assertEqual(rig.status()["state"], "fault")
 
         # The servos answer again, but for 0.3 s each position reads off by this arm's homing offsets, as
-        # the first read after switching the arm back on did on 2026-11-13.
+        # the first read after switching the arm back on can.
         offsets = {"shoulder_pan": 494, "shoulder_lift": 525, "elbow_flex": -478, "wrist_flex": -485,
                    "wrist_roll": -57, "gripper": -17}
         start, written = rig.clock(), len(rig.motors.writes)
@@ -1205,7 +1205,7 @@ class LoopSafetyTest(RigTest):
         self.assertTrue(rig.command("reset").accepted)
 
     def test_a_switched_off_arm_gets_its_torque_back_only_after_its_supply_has_read_normal_for_1_s(self) -> None:
-        # As on 2026-11-13: the servos answer for a moment at 6 V, then go silent; switched back on, they
+        # As measured on this arm: the servos answer for a moment at 6 V, then go silent; switched back on, they
         # answer before the supply is back to normal.
         rig = self.new_rig("switched-off", recorded=True)
         rig.start_policy()

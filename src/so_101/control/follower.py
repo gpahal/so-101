@@ -74,7 +74,7 @@ POWER_LOW_READS = 2
 POWER_BACK_S = 0.5
 # A follower that answers again after it was lost gets its torque back only once its reads have agreed
 # for RESTART_SETTLE_S: each motor within RESTART_STEADY_STEPS of the read before (1.8°), and the supply
-# not low. On 2026-11-13 the first read after switching the arm back on lacked each motor's homing
+# not low. Measured: the first read after switching the arm back on can lack each motor's homing
 # offset (pan 481 steps off, its offset 494), and a read 0.58 s later was right. 1 s is about twice
 # that. A wrong first read differs from the next by the offset, so it restarts the wait; an offset
 # under 20 steps can't move the arm more than 1.8°. The arm is limp meanwhile, as it is in any restart.

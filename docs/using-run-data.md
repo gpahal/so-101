@@ -1,6 +1,6 @@
 # Using run data beyond `build --with`
 
-Status: ideas, none built. Written in November 2026 against LeRobot 0.7.0 and this repo's control center (`so101 serve`, and since then `so101 run` too). The README covers what `build --with` does today; this note covers what else the same data could train, and what each would take.
+Status: ideas, none built. Written against LeRobot 0.7.0 and this repo's control center (`so101 serve` and `so101 run`). The README covers what `build --with` does today; this note covers what else the same data could train, and what each would take.
 
 ## What a build uses today
 
@@ -70,7 +70,7 @@ The weighting hook works with π0.5: LeRobot's π0.5 computes a loss per sample.
 
 ## Simulating from failure states
 
-The sim twin on the `sim-twin` branch (PR #13) is a MuJoCo scene fitted to an earlier task's demos on a wooden table: camera poses, motor response, colours and softness. For the block-container task it needs the black mat, the block and the container modelled, and the top camera's pose fitted again. A run records the arm's joints and both cameras at every frame, so each interruption marks a real state where the policy failed. Starting the sim there turns one real failure into many sim attempts.
+The sim twin (`so101 sim`, [`sim.md`](sim.md)) is a MuJoCo scene of the block-container task fitted to its demos: camera poses, joint offsets, motor response, the mat, block and jar, colours and softness. A run records the arm's joints and both cameras at every frame, so each interruption marks a real state where the policy failed. Starting the sim there turns one real failure into many sim attempts.
 
 ### Setting the sim to a recorded state
 

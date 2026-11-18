@@ -1,8 +1,7 @@
 """`so101 sim aim`: guide the top camera, and the mat, back to where they were when the demos were recorded.
 
-The sim's top camera is fitted to the demos' frames, and a policy trained on them expects their view. By 14
-November the camera had moved a few pixels and turned, and the mat (a loose mouse pad) had slid: the run of
-13 November 13:09 shows bare table along the mat's far edge where the demos show none.
+The sim's top camera is fitted to the demos' frames, and a policy trained on them expects their view. A bump
+moves the camera a few pixels and turns it, and the mat, a loose mouse pad, slides on its own.
 
 This compares the live picture with the median of the demos' first frames, window by window, by normalised
 cross-correlation. The camera's shift and turn come from windows on things fixed to the room or the table: the

@@ -1,6 +1,6 @@
 # SVT-AV1's macOS crash when an encoder closes
 
-Status: built (`src/so_101/svtshim.py`, `src/so_101/svtsem.c`). It's a stopgap until PyAV bundles SVT-AV1 4.3.0 or later and LeRobot allows that PyAV. The user-facing part is in the README, under [The video encoder's macOS crash](../README.md#the-video-encoders-macos-crash). Written in November 2026 against LeRobot 0.7.0, PyAV 15.1.0 (SVT-AV1 3.0.0), macOS on an M3 Max and Python 3.13. The measurements were made on that Mac; none was made on the real arm or on CI's macOS VMs.
+Status: built (`src/so_101/svtshim.py`, `src/so_101/svtsem.c`). It's a stopgap until PyAV bundles SVT-AV1 4.3.0 or later and LeRobot allows that PyAV. The user-facing part is in the README, under [The video encoder's macOS crash](../README.md#the-video-encoders-macos-crash). Written against LeRobot 0.7.0, PyAV 15.1.0 (SVT-AV1 3.0.0), macOS on an M3 Max and Python 3.13. The measurements were made on that Mac; none was made on the real arm or on CI's macOS VMs.
 
 ## The bug
 
@@ -17,13 +17,13 @@ LeRobot encodes each camera's video with SVT-AV1, through PyAV, on one encoder t
   - All 24 reports collected here had that signature.
 - **How often.** About 0.1 to 0.4% of encoder closes, mostly for very short clips. A full test run closes about 250 encoders, and 2 of 5 runs crashed. Long 640×480 episodes had 0 crashes in 800 closes, which is too few to give a rate.
 - **Where it's tracked.**
-  - SVT-AV1 [issue #2961](https://github.com/AOMediaCodec/SVT-AV1/issues/2961) (GitLab #2251) came from libavif's Apple-silicon CI in February 2025. It reproduced on an M1 but not on Intel Macs. SVT-AV1 3.0.1 listed it as a known issue.
-  - The fix is [commit 049193fc](https://github.com/AOMediaCodec/SVT-AV1/commit/049193fc0e16ba7f1afe8baa51292157b681cb2a), "Fix the Apple teardown SIGTRAP (#2251)". It is +8/−1 in `svt_threads.c`, first released in SVT-AV1 4.3.0 (2026-11-01).
-  - We reported it to LeRobot as [huggingface/lerobot#5308](https://github.com/huggingface/lerobot/issues/5308) on 2026-11-11, after finding no earlier report there or in PyAV.
+  - SVT-AV1 [issue #2961](https://github.com/AOMediaCodec/SVT-AV1/issues/2961) (GitLab #2251) came from libavif's Apple-silicon CI. It reproduced on an M1 but not on Intel Macs. SVT-AV1 3.0.1 listed it as a known issue.
+  - The fix is [commit 049193fc](https://github.com/AOMediaCodec/SVT-AV1/commit/049193fc0e16ba7f1afe8baa51292157b681cb2a), "Fix the Apple teardown SIGTRAP (#2251)". It is +8/−1 in `svt_threads.c`, first released in SVT-AV1 4.3.0.
+  - We reported it to LeRobot as [huggingface/lerobot#5308](https://github.com/huggingface/lerobot/issues/5308), after finding no earlier report there or in PyAV.
 
 ## Why we can't just upgrade
 
-- **PyAV.** No release bundles SVT-AV1 4.3.0 yet. The newest on PyPI, 19.0.2, bundles 4.2.0. PyAV's FFmpeg builds ([pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg)) moved to 4.3.0 on 2026-11-02, so the next PyAV release will probably have it.
+- **PyAV.** No release bundles SVT-AV1 4.3.0 yet. The newest on PyPI, 19.0.2, bundles 4.2.0. PyAV's FFmpeg builds ([pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg)) use 4.3.0, so the next PyAV release will probably have it.
 
   | PyAV wheel (macOS arm64) | SVT-AV1 | libaom |
   | --- | --- | --- |

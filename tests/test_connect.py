@@ -73,7 +73,7 @@ class ConnectTest(unittest.TestCase):
 
 
     def test_a_joint_resting_just_past_its_limit_is_pulled_back_to_the_limit(self) -> None:
-        # On 2026-11-13 the folded elbow read 3035 against a Max_Position_Limit of 3031: the servo stored
+        # Folded, this arm's elbow has read 3035 against a Max_Position_Limit of 3031: the servo stored
         # a goal of 3035 as 3031, so the read-back never matched and every connect refused.
         for side, offset in (("max", connect.OVERSHOOT_MAX_STEPS), ("min", -connect.OVERSHOOT_MAX_STEPS)):
             with self.subTest(side=side):

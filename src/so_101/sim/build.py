@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from so_101.sim import arm, fit
+from so_101.sim import arm, fit, looks
 from so_101.sim import env as sim_env
 from so_101.sim.camera import Lens
 
@@ -22,15 +22,14 @@ DEFAULTS = {
     "block_mass": 0.00675,  # BrickLink's weight for the DUPLO 2x2 brick, part 3437
     "block_friction": 0.3,  # plastic on plastic; against the jaws and the mat, theirs counts if it's higher
     # The printed jaws against the block. Printed plastic on a smooth brick is around 0.3 to 0.5, and the
-    # arm model's own 1.0 kept hold of blocks the real jaws let go. Replaying the first 100 demos on two
-    # builds put 79 and 82 of 96 blocks in the jar at 1.0, 85 at 0.6, 84 at 0.5, 87 and 90 at 0.45, 83 and 89
-    # at 0.4, 88 and 89 at 0.35, and 86 and 87 at 0.3.
+    # arm model's own 1.0 keeps hold of blocks the real jaws let go: replayed demos drop the most blocks in
+    # the jar at 0.3 to 0.45.
     "jaw_friction": 0.35,
     "table_friction": 0.4,  # the mat, against the block and the jar: a smooth cloth mouse pad. `so101 sim physics` fits this from real pushes
     # The mat's top above the surface the arm's base stands on: a thin mat on the same table. The joint
     # offsets are fitted so that every demo's grasp lands on it. Set to "fit", it's fitted with the top
-    # camera instead, from how big the block looks; on these demos that fit matched the arm's outline
-    # worse (6.0 px against 3.8), so it isn't the default.
+    # camera instead, from how big the block looks, which the demos can't pin: held lower, the arm's outline
+    # fits about as well. So it isn't the default.
     "mat_height": 0.003,
     # The jar. Its diameter and tinted band are fitted to the top camera's frames unless jar_diameter is set.
     "jar_diameter": None,
@@ -45,6 +44,11 @@ DEFAULTS = {
     # camera can't measure it: from there the bare table mirrors the wall.
     "table_past_mat": 0.025,
     "floor_below": 0.74,  # the floor below the table top: a desk's height
+    # Each arm joint's offset, shoulder_lift to wrist_roll in degrees: how far the arm model's angle is from
+    # the follower's reading. Unset, the top camera's fit finds them, but the demos can't say how they split
+    # between the joints, and a split that draws the arm as well can tilt the jaws by 5 degrees. Set them
+    # to keep a fit that was checked at the arm, for as long as the follower's calibration stays the same.
+    "joint_offsets_deg": None,
 }
 # Where a demo's block can start, by the key its layout keeps each place under, best guess first on a tie.
 BLOCK_PLACES = ("seen_clear", "by_wrist_clear", "seen", "by_wrist")
@@ -114,11 +118,15 @@ def build(
         raise ValueError(f'mat_height in [sim] in so101.toml is {options["mat_height"]!r}: give it in metres, or "fit".')
     # In the arm model's axes: its base's underside, which stands on the table, is 2.4 mm below its z = 0.
     mat_height = None if options["mat_height"] == "fit" else round(float(options["mat_height"]) + arm.base_underside(), 4)
+    offsets = options["joint_offsets_deg"]
+    if offsets is not None and not (isinstance(offsets, list) and len(offsets) == 4 and all(isinstance(v, (int, float)) for v in offsets)):
+        raise ValueError(f"joint_offsets_deg in [sim] in so101.toml is {offsets!r}: give 4 numbers, shoulder_lift to wrist_roll in degrees.")
     top = kept.get("top")
-    if top is None or refit_cameras or (mat_height is not None and top.get("table_height") != mat_height):
+    held_elsewhere = offsets is not None and top is not None and top.get("offsets_deg", [0.0])[1:] != [float(v) for v in offsets]
+    if top is None or refit_cameras or held_elsewhere or (mat_height is not None and top.get("table_height") != mat_height):
         report("Fitting the top camera, the arm's joint offsets and the mat's height, which takes a few minutes...")
         unset = arm.Units((0.0,) * 5, gripper_closed, deg_per_percent)
-        top = fit.fit_top_camera(fit.top_fit_data(demos, fit_on, held, block, unset), gripper_closed, deg_per_percent, block, mat_height, joint_limits(calibration_file), report)
+        top = fit.fit_top_camera(fit.top_fit_data(demos, fit_on, held, block, unset), gripper_closed, deg_per_percent, block, mat_height, joint_limits(calibration_file), report, previous=previous.get("cameras", {}).get("top"), offsets=offsets)
         kept.pop("wrist", None)
     table_height = top["table_height"]
     errors = top["errors"]
@@ -136,7 +144,8 @@ def build(
     releases = np.array([fit.held_block(units, demos.episode(e)[0][held[e][1]][None])[0] for e in episodes])
     measured = options["jar_diameter"] is not None
     jar = {"radius": (options["jar_diameter"] or 0.07) / 2, "height": options["jar_tint_height"] or 0.05}
-    jar, jar_places = fit.fit_jars(demos, episodes, top["pose"], top_lens, jar, table_height, np.median(releases[:, :2], axis=0), measured)
+    # Looked for where each demo let go of its block: the demos stand the jar in two places.
+    jar, jar_places = fit.fit_jars(demos, episodes, top["pose"], top_lens, jar, table_height, dict(zip(episodes, releases[:, :2])), measured)
     # The amber the top camera sees ends at the tinted band's top, so that's the height the fit found.
     tint_height = options["jar_tint_height"] or jar["height"]
     jar = {
@@ -161,6 +170,10 @@ def build(
     jar["home"] = home
 
     edges = fit.table_edges(plate, top["pose"], top_lens, table_height)
+    # The wall stands behind every jar. The top camera finds the mat's far edge, and the jar often stands
+    # past it: a jar placed into the wall is shoved 12 cm out of it at the first physics step.
+    behind_jars = max(xy[0] for xy in jar_places.values()) + jar["radius"] + 0.005
+    edges["wall_x"] = round(max(edges["wall_x"], behind_jars), 4)
     table = {
         "x": [TABLE["x"][0], edges["wall_x"]], "y": [TABLE["y"][0], round(edges["left_y"] + options["table_past_mat"], 4)], "texel": TABLE["texel"],
         "height": table_height, "texture": "table.png", "friction": overrides.get("table_friction", previous.get("table", {}).get("friction", DEFAULTS["table_friction"])),
@@ -268,7 +281,7 @@ def build(
     fit.save_json(scene_path, scene)
 
     if not previous.get("arm", {}).get("motors") or refit_motors:
-        report("Fitting each joint's motor to how the real follower moved, which takes about 15 minutes...")
+        report("Fitting each joint's motor to how the real follower moved, which takes about 25 minutes...")
         scene["arm"]["motors"], scene["arm"]["delay_ticks"] = fit.starting_motors(), 0
         scene = fit.fit_motors(scene, out, demos, held, fit_on[:: max(1, len(fit_on) // 5)], teleop_limit, report=report)
         scene = _match_grip(scene, out, demos, held, fit_on[:: max(1, len(fit_on) // 8)], teleop_limit, report)
@@ -349,15 +362,16 @@ def _real_look(picture: np.ndarray) -> dict[str, np.ndarray]:
     up exactly, and a region's colour is matched only where the real frame agrees it's that thing."""
     a = picture.astype(np.int16)
     hsv = cv2.cvtColor(picture, cv2.COLOR_RGB2HSV)
+    hue = looks.hue_degrees(picture)
     dark = a.max(axis=2) < 70
     return {
         "block": fit.red_mask(picture),
         "arm": fit.pale(picture),
         "wall": fit.pale(picture),
         "floor": a.max(axis=2) < 140,
-        "jar_tint": (hsv[..., 0] >= 8) & (hsv[..., 0] <= 30) & (hsv[..., 1] >= 60) & (hsv[..., 2] >= 80),
+        "jar_tint": (hue >= 9) & (hue <= 60) & (hsv[..., 1] >= 60) & (hsv[..., 2] >= 80),
         "mat": dark,
-        "rest": (a[..., 0] - a[..., 2] > 50) & ~dark,  # the table's wood
+        "rest": looks.orange(picture) & ~dark,  # the table's wood
     }
 
 

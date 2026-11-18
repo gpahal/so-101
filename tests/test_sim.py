@@ -254,6 +254,20 @@ class ArmTest(unittest.TestCase):
         self.assertEqual(views.block_misses(pose, lens, 0, [0.25, 0.0, 0.0], lambda before: before < 0.5).size, 0)
         self.assertAlmostEqual(float(lens.project((top - gripper[1])[None] * [1, 1, 1])[0, 0]), 319.5, places=3)
 
+    def test_the_jar_is_found_whole_beside_a_lamp_warmed_wall(self) -> None:
+        from so_101.sim.fit import jar_pixels
+
+        image = np.zeros((480, 640, 3), np.uint8)
+        image[:] = (172, 135, 97)  # the beige wall, warmed by a lamp
+        image[200:280, 200:260] = (158, 111, 70)  # a patch of it warmed more
+        image[300:308, 100:400] = (200, 110, 40)  # the glow along the mat's edge: thin, and bigger than the jar
+        cv2.circle(image, (320, 240), 35, (150, 77, 22), -1)  # the jar's amber, through a saturating camera
+        found = jar_pixels(image, np.array([300.0, 260.0]))
+        rows, columns = np.nonzero(found)
+        self.assertAlmostEqual(columns.mean(), 320, delta=3)
+        self.assertAlmostEqual(rows.mean(), 240, delta=3)
+        self.assertFalse(found[200:280, 200:255].any())
+
     def test_units_convert_both_ways(self) -> None:
         from so_101.sim.arm import Units
 
@@ -265,6 +279,33 @@ class ArmTest(unittest.TestCase):
 
 
 @unittest.skipIf(SKIP, SKIP)
+class LooksTest(unittest.TestCase):
+    """Telling things apart by colour, through a camera that keeps colours muted and one that saturates
+    them. Each colour is one measured in real frames."""
+
+    @staticmethod
+    def patch(rgb) -> np.ndarray:
+        return np.tile(np.asarray(rgb, np.uint8), (20, 20, 1))
+
+    def test_the_block_is_told_from_the_wood_and_the_jar_whatever_the_camera(self) -> None:
+        from so_101.sim.looks import red_mask
+
+        for block in ((101, 35, 40), (171, 1, 2), (198, 1, 2)):  # muted, then saturated top and wrist
+            self.assertTrue(red_mask(self.patch(block)).all(), block)
+        for other in ((180, 90, 40), (186, 56, 1), (175, 43, 1), (245, 72, 6), (150, 77, 22), (127, 49, 22)):
+            self.assertFalse(red_mask(self.patch(other)).any(), other)
+
+    def test_the_pale_arm_and_wall_are_told_from_the_wood_and_the_jar(self) -> None:
+        from so_101.sim.looks import orange, pale
+
+        for light in ((154, 154, 153), (214, 184, 151), (183, 146, 112), (150, 129, 154)):  # grey arm, beige arm and wall, lavender jaw
+            self.assertTrue(pale(self.patch(light)).all(), light)
+            self.assertFalse(orange(self.patch(light)).any(), light)
+        for coloured in ((186, 56, 1), (150, 77, 22)):
+            self.assertFalse(pale(self.patch(coloured)).any(), coloured)
+            self.assertTrue(orange(self.patch(coloured)).all(), coloured)
+
+
 class EnvTest(unittest.TestCase):
     def setUp(self) -> None:
         from so_101.sim.env import BlockContainerEnv
@@ -371,6 +412,15 @@ class EnvTest(unittest.TestCase):
             _, _, terminated, _, info = self.env.step(np.asarray(self.scene["start_pose"]))
         self.assertFalse(terminated)
         self.assertFalse(info["block_in_jar"])
+
+    def test_a_jar_asked_to_stand_in_the_wall_stands_clear_of_it_and_stays(self) -> None:
+        wall, radius = self.scene["wall"]["x"], self.scene["jar"]["radius"]
+        self.env.reset(seed=0, options={"start": 0, "jar": [wall, -0.01]})
+        placed = self.env.jar_pose()[0][:2].copy()
+        self.assertLess(placed[0] + radius, wall)
+        for _ in range(10):
+            self.env.step(np.asarray(self.scene["start_pose"]))
+        np.testing.assert_allclose(self.env.jar_pose()[0][:2], placed, atol=5e-4)
 
     def test_each_step_moves_a_joint_no_further_than_the_limit(self) -> None:
         self.env.reset(seed=0, options={"start": 0})

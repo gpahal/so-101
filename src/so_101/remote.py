@@ -17,9 +17,9 @@ from contextlib import contextmanager, suppress
 
 from so_101 import svtshim
 
-# LeRobot publishes no image tagged for a release, so this is what `latest` was on 2026-11-11, by
-# digest: a job must not change under a working setup when `latest` moves. Move it on purpose. ACT and
-# pi0.5 have both run on it against the 0.7.0 client, on 2026-11-13. `wait_until_ready` checks what
+# LeRobot publishes no image tagged for a release, so this is what `latest` was when pinned, by digest: a
+# job must not change under a working setup when `latest` moves. Move it on purpose. ACT and pi0.5 have both
+# run on it against the 0.7.0 client. `wait_until_ready` checks what
 # PI05_SERVER changes in it took effect, so a new image that renames them fails at `server start`.
 SERVER_IMAGE = "huggingface/lerobot-gpu@sha256:aed1a4990fedee463b545050f33a38afce4f6ec18f7ceb8be17f850737860d6c"
 PORT = 7447

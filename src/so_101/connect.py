@@ -13,7 +13,7 @@ it first: `serve` (`control/main.py`), `run` and `check --live` in their process
 and `teleop`, `record`, `record --dry-run --replay` and `calibrate` through the `so101-teleoperate`,
 `so101-record`, `so101-replay` and `so101-calibrate` entry points below, which run LeRobot's scripts.
 
-A joint can rest a few steps past its calibrated limit: on 2026-11-13 the folded elbow read 3035 against a
+A joint can rest a few steps past its calibrated limit: folded, this arm's elbow has read 3035 against a
 Max_Position_Limit of 3031, because calibration never pushed it to its stop. The servo stores any goal
 past its limits as the limit, so a goal of where it is can't read back. Up to OVERSHOOT_MAX_STEPS past,
 the goal is the limit instead, and the torque pulls the joint that far back in. Further past, it refuses.

@@ -94,10 +94,7 @@ acts, the state changes, or an attempt opens or ends.
    `Link.lost` is set whatever `on_link_loss` says, so even with `"continue"` the autopilot starts nothing
    while the link is lost. A page's first command takes control when no page has it
    (`commands._control`), and nothing gives it back, so a page used once and then closed holds every later
-   start until it, or another page, is back; `r` at the terminal starts one attempt each time. An earlier
-   version refused only while a page had control, its link was lost and `on_link_loss` was `"pause"`, so
-   with no page in control, or with `"continue"`, the autopilot started and ended every attempt with
-   nobody watching.
+   start until it, or another page, is back; `r` at the terminal starts one attempt each time.
 3. **An attempt ends** at its time limit (the controller's, unlabelled, without the outcome prompt
    waiting for an answer), or on a `done` ask: the supervisor sure the task is done once the arm is home,
    and the autopilot ends the attempt unlabelled with Reset at once; the verdict is in the run's events.
@@ -113,9 +110,7 @@ acts, the state changes, or an attempt opens or ends.
    nothing more for that attempt, a `done` ask's Reset included, even after a page watches again: it never
    starts the arm moving (Resume, or Reset from a pause) unless a page in control watches. A return to rest
    it already started finishes even if the page is lost, as every return to rest does, because stopping
-   halfway would leave the arm held in mid-air. An earlier version ended
-   any unanswered pause after 10 s, and so drove the arm to rest when a phone locked after the policy
-   asked for help.
+   halfway would leave the arm held in mid-air.
 4. **A person's Pause, Resume, Rewind, Teleop, Reset or Quit**, sent while an attempt is open, from the
    keys, a signal or the page in control, hands that attempt to them, whether the state machine accepted
    it or not: a Pause refused because the arm is already paused still says a person is at the arm and

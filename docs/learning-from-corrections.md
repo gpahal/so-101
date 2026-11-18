@@ -1,6 +1,6 @@
 # Learning from corrections and rewinds
 
-Status: research, none built beyond HG-DAgger (`build --with corrections,human-attempts`). Written in November 2026 against LeRobot 0.7.0, from the papers listed under [Sources](#sources). Most of the methods below are 2025 and 2026 preprints with no released code, each tested on a single robot, so no one has reproduced their numbers. None of them was tested on ACT.
+Status: research, none built beyond HG-DAgger (`build --with corrections,human-attempts`). Written against LeRobot 0.7.0, from the papers listed under [Sources](#sources). Most of the methods below are recent preprints with no released code, each tested on a single robot, so no one has reproduced their numbers. None of them was tested on ACT.
 
 This note covers training methods that use what `so101 serve` records when a human steps in on the policy. There are two groups:
 

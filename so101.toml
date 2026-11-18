@@ -132,7 +132,7 @@ device = "mps"
 # start-up), rounded up to whole hours. Add a flavor's measured speed to use it.
 # steps_per_demo sets the steps from the demos kept after edits, so each demo is seen as often when
 # you add more. checkpoints sets how many get saved, whatever the length of the run.
-# Speeds measured in November 2026 on 50 demos (17,970 frames). They don't depend on the number of demos:
+# Speeds measured on 50 demos (17,970 frames). They don't depend on the number of demos:
 # ACT on 100 demos (57,723 frames) ran at 0.046 s a step on rtx-pro-6000.
 
 [train.act]
@@ -303,34 +303,43 @@ mode = "off"
 # the ones marked "measure" for accuracy: the demos can't show them.
 [sim]
 # The block: a LEGO DUPLO 2x2 brick by default, 31.8 mm square and 19.2 mm tall under its studs. A ruler
-# on 2026-11-14 read 32 x 32 x 19 mm, which agrees.
+# reads 32 x 32 x 19 mm, which agrees.
 # block_width = 0.0318
 # block_height = 0.0192
 # 6.75 g: BrickLink's catalogue weight for the DUPLO 2x2 brick (part 3437), one of the few figures
 # published for it. Light enough that a grazing jaw moves it.
 block_mass = 0.00675
-# The jar, measured with a ruler on 2026-11-14: 62 to 64 mm across and 70 mm tall, taped over its lower
+# The jar, measured with a ruler: 62 to 64 mm across and 70 mm tall, taped over its lower
 # 52 mm with a clear threaded neck above. Without jar_diameter, its diameter and the height of its
-# tinted band are fitted to the top camera's frames (that fit gave 64 and 50 mm), and its height is the
+# tinted band are fitted to the top camera's frames, and its height is the
 # band plus jar_rim_height of clear neck.
 jar_diameter = 0.063
 jar_height = 0.070
 jar_tint_height = 0.052
 # jar_mass = 0.03  # measure
 # How far the mat's top is above the surface the arm's base stands on; negative if the base stands on
-# something higher than the mat. The base is clamped to the table the mat lies on (photos of
-# 2026-11-14), so this is the mat's thickness, measured at 3 mm. The joint offsets are fitted so that
-# every demo's grasp lands on the mat, so a wrong value here tilts the fitted arm. "fit" fits it from
-# how big the block looks to the top camera instead, which matched the arm's outline worse on the first
-# 100 demos (6.0 px against 3.8).
+# something higher than the mat. The base is clamped to the table the mat lies on, so this is the
+# mat's thickness, measured at 3 mm. The joint offsets are fitted so that every demo's grasp lands on
+# the mat, so a wrong value here tilts the fitted arm. "fit" fits it from how big the block looks to the
+# top camera instead, which the demos can't pin: held lower, the arm's outline fits about as well.
 mat_height = 0.003
 # How the block and the jar slide on the mat. `so101 sim physics` fits this from recorded pushes;
 # setting it here wins. The mat is a smooth cloth mouse pad; no measured figure for plastic on one was
 # found, and plastic on woven fabric is usually 0.3 to 0.5, so 0.4. The block itself is 0.3 and the higher
-# of the two counts. Against the 0.6 assumed before, it changed no replayed demo's outcome but one.
+# of the two counts.
 table_friction = 0.4
-# How the block slides against the jaws. The arm model's own 1.0 kept hold of blocks the real jaws let
+# How the block slides against the jaws. The arm model's own 1.0 keeps hold of blocks the real jaws let
 # go; 0.3 to 0.45 lets the most demos replay (`uv run so101 sim replay`).
 # jaw_friction = 0.35
+# Each arm joint's offset from the arm model, shoulder_lift to wrist_roll in degrees, checked at the arm:
+# with the closed jaws touched to a tissue's corners on the mat, the model's jaws rest within 1.5 mm of it.
+# The demos alone can't say how the offsets split between the joints: fitted freely, the gripper comes
+# out pitched 5 degrees differently, and fewer replayed demos put the block in the jar. They hold for this
+# calibration of the follower: remove them after recalibrating, and rebuild with --refit-cameras.
+joint_offsets_deg = [-0.686, -5.816, -1.66, 5.164]
+# How much bare table the wrist camera sees past the mat's left edge (the default is 25 mm). Here the mat
+# reaches the table's edge, and the floor's carpet starts right past it: the wrist camera's frames show
+# only a thin rim. The top camera can't measure this.
+table_past_mat = 0.0
 # How far the floor is below the table top. Only the wrist camera's view past the table's edge uses it.
 # floor_below = 0.74

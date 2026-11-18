@@ -144,7 +144,8 @@ def build_model(scene: dict, scene_dir: Path) -> mujoco.MjModel:
         if joint.name in arm["motors"]:
             joint.frictionloss = arm["motors"][joint.name]["friction"]
             joint.armature = arm["motors"][joint.name]["armature"]
-            joint.damping = arm["motors"][joint.name]["damping"]
+            # MuJoCo 4 takes damping as polynomial coefficients, linear first; the motors' is linear only.
+            joint.damping = [arm["motors"][joint.name]["damping"], 0.0, 0.0]
     # The follower's calibrated range for each joint, which LeRobot keeps its goals within, replaces the
     # model's: the real arm folds a few degrees further than the drawing allows.
     limits = np.array([arm["limits"][name] for name in JOINTS], dtype=np.float64)
@@ -496,9 +497,11 @@ class BlockContainerEnv(gym.Env):
         self.data.qpos[adr + 3 : adr + 7] = quat
 
     def set_jar(self, xy) -> None:
-        """Stand the jar on the mat."""
+        """Stand the jar on the mat, no further out than the wall lets it: started inside the wall, it would
+        be shoved out of it at the first physics step."""
         adr = self.jar_qadr
-        self.data.qpos[adr : adr + 3] = [*xy, self.table_height + 0.0005]
+        furthest = self.scene["wall"]["x"] - self.scene["jar"]["radius"] - 0.001
+        self.data.qpos[adr : adr + 3] = [min(float(xy[0]), furthest), float(xy[1]), self.table_height + 0.0005]
         self.data.qpos[adr + 3 : adr + 7] = [1.0, 0.0, 0.0, 0.0]
         self.data.qvel[self._model.joint("jar_joint").dofadr[0] :][:6] = 0
 
