@@ -12,6 +12,7 @@
 ## Commands
 
 - `uv run python -m unittest discover -s tests` runs the tests without hardware; CI runs them on every pull request.
+  - Before pushing, run them as CI does: `HF_HUB_OFFLINE=1 uv run --isolated --locked python -m unittest discover -s tests`. CI has neither the sim extra nor the `failbench` group, and the isolated env has neither, so a test that imports either without skipping fails there as it would on CI. A test that needs the sim extra subclasses `test_sim.SimTestCase`.
   - `tests/fakes.py` runs LeRobot's real follower and motor code over `FakeMotors` (rustypot has no in-memory bus), with fake cameras, a scripted policy and `NoRecorder` for controller tests that read no run from disk. Its comments say which logging it silences and how to see it. It makes the encoder's frame queue unbounded, because the tests tick faster than real time.
   - Control center tests submit a command, advance a tick and read the status. Assert on motor goals, the status and command results, never on private fields.
   - A LeRobot upgrade must pass them, because the controller uses LeRobot internals.

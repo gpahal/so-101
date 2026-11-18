@@ -1,8 +1,8 @@
 """The simulated twin (`so101 sim`): its lens, the arm's kinematics and the environment's physics.
 
-The lens needs nothing extra. The rest needs the sim extra (`uv sync --extra sim`) and the arm model,
-which `so_101.sim.arm.arm_xml` downloads from the Hub once, so those tests skip without either: CI
-installs neither. They build a small scene of their own, so they need no demos.
+The lens, colour and aim tests need only OpenCV. The rest (`SimTestCase`) need the sim extra
+(`uv sync --extra sim`) and the arm model, which `so_101.sim.arm.arm_xml` downloads from the Hub once,
+so they skip without either: CI installs neither. They build a small scene of their own, so they need no demos.
 """
 
 import json
@@ -33,6 +33,12 @@ def _arm_model_missing() -> str | None:
 
 
 SKIP = _arm_model_missing()
+
+
+@unittest.skipIf(SKIP, SKIP)
+class SimTestCase(unittest.TestCase):
+    """A test that needs the sim extra and the arm model. Subclass it rather than decorating each class,
+    so a class added between a decorator and the class it was meant for can't take its skip."""
 
 
 class LensTest(unittest.TestCase):
@@ -143,8 +149,7 @@ def scene_files(folder: Path) -> dict:
     return scene
 
 
-@unittest.skipIf(SKIP, SKIP)
-class ArmTest(unittest.TestCase):
+class ArmTest(SimTestCase):
     def test_batched_kinematics_match_mujoco(self) -> None:
         import mujoco
 
@@ -278,7 +283,6 @@ class ArmTest(unittest.TestCase):
         self.assertAlmostEqual(np.degrees(units.to_qpos(readings[0])[5]), -11.7 + 19.0 * 1.314)
 
 
-@unittest.skipIf(SKIP, SKIP)
 class LooksTest(unittest.TestCase):
     """Telling things apart by colour, through a camera that keeps colours muted and one that saturates
     them. Each colour is one measured in real frames."""
@@ -306,7 +310,7 @@ class LooksTest(unittest.TestCase):
             self.assertTrue(orange(self.patch(coloured)).all(), coloured)
 
 
-class EnvTest(unittest.TestCase):
+class EnvTest(SimTestCase):
     def setUp(self) -> None:
         from so_101.sim.env import BlockContainerEnv
 
@@ -487,8 +491,7 @@ class OneDemo:
         return np.full((480, 640, 3), self.TOP if camera == "top" else self.WRIST, np.uint8)
 
 
-@unittest.skipIf(SKIP, SKIP)
-class PhotoTest(unittest.TestCase):
+class PhotoTest(SimTestCase):
     """Drawing from the demos' real frames. The stand-in demo's frames are one colour, so a pixel taken
     from a real frame has exactly that colour, and a rendered one doesn't."""
 
