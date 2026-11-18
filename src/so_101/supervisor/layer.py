@@ -10,16 +10,14 @@ the tick down or drives the arm itself:
   answered by `answer_within_s` counts as no answer. Settling cancels the check's calls still queued,
   and each request times out at `answer_within_s` too, so a stale check neither bills nor holds a worker.
 - **Rewind and retry.** A miss (an after_close check that both judges call wrong) plays back
-  `miss_rewind_s[n]` of the model's own measured motion, newest first (`control.rewind`, the same
-  playback as serve's Rewind), on the model's clock: its history counts each tick the model drove as
-  1/fps of the task's fps, as the perception's clock does, so a playback replays one recorded pose per
-  tick and reaches the close the check was for at any loop speed. Then it hands the arm back with
-  `Handback(LAYER, moved=True)`, so the layers below restart from where the arm is: the perception's
-  detector forgets the close it undid. A playback
+  `miss_rewind_s[n]` of the model's own measured motion, newest first (`control.rewind`, the playback a
+  person's Rewind uses), on the model's clock (1/fps per tick it drove, as the perception's), so it
+  reaches the close the check was for at any loop speed. Then it hands the arm back with
+  `Handback(LAYER, moved=True)`, so the perception's detector forgets the close it undid. A playback
   that stops short (a joint still more than `rollout.TOLERANCE` off after `REWIND_SETTLE_S`) hands
   nothing back: it holds where it stopped and asks for a person, as a person's Rewind does. A miss past
-  that list counts as stuck. While the list has rungs left and both judges answer, a `regrasp_loop` rule
-  is left to it.
+  that list counts as stuck. While the list has rungs left, both judges answer and the budget lasts, a
+  `regrasp_loop` rule is left to it (`_ladder_open`).
 - **Hold and check.** A stuck rule holds the arm and asks the watch check. A sure ok hands it back with
   `Handback(LAYER, moved=False)`; anything else, or no answer within `hold_deadline_s`, asks for a person
   (`Output.asks`), and the escalation model's advice for them follows as a message (`maintain`), once an
@@ -34,7 +32,7 @@ the tick down or drives the arm itself:
 Every verdict carries the generation it was asked in, raised by `pause`, `run` and each hold: a watch
 verdict settles only the hold it was asked for, and an after_close verdict is dropped after a pause or
 resume, a newer close, a carry or release since it was asked, or once it is `after_close_answer_s` of
-the model's time old, when the first playback would no longer reach back past the close. A check not
+the model's time old, when the first playback could not reach back past the close. A check not
 yet sent is dropped at a pause or resume too, and an after_close check not yet sent when a newer close
 comes is dropped unsent; every check keeps the close it was scheduled for. Those scheduling rules are
 `supervisor.schedule.Schedule`, which `failbench.candidates` shares. A handback that moved the arm
@@ -52,7 +50,7 @@ scores for the same moment; only the watch check's lookback ring keeps one every
 they're about real time, a person's and a provider's, not the model's.
 
 What the runner owns, it leaves alone: it never ends, labels or resets an attempt, and anything between
-`pause` and `run` (a person's Teleop, a serve Rewind) is outside it. After each handback its playback
+`pause` and `run` (a person's Teleop or Rewind) is outside it. After each handback its playback
 history starts again, so it never drives back past a pose something else set.
 """
 
@@ -71,7 +69,7 @@ from so_101.supervisor.schedule import Schedule
 MODES = ("off", "shadow", "act")
 CAMERAS = ("top", "wrist")
 FRAME_EVERY_S = 0.2  # frames kept in the watch check's lookback ring at most this often
-FORGET_AFTER_S = 300.0  # a call still out this long after its check settled is no longer waited for, even to log
+FORGET_AFTER_S = 300.0  # a call still out this long after its check settled isn't waited for, even to log
 PASS, REWINDING, HOLDING = "pass", "rewinding", "holding"  # what the layer is doing with the arm
 EVENT_ROLES = ("decision", "chat")
 
@@ -206,9 +204,7 @@ class Supervisor(Layer):
         """This tick's goal: the stack below's, the next of a playback's, or the hold. The layer's own
         logic runs in `safely`; every call to the stack below, and the playback's goals to the arm, run
         outside it, so what they raise is theirs, for the runner."""
-        # The model's clock: each tick counts 1/fps, as the perception's does, so a playback replays one recorded
-        # pose per tick, newest first, and reaches as far back at any loop speed. The first after a handback adds
-        # nothing.
+        # The model's clock, as the perception's: 1/fps a tick, the first after a handback adding nothing.
         dt = 1 / self.ctx.fps if self._stepped else 0.0
         self._stepped = True
         self.safely(self._observe, tick)
@@ -253,7 +249,7 @@ class Supervisor(Layer):
         return replace(out, asks=out.asks or asking or later)
 
     def _plan(self, want: tuple, made: list) -> None:
-        """What a decision asks the next step to start, as (kind, the playback): nothing when it no longer applies."""
+        """What a decision asks the next step to start, as (kind, the playback): nothing when it doesn't apply."""
         a = self.attempt
         if want[0] == REWINDING and a is not None and a.history.moments:
             made.append((REWINDING, R.Rewind(a.history, want[1], self.ctx.clock)))
@@ -339,9 +335,7 @@ class Supervisor(Layer):
         if (a := self.attempt) is not None:
             frames = {name: tick.observation[name] for name in self.cameras if name in tick.observation}
             if frames:
-                # Every check sends the tick's own frames, the ones `failbench.candidates` scores for that moment.
-                # They're encoded only when a check is sent (`_images`). Only the watch check's lookback ring is
-                # thinned to one every FRAME_EVERY_S.
+                # Encoded only when a check is sent (`_images`); the ring keeps one every FRAME_EVERY_S.
                 a.frames = frames
                 if self._frames_at is None or tick.now - self._frames_at >= FRAME_EVERY_S:
                     a.ring.append((tick.now, frames))
@@ -526,7 +520,7 @@ class Supervisor(Layer):
                               f"{self.p.hold_deadline_s:g} s")
 
     def _settle(self, check: _Check, **fields) -> None:
-        """Log the check as settled. A call it no longer waits for that hasn't started is cancelled, so it
+        """Log the check as settled. A call still out that hasn't started is cancelled, so it
         neither bills nor keeps a worker; one already running finishes, and is logged as a late answer."""
         check.settled = True
         cancelled = [role for role, future in check.futures.items() if role not in check.answers and future.cancel()]
@@ -540,7 +534,7 @@ class Supervisor(Layer):
                  **dropped)
 
     def _stale(self, check: _Check, a: _Attempt | None) -> str | None:
-        """Why a check's answer no longer applies, or None."""
+        """Why a check's answer doesn't apply, or None."""
         if a is None or a.number != check.number:
             return "other_attempt"
         if check.moment == "watch":

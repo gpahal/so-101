@@ -3,15 +3,14 @@
 It takes LeRobot's rollout arguments, builds the policy, robot and engine through LeRobot's rollout
 context as `lerobot-rollout` does, and then runs the controller instead of a rollout strategy.
 
-It loads so101.toml and tasks.toml itself, as `so101 serve` does, and inherits `serve`'s environment,
-so `SO101_CONFIG` and `SO101_DATA_DIR` apply here too. The rest pose, the leader and the `[control]`
+It loads so101.toml and tasks.toml itself, as `so101 serve` and `so101 run` do, and inherits their
+environment, so `SO101_CONFIG` and `SO101_DATA_DIR` apply here too. The rest pose, the leader and the `[control]`
 limits come from so101.toml, the cameras from the task in tasks.toml, and the demos' start pose from
 the task's local training set. Only what's particular to one run comes through one environment
-variable, RUN_ENV: the run's folder, which names its task, and the run.json `serve` built, with the
-fps, the operator and the policy (whether it runs on the cloud GPU's server, in which job), and in
-`so101 run` the autopilot's settings. Before it
-connects anything, it checks the rest pose and the `[control]` settings as `serve`'s preflight does,
-and works out the start pose, so a bad setting or an unreadable training file stops it first.
+variable, RUN_ENV: the run's folder, which names its task, and the run.json `serve` or `run` built,
+with the fps, the operator and the policy (whether it runs on the cloud GPU's server, in which job),
+and in `so101 run` the autopilot's settings. Before it connects anything, it checks the rest pose and
+the `[control]` settings as their preflight does, and works out the start pose, so a bad setting or an unreadable training file stops it first.
 
 The run's folder and its run.json are made here, only once the page's port is bound and the policy
 has loaded, so a start that fails makes nothing under data/.
@@ -34,24 +33,21 @@ from pathlib import Path
 # No `from __future__ import annotations` here: LeRobot's parser reads the config's type from the
 # annotation of `cfg` on `main`'s `run`, and a string annotation breaks it.
 
-# JSON: dir (the run's folder, <data_dir>/<task>/runs/<name>, not made yet), manifest (run.json's
-# contents: `control.fps`, `operator`, `mode` (serve or run), `autopilot` in run, and `policy` with its
-# type, revision, the Hub `commit` the model's files were read at (`commands.policy.policy_setup`),
-# inference ("local" or "remote") and job, and for a skills run its `skills` and the
-# `gripper_sha256` its model was checked against, which `require_run_skills` checks the files against
-# again; a remote run adds the checkpoint its server admitted it to, `artifact_identity`) and, when
-# given, supervisor (off, shadow or act, over so101.toml's `[supervisor] mode`). The remote server itself is reached through `--inference.*`
-# arguments; the manifest says what it serves. This process adds `grasp_thresholds` and
-# `supervisor_program` to the manifest: the files the perception and supervisor read, and their versions,
-# with how runs are labelled, the grasp detector included (`skills.RUN_LABEL_VERSION`), beside the thresholds',
-# and the supervisor's mode (with the supervisor off, the mode alone: no program is read).
+# JSON from `so101 serve` or `so101 run`: dir (the run's folder, <data_dir>/<task>/runs/<name>, not made yet),
+# supervisor when given (off, shadow or act, over `[supervisor] mode`), and manifest, run.json's contents:
+# `control.fps`, `operator`, `mode` (serve or run), `autopilot` in run, and `policy` (type, revision, the Hub
+# `commit` its files were read at, inference "local" or "remote", job, and for a skills run `skills` and
+# `gripper_sha256`, which `require_run_skills` checks again). The remote server is reached through
+# `--inference.*`. This process adds `grasp_thresholds` and `supervisor_program` (the files the perception and
+# supervisor read, their versions and `skills.RUN_LABEL_VERSION`; with the supervisor off, the mode alone), and
+# for a remote run `policy.artifact_identity`, the checkpoint its server admitted it to.
 RUN_ENV = "SO101_RUN"
 # Ctrl+C, `kill` and a closed terminal all quit as Esc does:
 # the arm goes to rest before the motors turn off. Without a handler, SIGTERM and SIGHUP would end the
 # process at once, and the motors would turn off wherever the arm is. They submit Quit with source
 # `signal`, and no signal can confirm exiting where the arm can't get to rest: only y at the terminal
 # does (states.py). With no terminal, the arm then holds until its power is switched off. Closing the
-# terminal sends SIGHUP to the whole process group, and `so101 serve` passes its own copy on as SIGINT:
+# terminal sends SIGHUP to the whole process group, and `so101 serve` or `so101 run` passes its own copy on as SIGINT:
 # the second Quit is refused while the first is under way.
 QUIT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
@@ -202,7 +198,7 @@ def checker(s, task_name: str):
         from so_101.check import check_arm_files, check_cameras, check_motors, check_system, check_task, find_cameras
         from so_101.report import Report
 
-        task = tasks.load().get(task_name)  # None if it left tasks.toml while `serve` runs
+        task = tasks.load().get(task_name)  # None if it left tasks.toml while the run is on
         report = Report()
         check_system(report, s, [s.camera(name) for name in cameras], keyboard=False, hub=False)
         for name, bus in buses.items():
@@ -398,7 +394,7 @@ def control(cfg) -> None:
     # The page's port is taken before the policy loads, so a port in use fails in seconds.
     # With `tailscale serve` set up for the port, the page is HTTPS on this Mac's MagicDNS name, and
     # the server listens on 127.0.0.1 behind it. A Tailscale route that would make it unsafe stops
-    # serve here, before anything connects.
+    # it here, before anything connects.
     port = control_settings.port
     try:
         bind = resolve_bind(control_settings, command)
@@ -553,7 +549,7 @@ def main() -> None:
     require_serve_env()  # first: nothing else here means anything without it
     from so_101 import connect, svtshim
 
-    svtshim.ensure()  # `so101 serve` starts this with the fix loaded
+    svtshim.ensure()  # `so101 serve` and `so101 run` start this with the fix loaded
     svtshim.require()  # the recorder encodes each attempt's video with SVT-AV1 in this process
     from lerobot.configs import parser
     from lerobot.rollout import RolloutConfig
@@ -561,7 +557,7 @@ def main() -> None:
     from lerobot.utils import register_third_party_plugins
 
     register_third_party_plugins()
-    connect.install()  # the follower connects holding where it is, never at an old goal
+    connect.install()  # the follower connects holding where it is, never at a stale goal
 
     @parser.wrap()
     def run(cfg: RolloutConfig) -> None:

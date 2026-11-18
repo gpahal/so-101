@@ -48,7 +48,7 @@ class Arm:
         """The first FINGERPRINT_DIGITS hex digits of the calibration file's SHA-256, or None without a file.
 
         `pose --save-rest` saves the follower's beside the rest pose, which is in raw motor steps:
-        recalibrating moves where each step count puts a joint, so the saved pose no longer folds the arm.
+        recalibrating moves where each step count puts a joint, so the saved pose then doesn't fold the arm.
         """
         if not self.calibration_file.is_file():
             return None
@@ -104,9 +104,9 @@ class ConfigError(RuntimeError):
 
 def step_cap(value, where: str) -> float:
     """`[teleop] max_relative_target`, or a forwarded `--robot.max_relative_target` (`where` names
-    which), refused unless it's a finite number, 0 or more. LeRobot clamps
-    each goal to within the cap of where the arm is, so a negative cap moved every joint by it on
-    every goal, holds included: an arm at rest crept 10 degrees a tick."""
+    which), refused unless it's a finite number, 0 or more. LeRobot clamps each goal to within the cap
+    of where the arm is, so a negative cap moves every joint by it on every goal, holds included: an
+    arm at rest creeps 10 degrees a tick."""
     try:
         cap = float(value)
     except (TypeError, ValueError):
@@ -346,10 +346,6 @@ def _file(section: dict, key: str, where: str, path: Path) -> Path | None:
 
 
 def _run(section: dict, path: Path) -> Run:
-    if "duration_s" in section:
-        # `so101 run` once took its attempts' length from here; left in, it would change nothing.
-        raise ConfigError(f"[run] duration_s in {path} is no longer read: an attempt lasts [control] attempt_limit_s "
-                          "of policy time, and `so101 run --duration` sets another for one run. Remove the line.")
     episodes = section.get("episodes", 1)
     if type(episodes) is not int or episodes < 1:  # not int(episodes), which takes 1.5 and true
         raise ConfigError(f"[run] episodes in {path} is {episodes!r}: set it to a whole number, 1 or more.")

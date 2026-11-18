@@ -1,8 +1,8 @@
 """The leaf of the policy stack: a LeRobot inference engine, one control tick at a time, as LeRobot's
 rollout strategies run it. The only module that touches LeRobot's inference (`base.Policy`).
 
-The control loop steps the stack only while it drives, and the stack steps this only while the model drives. Every action goes through LeRobot's
-dispatch gate (`next_interpolated_action`, `commit_action`), the robot action processor and
+The control loop steps the stack only while it drives, and the stack steps this only while the model
+drives. Every action goes through LeRobot's dispatch gate (`next_interpolated_action`, `commit_action`), the robot action processor and
 `follower.Arm`, so `max_relative_target` still caps it.
 
 The engine is local (sync) or remote (the cloud GPU's policy server). Both clear their queued actions
@@ -11,18 +11,15 @@ the server confirms.
 
 An exception a step raises from the policy's side (inference, its processors, the engine's gate) is
 the driver's `failure` from then on, whatever the engine's own `failed` says: a local policy that
-raised once refuses Resume until `serve` restarts. The controller tells the two apart and sets
+raised once refuses Resume until so101 restarts. The controller tells the two apart and sets
 `raised` (`Controller._drive`): one raised by the robot (sending the goal or holding) is the
 follower's, not the policy's, and isn't kept.
 
-LeRobot's remote engine never reconnects after a fault. With `reconnect`, a function that connects a
-new remote engine, the driver builds one in a background thread once the policy has failed, retrying
-every RECONNECT_EVERY_S, and swaps it in on the control loop's thread in `maintain`. Nothing moves
-meanwhile: a failure while the policy drives faults the arm, and Resume stays refused until the new
-engine is in. LeRobot's policy
-server admits one session at a time, and an engine that failed releases its own. One that didn't,
-because the exception came from a step on the policy's side, still holds it, so that thread stops
-the old engine before it connects: otherwise every new session would be refused as busy.
+LeRobot's remote engine never reconnects after a fault. With `reconnect`, the driver builds a new engine
+in a background thread once the policy has failed, retrying every RECONNECT_EVERY_S, and swaps it in on
+the loop's thread in `maintain`; Resume stays refused until then. The policy server admits one session
+at a time: an engine that failed releases its own, but one whose step raised on the policy's side still
+holds it, so that thread stops the failed engine first.
 """
 
 import threading
@@ -213,7 +210,7 @@ class EngineDriver:
         """An attempt opened. The engine needs nothing: `run` clears it before the policy drives."""
 
     def end_episode(self) -> None:
-        """The attempt closed."""
+        """Nothing to do: the engine keeps no per-attempt state."""
 
     @property
     def failure(self) -> str | None:

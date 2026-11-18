@@ -18,10 +18,12 @@ labels.toml), so both ways write identical files.
                            "cameras", "joints" ({"names", "values"}, one list per joint), "bands"
                            (spans of each `control.skill` or `control.driver` column a recording has,
                            each span with its "value" and "label", the skill's or driver's name),
+                           "notes" (an attempt's notes from the analysis; none for a demo),
                            and for a demo "suggestion" ({"keep", "delete", "hint"}), "edit" and
                            "min_seconds"; for an attempt "phases", "interruptions", "events" (each
                            with "type", "frame" and "text", and "start_frame" and "end_frame" when
-                           it marks a range), "outcome", "recorded_outcome" and "labelled"
+                           it marks a range), "outcome", "recorded_outcome", "labelled", "ended_by" and
+                           "outcomes" (the choices)
     GET  /frames/<id>/<camera>?from=A&to=B
                            frames A up to B (stop not included, at most FRAMES_PER_REQUEST) of the
                            camera, as JPEGs up to WIDTH px wide, packed one after another, each
@@ -346,7 +348,7 @@ class Runs:
     kind = "runs"
 
     def __init__(self, s: Settings, task: Task, only: str | None, everything: bool) -> None:
-        """Prints each run's notes, as `review_runs.collect` does, and each attempt left out."""
+        """Prints each attempt it leaves out; `review_runs.collect` prints each run's notes."""
         self.s, self.task = s, task
         self.todo = review_runs.collect(s, task, only, everything)
         self.notes: list[str] = []  # the attempts left out, and why

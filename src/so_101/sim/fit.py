@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import mujoco
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, minimize
 from scipy.spatial import cKDTree
 
 from so_101.sim import arm
@@ -22,11 +22,11 @@ from so_101.sim.camera import HEIGHT, WIDTH, Lens, look_through, rotation, rotat
 from so_101.sim.arm import GRASP_DEPTH, TIPS_ABOVE_MAT, held_block
 from so_101.sim.demos import FPS, Demos
 from so_101.sim.env import GROUP_BLOCK, BlockContainerEnv, jar_outline, table_points
-from so_101.sim.looks import blob, pale, red_blob, red_mask, whole
+from so_101.sim.looks import blob, orange, pale, red_blob, red_mask, saturation, whole
 
 # How many ticks older than the joints saved with it a top camera picture is taken to be while the camera
-# is being fitted, before `camera_timing` can measure it: what it measured on the first 100 demos. Fitting
-# on still frames alone needs no guess, but leaves too few poses: the outline then fitted 5.4 px out, not 3.8.
+# is being fitted, before `camera_timing` can measure it, which finds 2 to 3. Fitting on still frames alone
+# needs no guess, but leaves too few poses for the wrist's roll to be pinned.
 TOP_DELAY_GUESS = 3
 # Degrees a second under which the arm counts as still: the wrist camera's delay isn't known, so its fits
 # use only frames where it can't matter.
@@ -69,8 +69,7 @@ def dark_scene(demos: Demos, episodes: list[int]) -> np.ndarray:
 
 def arm_region(dark: np.ndarray) -> np.ndarray:
     """Where the pale arm can be told from what's behind it: over the mat, the dark floor and the orange table."""
-    a = dark.astype(np.int16)
-    region = (a.max(axis=2) < 80) | ((a[..., 0] - a[..., 2]) > 60)
+    region = (dark.max(axis=2) < 80) | orange(dark)
     return cv2.erode(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
 
 
@@ -193,10 +192,10 @@ def push_while_closing(demos: Demos, episode: int, hold: int) -> float | None:
     """How far the jaws slid the block towards the fixed jaw as they closed on it, in metres, or None if
     the wrist camera didn't see the whole block at both ends.
 
-    The moving jaw meets the block first and shoves it across until the fixed jaw stops it: on the first
-    100 demos 4.2 mm (median 4.1, SD 2.3) against the gripper and about 3 mm over the mat. The wrist camera
-    rides on the gripper, so the block's outline crossing its picture between the frame the jaws start to
-    close and the hold is that slide. The block's own width is the ruler, so no fitted camera is needed.
+    The moving jaw meets the block first and shoves it across until the fixed jaw stops it, by a few
+    millimetres against the gripper and a little less over the mat. The wrist camera rides on the gripper,
+    so the block's outline crossing its picture between the frame the jaws start to close and the hold is
+    that slide. The block's own width is the ruler, so no fitted camera is needed.
     """
     state = demos.episode(episode)[0]
     start = closing_starts(state, hold)
@@ -244,22 +243,32 @@ def offset_slack(limits: dict[str, list[float]]) -> np.ndarray:
     return np.array(slack)
 
 
-def fit_top_camera(data: TopFit, gripper_closed: float, deg_per_percent: float, block: dict, table_height: float | None, limits: dict, report=print) -> dict:
+def fit_top_camera(
+    data: TopFit, gripper_closed: float, deg_per_percent: float, block: dict, table_height: float | None, limits: dict,
+    report=print, previous: dict | None = None, distances: tuple[float, ...] = (0.3, 0.4, 0.5, 0.65), rounds: int = 6,
+    offsets: list[float] | None = None,
+) -> dict:  # fmt: skip
     """Fit the top camera's pose and lens, the arm's joint offsets and the mat's height together.
 
     The drawn arm has to cover the real arm's pixels in frames spread over the demos, the block has to
     appear where it lay before the jaws closed on it (where they held it, less the slide closing gave it:
-    `push_while_closing`) and as big as it really looks, and that grasp has to sit on the mat. Each alone leaves something open: outlines barely change when the camera backs off and zooms
-    in, the block's sightings are nearly flat, its size says how far the mat is from the camera but not
+    `push_while_closing`) and as big as it really looks, and that grasp has to sit on the mat. Each alone
+    leaves something open: outlines barely change when the camera backs off and zooms in, the block's
+    sightings are nearly flat, its size says how far the mat is from the camera but not
     from the arm, and only a grasp on the mat ties the arm's reach to it.
 
     `table_height` is the mat's top in the arm model's axes, if it was measured (the model's base has its
     underside at `arm.base_underside()`); otherwise it's fitted.
     `limits` is each joint's calibrated range, which says how far an offset can plausibly be from zero
-    (`offset_slack`). Offsets are pulled towards zero by that measure, but only weakly: on the first 100
-    demos the arm's outline wanted 6.5 degrees at the elbow, where the ranges allow under 2, and a pull
-    strong enough to refuse that left the outline 5.1 px out instead of 3.8.
+    (`offset_slack`). Offsets are pulled towards zero by that measure, but only weakly: the arm's outline
+    wants about 6 degrees at the elbow, where the ranges allow under 2, and the elbow's offset is real: the
+    model's forearm meets its upper arm 6 degrees before its limit.
     The shoulder's pan has no offset: turning the arm and turning the camera round it look the same.
+    `previous` is the scene's last top camera, one more place to start from: a camera that was moved keeps
+    its lens, and from the blocks alone the fit can settle on a lens that bends the picture the wrong way.
+    Every start is followed to the end, and the one that fits best is kept.
+    `offsets`, shoulder_lift to wrist_roll in degrees, fixes the joint offsets (`[sim] joint_offsets_deg`),
+    for a follower calibrated as it was when they were fitted: then only the camera and the mat are fitted.
     """
     units = arm.Units((0.0,) * 5, gripper_closed, deg_per_percent)
     grasped = held_block(units, data.block_states)
@@ -303,23 +312,30 @@ def fit_top_camera(data: TopFit, gripper_closed: float, deg_per_percent: float, 
 
     measured = table_height is not None
     camera_only = np.r_[np.arange(9), [] if measured else [13]].astype(int)
-    everything = np.r_[np.arange(13), [] if measured else [13], [14, 15]].astype(int)
-    best = None
+    everything = np.r_[np.arange(9 if offsets is not None else 13), [] if measured else [13], [14, 15]].astype(int)
+    held_offsets = np.zeros(4) if offsets is None else np.asarray(offsets, dtype=np.float64)
+    height_guess = table_height if measured else float(np.median(grasped[data.resting, 2])) - TIPS_ABOVE_MAT - GRASP_DEPTH
+    starts = []
     # Blocks alone can't tell a near camera with a wide lens from a far one with a long lens, so try a few.
-    for distance in (0.3, 0.4, 0.5, 0.65):
+    for distance in distances:
         position = centre + to_world[:, 2] * distance  # a camera looks down its -z
         position -= (to_world[:, 0] * (centre_pixel[0] - WIDTH / 2) - to_world[:, 1] * (centre_pixel[1] - HEIGHT / 2)) / scale
-        x = np.r_[position, facing, scale * distance, 0.15, 0.0, np.zeros(4), table_height if measured else float(np.median(grasped[data.resting, 2])) - TIPS_ABOVE_MAT - GRASP_DEPTH, 0.0, 0.0]
+        starts.append((np.r_[position, facing, scale * distance, 0.15, 0.0, held_offsets, height_guess, 0.0, 0.0], f"a camera {distance:.2f} m from the blocks"))
+    if previous is not None:
+        lens = previous["lens"]
+        starts.append((np.r_[previous["pose"], lens["focal"], lens["k1"], lens["k2"], held_offsets, height_guess, lens["centre"]], "the last build's camera"))
+    best = None
+    for x, name in starts:
         x, cost = solve(x, camera_only, 30)
-        report(f"  camera {distance:.2f} m from the blocks: mismatch {cost:.2f}")
+        for _ in range(rounds):
+            x, improved = solve(x, everything, 40)
+            if improved > cost * 0.995:
+                break
+            cost = improved
+        report(f"  from {name}: mismatch {cost:.2f}")
         if best is None or cost < best[1]:
             best = (x, cost)
     x, cost = best
-    for _ in range(6):
-        x, improved = solve(x, everything, 40)
-        if improved > cost * 0.995:
-            break
-        cost = improved
     pose, lens, offsets, height = unpack(x)
     found = data.residuals(pose, lens, offsets, gripper_closed, deg_per_percent, height + block_centre)
     return {
@@ -415,7 +431,12 @@ def jar_pixels(image: np.ndarray, near: np.ndarray, reach: float = 85.0) -> np.n
     """The jar in a top camera frame: its amber, with the dark thread round its neck filled in. `near` is
     a pixel on it, and nothing further than `reach` pixels from there counts, which leaves out the table."""
     a = image.astype(np.int16)
-    amber = (a[..., 0] - a[..., 2] > 22) & (a[..., 0] >= a[..., 1]) & (a[..., 1] >= a[..., 2] - 2) & (a[..., 0] > 55) & (a[..., 0] < 2 * a[..., 1])
+    # Strongly coloured: the beige wall behind it is as orange in hue, but greyer (saturation 0.4 to 0.55
+    # where a lamp warms it, against the jar's 0.9) and greener (0.72 to 0.8 of its red, against the jar's
+    # 0.45). A muted camera gives the jar half as much green as red, one that saturates colours a third;
+    # the wood, which can be as red, is never this close to it.
+    amber = (a[..., 0] - a[..., 2] > 22) & (a[..., 0] >= a[..., 1]) & (a[..., 1] >= a[..., 2] - 2) & (a[..., 0] > 55)
+    amber &= (a[..., 0] < 3.2 * a[..., 1]) & (a[..., 1] < 0.66 * a[..., 0]) & (saturation(image) > 0.6)
     v, u = np.indices(amber.shape)
     amber &= np.hypot(u - near[0], v - near[1]) < reach
     amber = cv2.morphologyEx(amber.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
@@ -432,12 +453,30 @@ def _overlap(a: np.ndarray, b: np.ndarray) -> float:
 
 def fit_jars(demos: Demos, episodes: list[int], pose, lens: Lens, jar: dict, table_height: float, guess_xy, measured: bool) -> tuple[dict, dict[int, list[float]]]:
     """Where the jar stood in each demo, from its first frame, and the jar's size unless it was measured.
+    `guess_xy` is where to look for it: one place for every demo, or each demo's own, such as where its
+    block was let go, for demos that stood the jar in more than one place.
 
     The jar's amber is everything below the far side of its rim, so its outline there is a cylinder as
     tall as the jar. The size that fits the demos' frames best is found first, then each demo's place.
     """
-    near = lens.project(to_camera(np.array([[*guess_xy, table_height + jar["height"] / 2]]), pose))[0]
-    real = {episode: jar_pixels(demos.frame(episode, 0), near) for episode in episodes}
+    guesses = guess_xy if isinstance(guess_xy, dict) else dict.fromkeys(episodes, guess_xy)
+    guesses = {episode: np.asarray(guesses[episode], dtype=np.float64) for episode in episodes}
+
+    def near(xy):
+        return lens.project(to_camera(np.array([[*xy, table_height + jar["height"] / 2]]), pose))[0]
+
+    real = {}
+    for episode in episodes:
+        # Find the jar first over a wider area, as its largest solid patch of amber: from where it stood on
+        # average, a jar at one end of its places is half out of reach. The opening drops thin strips, such
+        # as the orange glow along the mat's edge against the wall.
+        image = demos.frame(episode, 0)
+        wide = cv2.morphologyEx(jar_pixels(image, near(guesses[episode]), reach=160).astype(np.uint8), cv2.MORPH_OPEN, np.ones((11, 11), np.uint8))
+        found = blob(wide, 400)
+        centre = found[0] if found is not None else near(guesses[episode])
+        real[episode] = jar_pixels(image, centre)
+        if found is not None:  # and its place is searched for from there
+            guesses[episode] = on_plane(pose, lens, centre, table_height + jar["height"] / 2)[0, :2]
 
     def place(mask, jar, start):
         def missing(xy):
@@ -462,13 +501,13 @@ def fit_jars(demos: Demos, episodes: list[int], pose, lens: Lens, jar: dict, tab
         for radius in np.arange(0.026, 0.046, 0.002):
             for height in np.arange(0.05, 0.1, 0.005):
                 trial = {**jar, "radius": float(radius), "height": float(height)}
-                loss = float(np.mean([place(real[episode], trial, guess_xy)[1] for episode in sample]))
+                loss = float(np.mean([place(real[episode], trial, guesses[episode])[1] for episode in sample]))
                 if best is None or loss < best[0]:
                     best = (loss, trial)
         jar = best[1]
     places, losses = {}, []
     for episode in episodes:
-        xy, loss = place(real[episode], jar, guess_xy)
+        xy, loss = place(real[episode], jar, guesses[episode])
         places[episode] = [round(float(v), 4) for v in xy]
         losses.append(loss)
     jar["outline_mismatch"] = round(float(np.mean(losses)), 3)
@@ -515,7 +554,7 @@ def wood_filled(flat: np.ndarray) -> np.ndarray:
     mirrors the white wall, which the wrist camera, looking down, doesn't see."""
     a = flat.astype(np.int16)
     mat = cv2.morphologyEx((a.max(axis=2) < 75).astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8)) > 0
-    wood = (a[..., 0] - a[..., 2] > 60) & ~mat
+    wood = orange(flat) & ~mat
     filled = flat.copy()
     if wood.sum() > 100:
         filled[~mat & ~wood] = np.median(flat[wood], axis=0).astype(np.uint8)
@@ -615,8 +654,8 @@ class WristViews:
     from many gripper poses as the gripper comes down to it, and the fixed jaw.
 
     `sightings` holds, for each demo, the gripper's rotation and position at each calm frame, where the
-    real block's patch was centred and how big it was, and how many seconds before the jaws began to close. `jaw_points` are the gripper's printed surface in
-    its own axes, `jaw_core` the pixels always the fixed jaw (`fixed_jaw_core`)."""
+    real block's patch was centred and how big it was, and how many seconds before the jaws began to
+    close. `jaw_points` are the gripper's printed surface in its own axes, `jaw_core` the pixels always the fixed jaw (`fixed_jaw_core`)."""
 
     sightings: dict[int, list[tuple[np.ndarray, np.ndarray, np.ndarray, float, float]]]
     points: np.ndarray
@@ -698,11 +737,8 @@ def fit_wrist_camera(views: WristViews, places: dict[int, list[float]], report=p
     fitted with the camera, within `reach` of where the top camera put it (`places`), turn by turn.
     `previous` is the scene's last wrist camera, one more place to start from.
 
-    The fit used to judge the camera against the top camera's places, the jar's among them, and took on
-    whatever error they had: on the build of 14 November it drew blocks 14% too big near each grasp, and on
-    demos it hadn't seen put them 30 px from where their own far frames placed them. This way the miss is
-    11 px at 4% too big, and the ACT policy's actions on sim frames moved 0.87° from those on real frames at
-    the mat's far right instead of 1.25°.
+    It isn't judged against the top camera's places, the jar's among them: fitted to those, it takes on
+    whatever error they have, and draws near blocks far from where their own far frames place them.
     """
     start_pose, _ = wrist_start()
     steps = np.r_[np.full(3, 0.001), np.full(3, 0.01), 4.0, 0.01, 0.01, 2.0, 2.0]
@@ -760,7 +796,7 @@ def fit_wrist_camera(views: WristViews, places: dict[int, list[float]], report=p
     starts = [(np.r_[start_pose, focal, k1, 0.0, 0.0, 0.0], f"a {focal:.0f} px lens bent {k1:.1f}") for focal in (330.0, 400.0) for k1 in (0.0, 0.3)]
     if previous is not None:
         lens = previous["lens"]
-        starts.append((np.clip(np.r_[previous["pose"], lens["focal"], lens["k1"], lens["k2"], lens.get("centre", (0.0, 0.0))], low, high), "the last build's camera"))
+        starts.append((np.clip(np.r_[previous["pose"], lens["focal"], lens["k1"], lens["k2"], lens["centre"]], low, high), "the last build's camera"))
     candidates = []
     for first, name in starts:
         placed = {e: np.asarray(places[e], dtype=np.float64) for e in episodes}
@@ -1092,6 +1128,10 @@ MOTOR_STIFFNESS = (6.0, 12.0, 25.0, 50.0, 100.0)
 MOTOR_RATES = (6.0, 10.0, 16.0, 30.0)
 MOTOR_FRICTION = (0.05, 0.2, 0.4, 0.6, 0.85)
 MOTOR_ARMATURE = (0.01, 0.028, 0.08)
+# What the refinement after the grid tunes for each joint, in proportion: its stiffness and damping, dry
+# friction, inertia and the joint's own damping, each starting no lower than its floor.
+MOTOR_TUNED = ("kp", "kv", "friction", "armature", "damping")
+MOTOR_FLOOR = {"kp": 1.0, "kv": 0.01, "friction": 0.001, "armature": 0.001, "damping": 0.01}
 
 
 def fit_motors(scene: dict, scene_dir: Path, demos: Demos, held: dict, episodes: list[int], limit: float, report=print) -> dict:
@@ -1145,6 +1185,26 @@ def fit_motors(scene: dict, scene_dir: Path, demos: Demos, held: dict, episodes:
                 trials[delay] = error()[:5].mean()
             delay = min(trials, key=trials.get)
         report(f"  round {round_index + 1}: joint error " + ", ".join(f"{e:.2f}" for e in errors))
+    # Then each joint's numbers together and continuously, from the grid's best, which steps them 30 to 40%
+    # apart. That takes the error on demos it wasn't fitted to 10 to 40% below the grid's alone. A delay of
+    # its own for each joint, within a tick, makes the shoulder's lift worse and the others no better.
+    for round_index in range(2):
+        errors = []
+        for index, name in enumerate(arm.JOINTS):
+            motor = motors[name]
+            start = np.log([max(motor[key], MOTOR_FLOOR[key]) for key in MOTOR_TUNED])
+
+            def joint_error(x, motor=motor, index=index, name=name):
+                motor.update({key: float(value) for key, value in zip(MOTOR_TUNED, np.exp(x))})
+                if name == "gripper" and motor["kp"] < 20:  # it has to keep squeezing a block it can't close on
+                    return 9.0
+                return float(error()[index])
+
+            simplex = start + np.vstack([np.zeros(len(start)), np.eye(len(start)) * 0.35])
+            result = minimize(joint_error, start, method="Nelder-Mead", options={"maxfev": 45, "initial_simplex": simplex, "xatol": 0.02, "fatol": 0.002})
+            motor.update({key: round(float(value), 4) for key, value in zip(MOTOR_TUNED, np.exp(result.x))})
+            errors.append(float(result.fun))
+        report(f"  refined, round {round_index + 1}: joint error " + ", ".join(f"{e:.2f}" for e in errors))
     env.close()
     scene["arm"]["motors"], scene["arm"]["delay_ticks"] = motors, delay
     return scene

@@ -1,10 +1,12 @@
 # `so101 run` on the control center: serve plus an autopilot
 
-Status: built, tested on the fake arm, not yet run on the arm or shown in a browser. Replaced `run`'s
-LeRobot rollout loop (`so101-rollout`). How to use it is in the README, under Training your own task
-(step 6).
+Status: built. `so101 run` has made 24 attempts on the arm
+([`results/act-pi05-block-container-supervisor-shadow.md`](../results/act-pi05-block-container-supervisor-shadow.md)),
+all started and ended at the terminal with no page in control, so the autopilot has started and ended none
+there; its rules are tested on the fake arm. How to use it is in the README, under
+[Training your own task](../README.md#training-your-own-task) (step 6).
 
-`run` and `serve` become one program, `so101-control`, with one difference: in `run` an **autopilot**
+`run` and `serve` are one program, `so101-control`, with one difference: in `run` an **autopilot**
 starts and ends the attempts. Everything else is shared: the policy stack (skills, supervisor,
 perception, [`policy-layers.md`](policy-layers.md)), the control page and keys, the safety rules, and the
 recording into `data/<task>/runs/`, so `review --runs`, `runs`, `build --with` and the skills builds read
@@ -12,22 +14,10 @@ recording into `data/<task>/runs/`, so `review --runs`, `runs`, `build --with` a
 
 ## The command
 
-```
-so101 run [task] [--episodes N] [--duration S] [--reset-time S] [--operator NAME]
-          [--policy act|pi05] [--remote] [--revision TAG] [--checkpoint DIR] [--action-steps N] [--skills]
-          [--supervisor off|shadow|act]
-```
-
-- `--episodes`: attempts to make (default `[run] episodes`).
-- `--duration`: seconds of policy time per attempt; overrides `[control] attempt_limit_s` for this run.
-  `[run] duration_s` is removed: one setting for both commands.
-- `--reset-time`: seconds between attempts to reset the scene (default the task's `reset_time_s`).
-- `run` stops before its checks, naming the option, on a `--duration` or `--reset-time` that isn't a finite
-  number 0 or more, and every command stops on such a `reset_time_s` in tasks.toml (`tasks.load`). NaN passes
-  a `< 0` check, and a NaN or infinite reset time made the autopilot's `next_in_s` one too, which the page's
-  strict JSON status can't hold: every `/status` failed once the arm reached rest. `--duration 0` runs until
-  you end the attempt, as an infinite one would, so infinity is refused too.
-- `--display` is removed: the control page shows both cameras.
+- `--duration`: seconds of policy time per attempt (default `[control] attempt_limit_s`, which `serve` uses too).
+- `--duration` and `--reset-time` must be finite numbers, 0 or more, and so must a task's `reset_time_s`
+  (`tasks.load`): `run` stops before its checks, naming the option. NaN passes a `< 0` check and would put NaN
+  in the page's strict JSON status. `--duration 0` runs until you end the attempt.
 - Everything else as `serve`, `--supervisor` included (it sets `[supervisor] mode` for one run). `run.json`
   records `"mode": "run"`, the supervisor's mode and the autopilot's settings.
 - Like `serve`, it passes on to `so101-control` only LeRobot's `--inference.*`, `--policy.*`, `--robot.*` and
@@ -94,10 +84,7 @@ acts, the state changes, or an attempt opens or ends.
    `Link.lost` is set whatever `on_link_loss` says, so even with `"continue"` the autopilot starts nothing
    while the link is lost. A page's first command takes control when no page has it
    (`commands._control`), and nothing gives it back, so a page used once and then closed holds every later
-   start until it, or another page, is back; `r` at the terminal starts one attempt each time. An earlier
-   version refused only while a page had control, its link was lost and `on_link_loss` was `"pause"`, so
-   with no page in control, or with `"continue"`, the autopilot started and ended every attempt with
-   nobody watching.
+   start until it, or another page, is back; `r` at the terminal starts one attempt each time.
 3. **An attempt ends** at its time limit (the controller's, unlabelled, without the outcome prompt
    waiting for an answer), or on a `done` ask: the supervisor sure the task is done once the arm is home,
    and the autopilot ends the attempt unlabelled with Reset at once; the verdict is in the run's events.
@@ -113,9 +100,7 @@ acts, the state changes, or an attempt opens or ends.
    nothing more for that attempt, a `done` ask's Reset included, even after a page watches again: it never
    starts the arm moving (Resume, or Reset from a pause) unless a page in control watches. A return to rest
    it already started finishes even if the page is lost, as every return to rest does, because stopping
-   halfway would leave the arm held in mid-air. An earlier version ended
-   any unanswered pause after 10 s, and so drove the arm to rest when a phone locked after the policy
-   asked for help.
+   halfway would leave the arm held in mid-air.
 4. **A person's Pause, Resume, Rewind, Teleop, Reset or Quit**, sent while an attempt is open, from the
    keys, a signal or the page in control, hands that attempt to them, whether the state machine accepted
    it or not: a Pause refused because the arm is already paused still says a person is at the arm and
@@ -124,8 +109,7 @@ acts, the state changes, or an attempt opens or ends.
    attempts over or push back the next start. The command that starts an attempt doesn't hand it over, but
    one after it does, even in the same tick: each command carries the attempt open when it arrived
    (`commands.intake`), so a Resume, Pause and Resume queued together hand the attempt the first Resume
-   opened to the person, where reading the attempt once per tick, before the commands, let the autopilot
-   end it. So does their start at saying how the attempt went: the terminal's right-arrow question, or the page's
+   opened to the person. So does their start at saying how the attempt went: the terminal's right-arrow question, or the page's
    Reset sheet opening, each of which sends `answering` once, whether the person then answers or cancels.
    The autopilot doesn't resume or end that attempt, and carries on with the next once it has ended.
    Check pose, Run checks, a step-in label and taking control on the page don't hand it over.
@@ -144,50 +128,14 @@ Hold or Continue button. With `--duration 0` the status's `limit_s` is null and 
 The arrows mean what they mean in `serve`: the right arrow ends the attempt and asks how it went, the left
 arrow ends it as one to ignore.
 
-## What goes away
-
-- `so101-rollout`, its LeRobot patches and `run --display`. `rollout.py` keeps the helpers the control
-  center uses (`Move`, `TOLERANCE`, `farthest`).
-- `outputs/rollouts/`: there are no recordings in it on this Mac.
-
 ## Tests
 
-On the controller's fake arm (`tests/test_autopilot.py`), with the phone's page in control unless a test says
-otherwise, since the autopilot moves nothing unwatched: a person starts attempt 1, the autopilot makes the
-rest with resets between them and stops at rest; the first attempt waits for a person, and the one a person
-starts is run like any other, while a Pause in the tick that opens an attempt hands it over; an ask waits for
-a person, a `done` ask ends the attempt at once; a person's Resume or start at answering in the tick a `done`
-ask would end it keeps it, and a Pause from the page in control refused as already paused too; Check pose, a
-label and taking control don't hand it over; a page not in control hands nothing over and doesn't push back
-the next start, and a page's Quit never stops the autopilot; the terminal's right arrow and the page's Reset
-sheet hand the attempt over, even when the sheet is cancelled; `answering` never brings a lost link back and
-is taken only for the open attempt; a move to the start pose that stopped short waits for a person; a lost
-link holds the attempt for a person, while the page is gone and after it's back, after an ask too, and a
-`done` ask with the link lost gets no Reset; with the page's link still lost, no attempt starts, and the next
-starts `reset_s`, at least `link_timeout_s` + 0.5 s, after the link comes back; a late command or a late poll
-from a hidden page, or a `take_control` no poll follows, brings the link back only until it times out again,
-and starts nothing; a page hidden between attempts holds the next start until it's back; with `on_link_loss =
-"continue"`, which `run` refuses but the state machine guards against too, a lost link still stops the
-autopilot while the policy runs on, and with no page in control the autopilot hands attempt 1 over, ends
-nothing and starts nothing until a page takes control, at least `link_timeout_s` + 0.5 s after which the next
-attempt starts; a return to rest that stops short gets no Reset, and a person's Reset then reaches rest and
-the run carries on; a person's Pause on the way to rest hands that attempt over; a fault on the last attempt
-waits for a Reset and quits only at rest; resting away from rest starts nothing, and after a fault the next
-attempt waits for a person, even when the Reset comes in the tick after the fault so the autopilot never sees
-Fault, and the autopilot carries on after the person's start; Esc stops it; a refused start is said once; Hold
-keeps the next attempt from starting, even one the autopilot already sent, and a Hold during an attempt, or
-with no reset time, stops the next one without pausing this one, and a held run still quits after its last
-attempt; a person's Hold or Resume queued before the tick in which the autopilot's next Resume or last Quit is
-due comes first; the autopilot's command takes effect in the tick it decides it; `Controller.submit` refuses
-the autopilot's source; and a refused autopilot command is sent once, not every tick.
-`tests/test_cli.py` checks that `run` refuses a NaN, infinite or negative `--duration` or `--reset-time`, and
-`on_link_loss = "continue"`, before its checks and takes 0 for both durations, and `tests/test_settings.py` that `tasks.load` refuses such a `reset_time_s`. `tests/test_process.py` runs
-`so101-control` in run mode and checks `run.json` and `--duration 0`'s strict JSON status, and
-`tests/test_serve_preflight.py` that `--duration 0` passes `so101-control`'s own settings check, which runs
-on the file's settings before the run's duration goes over them. `run` and
-`serve` share `commands/policy.py`'s setup, so their preflight tests cover both. `tests/test_controller.py`'s
-`LinkLossTest` checks the state machine's side: with no page in control, or the page in control out of
-reach with either `on_link_loss`, the autopilot's Resume (from Resting or Paused) and Reset (from Paused)
-are refused with why, while the same commands from `terminal` and `page` are accepted and the autopilot's
-Quit at rest is never refused; with a page in control and its link live, nothing is refused; and a Fault
-is still the reason given first.
+- `tests/test_autopilot.py`: every rule above on the controller's fake arm, with a page in control unless a
+  test says otherwise.
+- `tests/test_controller.py`'s `LinkLossTest`: the state machine refuses the autopilot's Resume and Reset
+  while no page in control watches, with either `on_link_loss`, accepts the same commands from `terminal` and
+  `page`, never refuses its Quit at rest, and still gives a Fault first.
+- `tests/test_cli.py` and `tests/test_settings.py`: the finite-number checks on `--duration`, `--reset-time`
+  and `reset_time_s`, and the refusal of `on_link_loss = "continue"`.
+- `tests/test_process.py` and `tests/test_serve_preflight.py`: `so101-control` in run mode, `run.json`, and
+  `--duration 0` through the settings check and the strict JSON status.

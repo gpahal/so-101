@@ -12,8 +12,7 @@ A toggle resumes only once the arm has been stopped, and no toggle has come, for
 TOGGLE_RESUME_AFTER_S, so a double press or a held key, meant to stop the arm, can't start it again.
 The terminal's Space sends only Pause, because a terminal sees no key-up (terminal.py).
 
-The intake is the controller's own, kept in a file beside `controller.py`: it reads the controller's state
-and carries out commands through it.
+The intake reads the controller's state and carries out commands through it.
 """
 
 import math
@@ -128,8 +127,7 @@ def _transition(controller, name: str, options: dict, source: str) -> Result:
     return Result(name, transition.accepted, transition.refused)
 
 
-# Every command, with the options it takes. `outcome` and `label` come first, so OPTIONS lists them in
-# that order.
+# Every command, with the options it takes. Their order is the order the web server's refusal lists OPTIONS in.
 COMMANDS: dict[str, tuple[str, ...]] = {
     "outcome": ("outcome", "for_attempt"),
     "label": ("label",),
@@ -154,21 +152,15 @@ TOOLS = frozenset(tool.value for tool in Tool)
 
 
 def intake(controller, name: str, source: str, client: str | None, who: str | None, options: dict) -> Result:
-    """Take in one command on the loop's thread: check its options, then page control, then carry
-    it out, and log it as a `command` event (page_hidden is logged only as the link's `page_hidden` event,
-    when it loses the link). Every command a person sends from the terminal, a signal or the page in control
-    goes on the controller's `people` for this tick, which `so101 run`'s autopilot reads, accepted or refused:
-    a refused Pause, Resume or Reset still says a person is at the arm and wants it. Each goes on with the
-    attempt open when it arrived, before it ran, so a Pause right after the Resume that opened an attempt, in
-    the same tick, hands that attempt over, and the Resume doesn't. A Quit goes on it only when accepted, and
-    nothing from a page that isn't in control does. page_hidden returns before that, since the page sends it
-    by itself.
-    The autopilot's commands come through here too, in the same tick, after people's
-    (`Controller.pilot_command`), so it decides from facts that already include them.
+    """Take in one command on the loop's thread: check its options, then page control, then carry it out,
+    and log it as a `command` event (page_hidden is logged only as the link's `page_hidden` event).
+    A person's command from the terminal, a signal or the page in control goes on the controller's
+    `people` for this tick, accepted or refused, with the attempt open when it arrived; a Quit only when
+    accepted. `so101 run`'s autopilot reads it, and its own commands come through here after people's
+    (`Controller.pilot_command`).
 
-    Options are checked before anything else, and only known ones are logged: an option named like a
-    field of the event (accepted, type, id) must neither crash the loop nor rewrite the log. A Quit
-    earlier in this tick that exited refuses everything after it, unread."""
+    Only known options are logged: one named like an event field (accepted, type, id) must neither crash
+    the loop nor rewrite the log. A Quit earlier in this tick that exited refuses everything after it."""
     via: dict = {}
     # The attempt open as the command arrives: only a command sent while an attempt is open hands it over.
     during = controller.attempt_number if controller.open_attempt is not None else None

@@ -211,9 +211,9 @@ class StalenessTest(unittest.TestCase):
         self.assertTrue(data.build_is_current(self.s, TASK, runs, kind=data.SKILLS))
         with mock.patch.object(skills, "RUN_LABEL_VERSION", skills.RUN_LABEL_VERSION + 1):
             self.assertFalse(data.build_is_current(self.s, TASK, runs, kind=data.SKILLS), "a build with runs goes stale")
-        # A skills build with runs from before run_labels was recorded is stale too.
-        before = {k: v for k, v in with_runs.items() if k != "run_labels"}
-        data.build_manifest_path(self.s, TASK, data.SKILLS).write_text(json.dumps({"inputs": before}))
+        # A skills build with runs that records no run_labels is stale too.
+        unlabelled = {k: v for k, v in with_runs.items() if k != "run_labels"}
+        data.build_manifest_path(self.s, TASK, data.SKILLS).write_text(json.dumps({"inputs": unlabelled}))
         self.assertFalse(data.build_is_current(self.s, TASK, runs, kind=data.SKILLS))
 
     def test_the_build_records_the_skills_contract_a_model_is_checked_against(self) -> None:
@@ -709,8 +709,7 @@ class BuildTest(unittest.TestCase):
         driven = (attempt.phases == Phase.AUTONOMOUS) & kwargs["drove"] & (replayed >= 0)
         # The live perception's clock counts each tick fed as 1/fps, as the replay counts each frame (it runs the
         # replay's own LiveFeed), so the two agree exactly: the same skills, in the same order, switching on the
-        # same frames, and every driven frame the same. This was within a frame while the perception summed real
-        # tick gaps (a fake clock at 1000.0 plus 1/30 a tick, which rounds), and is exact again now.
+        # same frames, and every driven frame the same.
         def switches(labels: np.ndarray) -> list[tuple[int, int]]:
             frames = np.flatnonzero(driven)
             return [(int(f), int(labels[f])) for k, f in enumerate(frames) if k and labels[f] != labels[frames[k - 1]]]
@@ -861,7 +860,7 @@ class SequencerTest(unittest.TestCase):
         self.assertEqual(h.outputs[-1].skill, 2)
         h.top.pause()
         # A person moved the arm with the jaws open: the perception can't tell a release from a block put
-        # back on the mat, so the attempt starts again on pick, as the user decided.
+        # back on the mat, so the attempt starts again on pick.
         h.top.run(Handback(PERSON, moved=True))
         h.feed(state[at["release"] + 10:])
         self.assertEqual(h.switches()[-1], ("pick", "reopened"))
@@ -939,9 +938,9 @@ class SequencerTest(unittest.TestCase):
         self.playback_undoes_the_grasp()
 
     def playback_undoes_the_grasp(self):
-        """The gap the uniform design closes: the carry switches to place, then the after-close check, asked
-        after the carry, finds the jaws empty, and the supervisor plays back to before the close. Returns
-        the stack and what the next ticks need."""
+        """The carry switches to place, then the after-close check, asked after the carry, finds the jaws
+        empty, and the supervisor plays back to before the close. Returns the stack and what the next ticks
+        need."""
         from test_supervisor import FakeModel, FakeEscalation, Pool
 
         events, now = [], [0.0]
@@ -1221,11 +1220,9 @@ class ModelTest(unittest.TestCase):
 
     def test_a_local_checkpoint_is_checked_against_the_build_it_was_trained_on(self) -> None:
         self.check()
-        # Rebuilt since: `train` kept a copy of the build.json it trained on, so the model still runs. This was a
-        # refusal ("was rebuilt after this model was trained") until the user chose to keep that copy, since any
-        # rebuild, the one `train` runs when the build is stale included, retired a model that took days to train.
+        # Rebuilt since: `train` kept a copy of the build.json it trained on, so the model still runs.
         self.check(rebuilt=True)
-        # Trained before `train` recorded its build: its train_config.json has no dataset.revision.
+        # A train_config.json with no dataset.revision records no build.
         self.refused("recorded no build", pinned=False)
 
     def test_a_local_skills_model_without_its_build_snapshot_is_refused(self) -> None:
@@ -1275,9 +1272,8 @@ class ModelTest(unittest.TestCase):
             mock.call("me/act_so101_test_skills", "train_config.json", revision="v1"),
             mock.call("me/so101_test_skills", "build.json", repo_type="dataset", revision=commit)])
 
-    def test_a_hub_model_trained_before_train_pinned_its_dataset_is_refused(self) -> None:
-        # As train_config.json reads for a model trained before this: LeRobot read the dataset's moving
-        # format tag, so the dataset's build.json may since describe another build.
+    def test_a_hub_model_whose_dataset_revision_is_not_a_commit_is_refused(self) -> None:
+        # A dataset revision that is a moving tag or none: the dataset's build.json may describe another build.
         for revision in (None, "v3.0", "main"):
             with self.subTest(revision=revision):
                 with self.assertRaises(SystemExit) as stop:
@@ -1318,8 +1314,6 @@ class CommandTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as stop:
                 remote.require_server("test", "pi05", "main", 50, True, "skills")
             self.assertIn("--skills", str(stop.exception))
-            job.labels = {k: v for k, v in job.labels.items() if k != "dataset"}  # started before the label
-            self.assertIs(remote.require_server("test", "pi05", "main", 50, True), job)
 
     def test_a_task_without_skills_says_how_to_add_them(self) -> None:
         with self.assertRaisesRegex(SystemExit, r"\[test.skills\]"):

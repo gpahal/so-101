@@ -2,9 +2,9 @@
 
     EngineDriver -> Perception -> SkillSequencer (a skills run) -> Supervisor ([supervisor] mode shadow or act)
 
-Perception is always there, so every run logs its grasps; it reads the gripper and rule thresholds
-(`grasp.thresholds`), which therefore load for every run. The supervisor's program loads only when the
-supervisor runs.
+Perception is always there, so every run logs its grasps and loads the grasp thresholds
+(`grasp.thresholds`); the supervisor's program loads only when the supervisor runs.
+
 In a skills run the perception and the sequencer are essential (`Layer.essential`): the skill changes
 only on what the perception sees, so either one broken refuses Resume rather than leave the model on its
 first skill.

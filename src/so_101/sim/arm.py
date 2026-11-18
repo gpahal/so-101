@@ -41,7 +41,7 @@ def arm_model() -> mujoco.MjModel:
 
 @cache
 def base_underside() -> float:
-    """How far the base's underside is above the arm model's z = 0, in metres: 2.4 mm below it. The real
+    """The height of the base's underside in the arm model's axes, in metres: 2.4 mm below z = 0. The real
     base stands on the table, so that's where the table top is in the model's axes."""
     model = arm_model()
     data = mujoco.MjData(model)

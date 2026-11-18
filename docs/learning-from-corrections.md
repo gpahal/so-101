@@ -1,8 +1,8 @@
 # Learning from corrections and rewinds
 
-Status: research, none built beyond HG-DAgger (`build --with corrections,human-attempts`). Written in November 2026 against LeRobot 0.7.0, from the papers listed under [Sources](#sources). Most of the methods below are 2025 and 2026 preprints with no released code, each tested on a single robot, so no one has reproduced their numbers. None of them was tested on ACT.
+Status: research. Of these methods only HG-DAgger and filtered BC are built (`build --with`). Checked against LeRobot 0.7.0, from the papers listed under [Sources](#sources). Most are preprints without code, each tested on one robot and none on ACT.
 
-This note covers training methods that use what `so101 serve` records when a human steps in on the policy. There are two groups:
+This note covers training methods that use what `so101 serve` and `so101 run` record when a human steps in on the policy. There are two groups:
 
 - **The simpler group** trains on the human's corrections as extra demos and weights them differently from the original demos. It never uses the policy's bad actions as a training signal. HG-DAgger, which is built, is the simplest of these.
 - **The second group** also uses the bad actions as a sign of what not to do: the frames a rewind undid, or the last `blame_s` before an intervention.
@@ -13,20 +13,20 @@ This note covers training methods that use what `so101 serve` records when a hum
 
 The rules are in the `control/analysis.py` docstring. In short:
 
-| Data | What it is | Used today |
+| Data | What it is | In a build |
 | --- | --- | --- |
 | Corrections | Teleop segments after the policy drove in that attempt | Yes, with `--with corrections`, at weight 1 |
 | Human attempts | Teleop before the policy first drove, in attempts that succeeded | Yes, with `--with human-attempts`, at weight 1 |
-| Policy successes | The policy's frames in attempts that succeeded, minus suspect frames | Yes, with `--with policy-successes`, at weight 1 |
-| Suspect frames | The policy frames a rewind undid. Without a rewind, the last `blame_s` (2.5 s) of policy frames before a Pause, Rewind or Teleop | No: weight 0 |
+| Policy successes | The policy's frames in attempts that succeeded, minus suspect and waiting frames | Yes, with `--with policy-successes`, at weight 1 |
+| Suspect frames | The policy frames a rewind undid. Without a rewind, the last `blame_s` (2.5 s) of policy frames before a Pause, Rewind, Teleop or the supervisor's stuck ask | No: weight 0 |
 | Failure-fix pairs | A rewind that undid policy frames, followed by Teleop from the pose it went back to | No. `so101 runs` exports them |
 | Outcomes | succeeded, failed or ignored, from the operator's answer or `labels.toml` | Only to select attempts |
 
-A failure-fix pair is the data most of the second group needs: a bad action chunk and a good one from the same state. Its `action` column is what the arm was sent, after the `max_relative_target` cap. `control.policy_action` holds the policy's raw output, and `control.leader` the leader's pose, which `build --with` trains on instead, as the demos record their action before the cap. Both are recorded only while the policy drives, so no frame shows what the policy would have done while the human drove.
+A failure-fix pair is the data most of the second group needs: a bad action chunk and a good one from the same state. Its `action` column is what the arm was sent, after the `max_relative_target` cap. `control.policy_action` holds the policy's raw output, and `control.leader` the leader's pose, which `build --with` trains on instead, as the demos record their action before the cap. `control.policy_action` is set only on ticks the model's action reached the arm, so no frame shows what the policy would have done while the human drove.
 
 ## What LeRobot 0.7.0 provides
 
-Paths below are under `.venv/lib/python3.13/site-packages/lerobot/`.
+Paths below are inside the `lerobot` package.
 
 - **Sample weighting.** `lerobot-train` takes a `sample_weighting` config. Each step it computes `loss = (per_sample_loss * w).sum() / (w.sum() + eps)` (`scripts/lerobot_train.py`, lines 247 to 257). Only two weighters exist, `rabc` and `uniform`, and `make_sample_weighter` raises an error on any other type (`utils/sample_weighting.py`). A new weighter therefore means patching LeRobot or calling the training loop from this repo's own entry point.
 - **ACT doesn't give a loss per sample.** The weighted path calls `policy(batch, reduction="none")`, but `ACTPolicy.forward(self, batch)` has no `reduction` argument and returns one scalar (`policies/act/modeling_act.py`, line 140). π0.5's `forward(batch, reduction="mean")` accepts `"none"` and returns the flow loss of each sample (`policies/pi05/modeling_pi05.py`). Any weighting with ACT needs a patched forward that returns the L1 loss per sample, and the KL term per sample or averaged.
@@ -63,7 +63,7 @@ This repo already has every class: demos, policy successes, corrections and susp
 
 RA-BC weights each frame by how much a learned progress model says the task advanced ([SARM, arXiv 2509.25358](https://arxiv.org/abs/2509.25358)). The weight is 1 when progress rose by more than κ (0.01), between 0 and 1 for smaller gains, and 0 when progress fell (`rewards/sarm/rabc.py`, lines 270 to 293). SARM is trained only on trajectories without serious mistakes. With π0 and LoRA on medium T-shirt folding, from 200 hours of demos, it reached 10/12 against 1/12 or 7/12 for plain BC.
 
-It is the one weighter LeRobot ships, so it works with π0.5 today. It needs a progress model trained or downloaded first (`rewards/sarm`, `robometer`, `topreward`). Its weights never go below 0. It would down-weight the slow or backward parts of corrections, as well as of demos.
+It is the one weighter LeRobot ships, so it works with π0.5 as it is. It needs a progress model trained or downloaded first (`rewards/sarm`, `robometer`, `topreward`). Its weights never go below 0. It would down-weight the slow or backward parts of corrections, as well as of demos.
 
 ### Advantage weights (AWR, IQL)
 
@@ -124,7 +124,7 @@ CFGRL is the same idea with an RL grounding: a flow policy conditioned on o = 1 
 Only `build` changes. Training stays LeRobot's own, the loss stays bounded, and suspect frames without a fix after them still count. In FlowPRO's rollback experiments, a π\*0.6-style baseline came within 3 to 7 points of RPRO. Two things are untested:
 
 - labels from rewinds and `blame_s` instead of a value model;
-- this repo's scale, about 100 demos with tens to hundreds of interventions.
+- this repo's scale, about 125 demos with tens to hundreds of interventions.
 
 ACT has no text input. A binary input feature might play the tag's part, but no source tests that.
 
@@ -193,7 +193,7 @@ where ℓθ is the policy's own imitation loss averaged over the chunk, and L_ba
 
 **The risk.** Only the demo loss anchors the policy, and nothing bounds the loss on the rejected chunk. FlowPRO's ablation suggests that can drift, as DPO + SFT did. The paper doesn't measure it. Log ℓθ(A⁻) during training and stop if it keeps rising.
 
-**For this repo.** `serve` records no shadow chunks. The policy could be run offline on the recorded observations at the rewound state. ACT is deterministic given an observation, and π0.5 would be sampled. PHIL needs no frozen copy, so it costs about one extra forward pass per pair. It works with ACT mechanically, but untested.
+**For this repo.** `serve` records no shadow chunks. The policy could be run offline on the recorded observations at the rewound state. ACT is deterministic given an observation, and π0.5 would be sampled. PHIL needs no frozen copy, so it costs about one extra forward pass per pair. It works with ACT mechanically; no source tests it.
 
 ### CARF
 
@@ -274,7 +274,7 @@ A raw learned scorer has steep slopes that mean nothing, and following them wrec
 
 The pair methods assume the fix starts from the state the mistake started from. In `serve`:
 
-- **Rewind before taking over.** Pause, then Rewind (`b`) to just before the mistake, then Teleop (`t`). The rewind range becomes the suspect frames exactly, with no `blame_s` guess, and the analysis records a failure-fix pair. Each `b` goes back 2.5 s (`rewind_s`).
+- **Rewind before taking over.** Pause, then Rewind (`b`, or the page's button) to just before the mistake, then Teleop (`t`). The rewind range becomes the suspect frames exactly, with no `blame_s` guess, and the analysis records a failure-fix pair. Each `b` goes back 2.5 s (`rewind_s`).
 - **Put the object back.** A rewind retraces the arm's path, and the gripper opens if it closed in that time, but the object stays where the mistake left it. Before taking over, put it back where it was before the mistake, as FlowPRO's operators do from the headset image.
 - **Step in early.** PHIL's results favour corrections made just before a failure over recoveries after it.
 - **Label every attempt.** Outcomes decide filtered BC, the quality tag's labels and which human attempts count. Pause reasons can group failures for analysis.
@@ -291,7 +291,7 @@ Each step needs a fair comparison: the same attempts in `serve` from the same st
 ## Open questions
 
 - **ACT.** No source tests a pairwise loss on ACT's L1 with its CVAE, or a binary input standing in for the quality tag.
-- **Labels and scale.** No source tests the quality tag with heuristic labels (rewind ranges and `blame_s`) instead of a value model, or at about 100 demos with tens to hundreds of interventions.
+- **Labels and scale.** No source tests the quality tag with heuristic labels (rewind ranges and `blame_s`) instead of a value model, or at about 125 demos with tens to hundreds of interventions.
 - **Imperfect pairs.** No source says how much an object moved before the rewind hurts a failure-fix pair.
 - **Not read in full:** FlowPRO's choice of Δ, its baselines' configurations and its code release; Sirius's per-method real-robot numbers, which are only in a figure; and the AWR, AWAC and CQL papers.
 - **Cost here.** Training time and memory were not measured on this repo's jobs. RPRO roughly doubles the weights in memory, and AFIL doubles the action-head passes when sampling.

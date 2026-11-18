@@ -17,10 +17,10 @@ from contextlib import contextmanager, suppress
 
 from so_101 import svtshim
 
-# LeRobot publishes no image tagged for a release, so this is what `latest` was on 2026-11-11, by
-# digest: a job must not change under a working setup when `latest` moves. Move it on purpose. ACT and
-# pi0.5 have both run on it against the 0.7.0 client, on 2026-11-13. `wait_until_ready` checks what
-# PI05_SERVER changes in it took effect, so a new image that renames them fails at `server start`.
+# LeRobot publishes no image tagged for a release, so this pins a `latest` by digest: a job must not change
+# under a working setup when `latest` moves. Move it on purpose. ACT and pi0.5 have both run on it against
+# the 0.7.0 client. `wait_until_ready` checks that PI05_SERVER's changes took effect, so an image that
+# renames what they patch fails at `server start`.
 SERVER_IMAGE = "huggingface/lerobot-gpu@sha256:aed1a4990fedee463b545050f33a38afce4f6ec18f7ceb8be17f850737860d6c"
 PORT = 7447
 DEPLOYMENT = "so101"
@@ -53,14 +53,13 @@ RTC_REFILL_S = 1.0
 # How long the arm holds its last target when the queue runs out before the run fails (LeRobot: 1 s).
 RTC_STARVATION_GRACE_S = 2.0
 # With RTC, how much of the queued motion the server steers the new chunk to match. The seam where the
-# new chunk takes over is steered only while the turnaround (about 0.65 s from India at JPEG quality 50)
-# stays under this; past the seam, every steered step holds the new chunk to the old plan, made from
-# frames about 1 s older. Steering the whole 1 s queue made pi0.5 close its gripper short of the block:
-# at the first close the block sat 0.56 to 0.65 of the way down the wrist picture in the misses,
-# against 0.67 to 0.77 in the demos. 0.33 s (LeRobot's 10 steps) put every close in the demos' range
-# and went 4 of 5, but the seams came after it, unsteered, and the gripper jumped up to 17.7 in a
-# frame (5.0 with 1 s). 0.65 s (20 steps at 30 fps) steers the seam and frees the rest: 4 of 4
-# labelled, with closes at 0.62 to 0.73. A turnaround over it leaves that seam unsteered.
+# new chunk takes over is steered only while the turnaround (about 0.65 s at JPEG quality 50) stays under
+# this; past it, each steered step holds the new chunk to a plan made from frames about 1 s older.
+# Steering the whole 1 s queue closes pi0.5's gripper short of the block (the block 0.56-0.65 of the way
+# down the wrist picture at the first close, against 0.67-0.77 in the demos). 0.33 s (LeRobot's 10 steps)
+# closes in range but leaves the seams unsteered, and the gripper jumps up to 17.7 in a frame. 0.65 s
+# (20 steps at 30 fps) steers the seam: 4 of 4 labelled, closing at 0.62-0.73. A turnaround over it
+# leaves that seam unsteered.
 RTC_HORIZON_S = 0.65
 
 # The script the pi0.5 job runs in place of `lerobot-policy-server`. `setup_script` writes it after a
@@ -296,14 +295,12 @@ def active_server():
 def describe(job) -> str:
     labels = job.labels or {}
     execution = labels.get("execution")
-    steps = (f"{labels.get('action_steps')} action steps" if execution == "chunk"
-             else "real-time chunking" if execution else "plain chunks from before real-time chunking")
+    steps = f"{labels.get('action_steps')} action steps" if execution == "chunk" else "real-time chunking"
     pin = {"true": ", unused action columns pinned", "false": ", unused action columns not pinned"}.get(
-        labels.get(PIN_LABEL), ", started before the unused action columns setting" if labels.get("policy") == "pi05" else "")
-    commit = f" (commit {labels['commit'][:12]})" if labels.get("commit") else ""
+        labels.get(PIN_LABEL), "")
     return (
         f"{labels.get('policy')} for {labels.get('task')}{' skills' if labels.get('dataset') == 'skills' else ''} "
-        f"at {labels.get('revision')}{commit}, {steps}{pin}, "
+        f"at {labels.get('revision')} (commit {str(labels.get('commit'))[:12]}), {steps}{pin}, "
         f"on {job.flavor} (job {job.id}, {job.status.stage})"
     )
 
@@ -349,7 +346,7 @@ def start_server(
         flavor=target,
         timeout=timeout,
         # `revision` stays the name asked for, so `run --revision main` matches; `commit` is what the server loaded,
-        # 40 hex characters. A real server hasn't been started with this label yet: starting one bills.
+        # 40 hex characters.
         labels={"so101": SERVER_LABEL, **_labels(task, policy_type, revision, action_steps, pin_unused_actions, dataset),
                 "commit": commit},
         ssh=True,
@@ -394,7 +391,7 @@ def wait_until_ready(job_id: str, policy_type: str, pin_unused_actions: bool) ->
             if policy_type == "pi05" and pin_unused_actions and not pinned:
                 api.cancel_job(job_id=job_id)
                 sys.exit("The server warmed up without pinning the unused action columns, so the job was cancelled: "
-                         "LeRobot in this image no longer matches PI05_SERVER in src/so_101/remote.py.")
+                         "LeRobot in this image doesn't match PI05_SERVER in src/so_101/remote.py.")
             return
     status = api.inspect_job(job_id=job_id).status
     sys.exit(f"The job stopped before the server was ready: {status.stage} {status.message or ''}")
@@ -422,7 +419,7 @@ def stop_server() -> None:
 
 
 def hub_commit(repo: str, revision: str) -> str:
-    """The Hub commit `revision` of the model `repo` names now. Exits with one line when there's no such
+    """The Hub commit `revision` of the model `repo` names at this call. Exits with one line when there's no such
     model or revision."""
     from huggingface_hub import HfApi
     from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
@@ -450,27 +447,21 @@ def active_server_or_exit(task: str, policy_type: str, revision: str, dataset: s
     return server
 
 
-def served_commit(server, task: str, policy_type: str, revision: str, dataset: str = "whole") -> str:
+def served_commit(server) -> str:
     """The Hub commit the server loaded (its `commit` label), which a run reads the model's files at, so it
-    checks the model the server serves rather than whatever `revision` names now. Exits for a server started
-    before the label."""
-    commit = (server.labels or {}).get("commit")
-    if not commit:
-        sys.exit("The policy server was started before so101 recorded the commit it serves, so the run can't check "
-                 "the model it serves. Stop it (uv run so101 server stop) and start it again:\n  "
-                 f"{_start_command(task, policy_type, revision, dataset)}")
-    return commit
+    checks the model the server serves rather than whatever `revision` names when the run starts."""
+    return server.labels["commit"]
 
 
 def require_server(task: str, policy_type: str, revision: str, action_steps: int, pin_unused_actions: bool,
                    dataset: str = "whole"):
     """The running server, if it serves what this run asks for, as so101.toml sets it. Starting one
-    bills, so never do it implicitly. A server started before the `dataset` label serves the whole-demo model."""
+    bills, so never do it implicitly."""
     start = _start_command(task, policy_type, revision, dataset, action_steps)
     server = active_server()
     if server is None:
         sys.exit(f"No policy server is running. Start one first:\n  {start}")
-    labels = {"dataset": "whole", **(server.labels or {})}
+    labels = server.labels or {}
     wanted = _labels(task, policy_type, revision, action_steps, pin_unused_actions, dataset)
     if {key: labels.get(key) for key in wanted} != wanted or server.status.stage != "RUNNING":
         sys.exit(f"The policy server isn't serving this model: {describe(server)}.\nStop it, then: {start}")

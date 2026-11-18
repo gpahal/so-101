@@ -213,8 +213,7 @@ class Settings:
 class ControlShutdown(unittest.TestCase):
     """`so101-control`'s whole run on the fake follower, with what reaches beyond this process
     stubbed: config files, devices, signal handlers, the page's server, the policy's loading and the
-    key reader. The key reader's start quits
-    at rest, and its stop raises, as the first cleanup to run."""
+    key reader. The key reader's start quits at rest, and its stop raises, as the first cleanup to run."""
 
     def setUp(self) -> None:
         from fakes import FakeClock, make_follower
@@ -252,8 +251,8 @@ class ControlShutdown(unittest.TestCase):
 
         The quit comes from the terminal at once, at rest; with another `quit_in`, it comes as a signal
         once the state is `quit_in`. If that never comes within 10 s, or the signal's quit hasn't ended
-        the run 2 s later, the terminal quits and confirms, so the run always ends. `at_exit()` runs as the policy stops, just before the
-        follower disconnects. `manifest` adds to the run.json serve passes, and `run` to RUN_ENV's JSON;
+        the run 2 s later, the terminal quits and confirms, so the run always ends. `at_exit()` runs as
+        the policy stops, just before the follower disconnects. `manifest` adds to the run.json serve passes, and `run` to RUN_ENV's JSON;
         `mode` is so101.toml's `[supervisor] mode`. `self.keys_status` is the controller's status."""
         from fakes import control, make_engine
         from test_controller import POLICY_ACTIONS, REST_STEPS

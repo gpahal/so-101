@@ -9,12 +9,11 @@ Then it reads the arm and sends exactly one goal: the policy's action, the leade
 next step of a scripted move, or the hold target.
 
 The controller keeps the loop, the commands and how the state machine's transitions are carried
-out. Its public attributes without a leading underscore, such as `state`, `open_attempt`, `follower`
-and `fault_error`, and the methods `facts`, `devices`, `apply`, `run_tool`, `answer` and
-`label_step_in`, are what `commands`, `status` and `wording` use. Only the control loop's thread
-reads or calls them: `commands.intake` and the wording run inside a tick, and `status.build` too,
-once more in `__init__` before the loop starts. Everything with a leading underscore is the controller's alone. The parts it drives
-sit beside it, and are used only through it:
+out. Its public attributes and methods, such as `state`, `open_attempt`, `follower`, `facts`, `apply`,
+`answer` and `label_reason`, are what `commands`, `status` and `wording` use. Only the control loop's
+thread reads or calls them: `commands.intake` and the wording run inside a tick, and `status.build` too,
+once more in `__init__` before the loop starts. Everything with a leading underscore is the
+controller's alone. The parts it drives sit beside it, and are used only through it:
 
 - `follower`: reading the follower and its cameras, its motors' power marks, and holding it in Fault.
 - `leader`: the optional leader, connected while the arm rests or is paused, with Handover and the
@@ -34,7 +33,7 @@ tests write a run to a temporary directory, and so is `presence`, the device wat
 Page control and the link are `link`'s; the loop judges the controlling page's polls with its own
 clock. The terminal is never refused for lack of control. The loop's rate and the previews it sheds
 are `shedding`'s. Faults and quitting follow AGENTS.md's invariants: `states` alone decides what is
-allowed, from the facts the controller gives it (`_facts`).
+allowed, from the facts the controller gives it (`facts`).
 """
 
 import contextlib
@@ -127,8 +126,8 @@ class Controller:
         """`robot` is LeRobot's robot wrapper (ThreadSafeRobot) with hold configured. `policy` is the
         policy stack (`policy.stack.build`, `policy.base.Policy`): it hears each attempt open and close
         (`begin_episode`, `end_episode`), gets the arm with a `Handback` saying why, is stepped with a
-        `Tick` in Autonomous, and its `Output` may ask for a person, which pauses it like a lost link. Poses are in the arm's units, keyed like its actions. `rest_pose` is the
-        `[control]` rest pose, already converted from raw steps with `pose_from_steps`. Without
+        `Tick` in Autonomous, and its `Output` may ask for a person, which pauses it like a lost link.
+        Poses are in the arm's units, keyed like its actions. `rest_pose` is the `[control]` rest pose, already converted from raw steps with `pose_from_steps`. Without
         `start_pose` (no build), attempts start from wherever the arm is. `notify(message,
         state)` hears every message, with the new state when it announces one. `recorder` records the
         run. `control` is so101.toml's `[control]` section, as `settings.load()` gives it; so101.toml
@@ -423,7 +422,7 @@ class Controller:
         try:
             for message in self.policy.maintain():
                 self._say(message)
-        except Exception as error:  # reconnecting must never stop the loop
+        except Exception as error:  # the stack's housekeeping must never stop the loop
             self._say(f"Reconnecting the policy failed: {type(error).__name__}: {error}")
 
     def _read_disk(self) -> None:
@@ -762,7 +761,7 @@ class Controller:
         if reason := self.hold_refusal():
             return Result("autopilot_hold", False, reason)
         self.autopilot.hold(hold)
-        running = "" if self.open_attempt is None else f" Attempt {self.attempt_number} runs on as before."
+        running = "" if self.open_attempt is None else f" Attempt {self.attempt_number} runs on."
         self._say(f"Autopilot held: the next attempt doesn't start until Continue.{running}" if hold else
                   "Autopilot continues: the next attempt starts after the reset time.")
         return Result("autopilot_hold", True)
@@ -921,7 +920,7 @@ class Controller:
             try:
                 self.policy.pause()
             except Exception:
-                pass  # a failed policy may fail to pause too; it no longer drives either way
+                pass  # a failed policy may fail to pause too; it stops driving either way
             attempt.ended_by, attempt.outcome = ended_by, outcome or attempt.outcome
             self._close_attempt()
             return

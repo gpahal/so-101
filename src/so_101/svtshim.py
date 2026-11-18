@@ -3,9 +3,8 @@
 LeRobot encodes video with SVT-AV1, which PyAV bundles: version 3.0.0 in av 15.1.0, the newest
 LeRobot 0.7.0 allows. When an encoder closes, a race in SVT-AV1 can free one of its semaphores one
 count below where it started, and on macOS libdispatch then stops the process with SIGTRAP (exit 133,
-`zsh: trace trap`). It happened in about 0.1 to 0.4% of encoder closes here, mostly on short clips.
-`so101 serve` encodes inside the control center, so one crash ends the session and loses the open
-attempt. Reported as https://github.com/AOMediaCodec/SVT-AV1/issues/2961; SVT-AV1 4.3.0 fixes it.
+`zsh: trace trap`). It hits about 0.1 to 0.4% of encoder closes, mostly on short clips. `so101 serve`
+and `run` encode inside the control center, so one crash ends the session and loses the open attempt. Reported as https://github.com/AOMediaCodec/SVT-AV1/issues/2961; SVT-AV1 4.3.0 fixes it.
 
 `svtsem.c` applies that fix at runtime: it changes how SVT-AV1's semaphores are created, as SVT-AV1's
 own fix does, and nothing else. macOS loads it only at a process's start, from DYLD_INSERT_LIBRARIES,

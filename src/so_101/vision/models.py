@@ -1,7 +1,7 @@
 """The vision models `so101-failbench` compares and the supervisor asks, how each is called and what it costs.
 
 Prices are USD per million tokens, from each provider's pricing page (OpenRouter's catalog for the
-OpenRouter models) in November 2026; check them before trusting the cost columns. `estimate` is a rough
+OpenRouter models); check them before trusting the cost columns. `estimate` is a rough
 cost per sample used only before a model's first answer, to keep a run under its cap; after that the
 runner uses the model's real average. OpenRouter reports each call's actual cost, which the report uses.
 

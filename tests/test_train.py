@@ -105,7 +105,7 @@ class BaseTest(unittest.TestCase):
 
 
     def test_a_skills_base_with_another_number_of_skills_stops_before_training(self) -> None:
-        # A base trained before the return skill reads 2 values; this task has 3.
+        # A base trained on two skills reads 2 values; this task has 3.
         with tempfile.TemporaryDirectory() as tmp:
             two = Path(tmp) / "two.json"
             two.write_text(json.dumps({"type": "act",
@@ -227,8 +227,8 @@ class PinTest(unittest.TestCase):
         self.assertEqual(self.parsed(args).dataset.revision, pin)
 
     def test_a_rebuild_keeps_a_local_skills_model_usable(self) -> None:
-        # Every build writes build.json anew, with its build time, so before `train` kept a copy, any rebuild
-        # (the one `train` runs when the build is stale included) retired a local model that took days to train.
+        # Every build writes build.json anew, with its build time, so after a rebuild (the one `train` runs on
+        # a stale build included) only the copy `train` kept keeps the model usable.
         from so_101 import data
         from so_101.commands.policy import skills_build
 
@@ -262,8 +262,8 @@ class ForwardedTest(unittest.TestCase):
 
     def test_a_forwarded_negative_step_cap_stops_the_command_before_it_runs(self) -> None:
         # LeRobot takes the last of a repeated flag, so it would replace so101.toml's checked cap.
-        # `cli.main` filters stderr through a pipe for the rest of the process, which cut off the output of the
-        # tests after this one when the file ran alone: this test checks the step cap, not the filter.
+        # `cli.main` would filter stderr through a pipe for the rest of the process, hiding later tests' output:
+        # this test checks the step cap, not the filter.
         with mock.patch.object(cli, "filter_stderr"), \
                 mock.patch.object(cli, "cmd_teleop") as teleop, \
                 mock.patch.object(cli.sys, "argv", ["so101", "teleop", "--robot.max_relative_target=-10"]), \

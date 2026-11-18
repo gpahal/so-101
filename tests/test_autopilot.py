@@ -25,9 +25,9 @@ RESET_S = 1.0
 # How long after a page in control watches again the autopilot waits before its next start.
 RELINK_S = max(RESET_S, control().link_timeout_s + RELINK_MARGIN_S)
 WAIT_S = 30.0  # long enough that any timed Reset the autopilot made would have come
-PHONE = "phone-page"
+PHONE = "phone-page"  # the client id a control page made for itself
 AFTER_FAULT = ("Autopilot waits. The arm was in Fault: the next attempt waits for you. r at the terminal or Resume on "
-               "the page starts it, and the autopilot makes the rest.")  # the client id a control page made for itself
+               "the page starts it, and the autopilot makes the rest.")
 # The autopilot's Resume while the phone's page, in control, is out of reach (`Controller._unwatched`).
 OUT_OF_REACH = ("The controlling page (100.64.0.2) is out of reach, so the autopilot starts nothing unwatched. Bring the "
                 "page back or take control on another, and the next attempt starts the run's reset time "
@@ -340,8 +340,8 @@ class AutopilotTest(unittest.TestCase):
         self.assertEqual(s.events("outcome"), [])
 
     def test_a_link_lost_after_an_ask_gets_no_reset(self) -> None:
-        # The council's case: the policy asks, then the phone locks. The arm stays where it is while the page is
-        # out of reach, and after it's back.
+        # The policy asks, then the phone locks. The arm stays where it is while the page is out of reach, and
+        # after it's back.
         s = Session(self, episodes=2, ask_at=5, limit_s=60.0)
         s.polling = True
         self.assertTrue(s.page("take_control").accepted)
@@ -409,9 +409,7 @@ class AutopilotTest(unittest.TestCase):
         [restored] = s.events("link_restored")
         self.assertGreaterEqual(s.starts()[1] - restored["t"], RELINK_S, "the wait counts from the restore")
 
-    # The user chose that the autopilot moves the arm only while a page in control watches it, whatever
-    # on_link_loss says. These two replace the tests that a lost link with on_link_loss "continue", or no page
-    # ever in control, left the autopilot starting attempts as before.
+    # The autopilot moves the arm only while a page in control watches it, whatever on_link_loss says.
     def test_with_on_link_loss_continue_a_lost_link_still_stops_the_autopilot(self) -> None:
         s = Session(self, episodes=2, ask_at=round(10 * FPS), kind=DONE, limit_s=60.0, on_link_loss="continue")
         s.until(lambda: s.state() == "autonomous")
@@ -598,8 +596,8 @@ class AutopilotTest(unittest.TestCase):
         self.assertEqual(len(s.starts()), 1, "no attempt starts away from rest")
         s.rig.command("reset")
         s.until(lambda: s.state() == "resting" and s.rig.controller.at_rest)
-        # The user chose this: a fault's Reset brings the arm to rest and doesn't restart the policy. Before, the
-        # autopilot started attempt 2 RESET_S after rest; now it waits for a person, as for attempt 1.
+        # A fault's Reset brings the arm to rest and doesn't restart the policy: the next attempt waits for a
+        # person, as attempt 1 does.
         s.tick(round(WAIT_S * FPS))
         self.assertEqual(len(s.starts()), 1, "no attempt starts by itself after a fault")
         self.assertEqual(s.commands(), [])

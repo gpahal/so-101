@@ -98,7 +98,7 @@ class ParseTest(unittest.TestCase):
         self.assertEqual((a["wrong"], a["p_wrong"], a["category"]), (True, 1.0, "other"))
 
     def test_a_probability_that_isnt_a_finite_number_is_no_probability(self):
-        # json reads NaN and Infinity as numbers; clamping NaN made it 0.0, a sure ok.
+        # json reads NaN and Infinity as numbers; clamping NaN would make it 0.0, a sure ok.
         for p in ("NaN", "-Infinity", "Infinity", '"nan"', '"inf"', '"-inf"', '"most likely"', "null", "[0.2]"):
             for wrong in ("true", "false"):
                 with self.subTest(p=p, wrong=wrong):
@@ -473,7 +473,7 @@ class RunnerTest(unittest.TestCase):
         self.assertTrue(all(json.loads(line)["model"] == "fake" for line in lines))
 
     def test_answers_asked_under_another_prompt_are_never_resumed(self):
-        self.run_once(0.045)  # 4 answers under today's prompt
+        self.run_once(0.045)  # 4 answers under this prompt
         calls = self.fake.calls
         other = runner.asked(self.model) | {"prompt_sha256": "another prompt"}
         with mock.patch.object(runner, "asked", return_value=other):
@@ -481,7 +481,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(self.result.stale, ["fake"])
         self.assertEqual(self.fake.calls, calls, "nothing asked")
         self.assertTrue(any("another prompt" in line for line in self.logged), self.logged)
-        self.run_once(1.0)  # the same prompt resumes as before
+        self.run_once(1.0)  # the same prompt resumes the cached answers
         self.assertEqual(self.result.stale, [])
         self.assertEqual(self.fake.calls, 10)
 
@@ -495,7 +495,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(self.result.stale, ["fake"])
         self.assertEqual(self.fake.calls, calls, "nothing asked")
         self.assertTrue(any("adapter" in line for line in self.logged), self.logged)
-        self.run_once(1.0)  # the same adapters resume as before
+        self.run_once(1.0)  # the same adapters resume the cached answers
         self.assertEqual(self.result.stale, [])
         self.assertEqual(self.fake.calls, 10)
 
@@ -540,9 +540,8 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(len(asked[0]), 2)
 
     def test_a_cap_leaves_models_on_different_providers_the_same_samples(self):
-        # Sol's case: each provider has its own queue and worker, and the first answers slowly. Admitting each
-        # call to the budget on its own let the fast provider spend the cap: 9 answers from it, 1 from the slow
-        # one, and one sample both answered. Admitting whole samples gives both models the same five.
+        # Each provider has its own queue and worker, and the first answers slowly. Admitting each call on its own
+        # would let the fast provider spend the cap alone; admitting whole samples gives both models the same five.
         import time
 
         class Slow(FakeAdapter):
@@ -830,8 +829,7 @@ def episode(*segments):
     states = [row for s, _, _ in segments for row in s]
     drivers = [d for _, ds, _ in segments for d in ds]
     phases = [p for _, _, ps in segments for p in ps]
-    return (np.array(phases, int), np.array([d != POLICY for d in drivers]), np.array(states, float),
-            np.array(drivers))
+    return np.array(phases, int), np.array(states, float), np.array(drivers)
 
 
 class Recording(Detector):
@@ -851,28 +849,25 @@ class CandidatesTest(unittest.TestCase):
 
         self.program, self.grasp = program.load(), thresholds.load()
 
-    def pick(self, phases, waiting, states, drivers):
-        return candidates.pick("run1", 0, phases, waiting, states, NAMES, FPS, self.program, self.grasp, drivers=drivers)
+    def pick(self, phases, states, drivers):
+        return candidates.pick("run1", 0, phases, states, NAMES, FPS, self.program, self.grasp, drivers=drivers)
 
     def test_a_layer_s_hold_is_left_out_of_the_replay(self):
         # Reach out with the jaws open, then the supervisor holds the arm there for 6 s: live, the
         # perception never sees the hold, so the hover rule can't fire on it.
-        phases, waiting, states, drivers = episode(frames(2, 0, 40), frames(1, 30, 40), frames(6, 30, 40, HOLD),
+        phases, states, drivers = episode(frames(2, 0, 40), frames(1, 30, 40), frames(6, 30, 40, HOLD),
                                                    frames(0.5, 31, 40))
-        rows = self.pick(phases, waiting, states, drivers)
+        rows = self.pick(phases, states, drivers)
         self.assertNotIn("stuck", [r["moment"] for r in rows])
-        old = self.pick(phases, waiting, states, None)
-        self.assertNotIn("stuck", [r["moment"] for r in old],
-                         "without the driver column, a hold sent no policy action, and hover counts only driven ticks")
 
     def test_no_candidate_lands_on_a_playback_and_the_detector_resumes_after_one(self):
-        phases, waiting, states, drivers = episode(
+        phases, states, drivers = episode(
             frames(2, 0, 40), frames(1, 20, 40), frames(0.5, 20, 10),  # reach and close on nothing
             frames(2.5, 0, 40, PLAYBACK),  # the supervisor plays it back
             frames(2, 20, 40), frames(1, 20, 18), frames(2, 20, 18, elbow=40), frames(1, 20, 40, elbow=40))
         Recording.calls = []
         with mock.patch("so_101.grasp.detector.Detector", Recording):
-            rows = self.pick(phases, waiting, states, drivers)
+            rows = self.pick(phases, states, drivers)
         self.assertTrue(all(drivers[r["t"]] == POLICY for r in rows if r["moment"] != "end"))
         self.assertEqual([r["moment"] for r in rows].count("after_close"), 2)
         resumed_at = round(6 * FPS)
@@ -882,8 +877,8 @@ class CandidatesTest(unittest.TestCase):
         self.assertEqual(pose, dict(zip(NAMES, states[resumed_at], strict=True)))
 
     def moments(self, *segments) -> list[tuple[str, int]]:
-        phases, waiting, states, drivers = episode(*segments)
-        return [(r["moment"], r["t"]) for r in self.pick(phases, waiting, states, drivers) if r["moment"] != "end"]
+        phases, states, drivers = episode(*segments)
+        return [(r["moment"], r["t"]) for r in self.pick(phases, states, drivers) if r["moment"] != "end"]
 
     def test_a_check_not_yet_sent_at_a_pause_is_no_candidate(self):
         # Live, a pause and resume drop the checks scheduled but not sent (`Supervisor._drop_scheduled`).
@@ -917,27 +912,27 @@ class CandidatesTest(unittest.TestCase):
                                                                       frames(2, 20, 40, elbow=40))])
 
     def test_a_pause_and_resume_in_one_tick_drops_the_check_not_yet_sent(self):
-        # B4: a Pause and Resume taken in one tick leave every frame Autonomous; live, the supervisor still dropped
+        # A Pause and Resume taken in one tick leave every frame Autonomous; live, the supervisor still drops
         # the after_close check scheduled before them. `analysis.Attempt.handbacks` marks the frame.
         reach, close, after = frames(1, 20, 40), frames(0.3, 20, 10), frames(2, 20, 10)
-        phases, waiting, states, drivers = episode(reach, close, after)
-        rows = self.pick(phases, waiting, states, drivers)
+        phases, states, drivers = episode(reach, close, after)
+        rows = self.pick(phases, states, drivers)
         self.assertIn("after_close", [r["moment"] for r in rows], "without the handback")
         marks = np.zeros(len(phases), dtype=bool)
         marks[len(reach[0]) + len(close[0]) + 1] = True
-        dropped = candidates.pick("run1", 0, phases, waiting, states, NAMES, FPS, self.program, self.grasp,
+        dropped = candidates.pick("run1", 0, phases, states, NAMES, FPS, self.program, self.grasp,
                                   drivers=drivers, handbacks=marks)
         self.assertNotIn("after_close", [r["moment"] for r in dropped])
 
     def test_an_id_names_the_moment(self):
-        phases, waiting, states, drivers = episode(frames(1, 20, 40), frames(0.3, 20, 10), frames(2, 20, 10))
-        rows = self.pick(phases, waiting, states, drivers)
+        phases, states, drivers = episode(frames(1, 20, 40), frames(0.3, 20, 10), frames(2, 20, 10))
+        rows = self.pick(phases, states, drivers)
         for r in rows:
             self.assertEqual(r["id"], f"run1-e0-t{r['t']}-{r['moment']}")
         self.assertEqual(len({r["id"] for r in rows}), len(rows))
 
     def test_a_label_never_moves_to_another_moment(self):
-        # B3: a labelled `end` row at frame 60; a rerun with other timings picks after_close at frame 60. The `end`
+        # A labelled `end` row at frame 60; a rerun with other timings picks after_close at frame 60. The `end`
         # label stays on its own row, and the after_close row waits for its own label.
         row = lambda moment: {"id": f"r-e0-t60-{moment}", "src": "r", "ep": 0, "t": 60, "moment": moment,  # noqa: E731
                               "label": "", "category": "", "gripper": 9.0, "note": "n"}
@@ -951,7 +946,7 @@ class CandidatesTest(unittest.TestCase):
             self.assertEqual(rows["r-e0-t60-after_close"]["label"], "")
 
     def test_a_category_or_note_without_a_label_is_kept(self):
-        # B5: a person who wrote a category and note but no label yet keeps both after a rerun, picked or not.
+        # A person who wrote a category and note but no label yet keeps both after a rerun, picked or not.
         row = lambda i: {"id": f"r-e0-t{i}-after_close", "src": "r", "ep": 0, "t": i, "moment": "after_close",  # noqa: E731
                          "label": "", "category": "", "gripper": 9.0, "note": "close 1"}
         with tempfile.TemporaryDirectory() as d:

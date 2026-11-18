@@ -3,8 +3,8 @@
 It holds the supervisor's own settings: when it checks, its judges, its responses and its budget. The
 gripper and stuck-rule thresholds every run's perception reads are `grasp.thresholds`, not here.
 
-`load` reads it into frozen dataclasses and checks every value, so a typo stops `serve` before the arm
-moves rather than changing what the supervisor does. The file's comments say what each number means and
+`load` reads it into frozen dataclasses and checks every value, so a typo stops `serve` or `run` before the
+arm moves rather than changing what the supervisor does. The file's comments say what each number means and
 where it came from. A `ProgramError` is a `settings.ConfigError`.
 """
 
@@ -17,11 +17,10 @@ from so_101.settings import ConfigError
 
 DEFAULT = Path(__file__).with_name("program.toml")
 RING_S = 4.0  # the supervisor keeps this many seconds of frames, so the watch check's lookback is at most this
-# How much further back than after_close_s + after_close_answer_s every miss playback must reach. The check
+# How much further back than after_close_s + after_close_answer_s every miss playback must reach: the check
 # is sent up to a tick after it's due, the playback starts a tick after the verdict, and the jaws close over
-# several ticks before the detector sees a close: with no margin, a verdict at the last moment it counts
-# played back to the gripper at 26 against closed_below 25 on a 30 fps test, one tick short of the close.
-# 0.33 s back already read fully open (40).
+# several ticks before the detector sees it. With no margin, a 30 fps test played back to gripper 26
+# against closed_below 25, one tick short of the close.
 REACH_MARGIN_S = 0.5
 
 
@@ -93,9 +92,6 @@ def _parse(data: dict, path: Path, models: dict) -> Program:
     watch = Watch(lookback_s=_number(w, "lookback_s", "watch"))
     if watch.lookback_s > RING_S:
         raise ProgramError(f"watch.lookback_s is {watch.lookback_s:g}: the supervisor keeps only {RING_S:g} s of frames.")
-    if "success_p_wrong" in j:  # version 1's one cutoff for both judges, which the decision model never got under
-        raise ProgramError("judges.success_p_wrong is no longer read: set success_decision_below and success_chat_below, "
-                           "each judge's own cutoff for calling a release done, as in the package's program.toml.")
     roles = ("decision", "chat", "escalation")
     for key in roles:
         if j.get(key) not in models:

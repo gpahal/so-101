@@ -905,10 +905,9 @@ class LinkLossTest(RigTest):
         self.assertEqual(self.rig.status()["state"], "starting")
         self.rig.tick_until("autonomous", client=self.PHONE)
 
-    # The user chose that the autopilot moves the arm only while a page in control watches it, whatever
-    # on_link_loss says: this replaces the test of `states._resume`'s old refusal, which applied only to a lost
-    # link with on_link_loss "pause". `states.step` now refuses the autopilot's Resume and Reset on
-    # `Facts.unwatched`, and never a person's command or the autopilot's Quit.
+    # The autopilot moves the arm only while a page in control watches it, whatever on_link_loss says:
+    # `states.step` refuses the autopilot's Resume and Reset on `Facts.unwatched`, never a person's command or the
+    # autopilot's Quit.
     NO_PAGE = ("No control page is in control, so the autopilot moves nothing unwatched. Open the page and take control "
                "there, and the next attempt starts the run's reset time (--reset-time), at least link_timeout_s + 0.5 s, after "
                "that; r at the robot's terminal starts it now.")
@@ -976,7 +975,7 @@ class LinkLossTest(RigTest):
 
 
 class LoopSafetyTest(RigTest):
-    """No error in a tick drops the arm, and no restarted motor is sent toward its old goal."""
+    """No error in a tick drops the arm, and no restarted motor is sent toward its last goal."""
 
     def test_a_dead_terminal_and_a_full_disk_during_a_fault_never_escape_the_tick(self) -> None:
         rig = self.new_rig(recorded=True)
@@ -1107,7 +1106,7 @@ class LoopSafetyTest(RigTest):
         self.assertEqual(rig.goals()[sent:], [last_goal] * 3, "it holds its last goal, keeping any grip")
 
         fell = {motor: steps - 300 for motor, steps in last_goal.items()}
-        rig.motors.power_off()  # now the power goes, while it's already in Fault
+        rig.motors.power_off()  # then the power goes, while it's already in Fault
         sent = len(rig.goals())
         rig.tick(3)
         self.assertEqual(rig.goals()[sent:], [], "no goal while the follower is silent")
@@ -1180,7 +1179,7 @@ class LoopSafetyTest(RigTest):
         self.assertEqual(rig.status()["state"], "fault")
 
         # The servos answer again, but for 0.3 s each position reads off by this arm's homing offsets, as
-        # the first read after switching the arm back on did on 2026-11-13.
+        # the first read after switching the arm back on can.
         offsets = {"shoulder_pan": 494, "shoulder_lift": 525, "elbow_flex": -478, "wrist_flex": -485,
                    "wrist_roll": -57, "gripper": -17}
         start, written = rig.clock(), len(rig.motors.writes)
@@ -1205,7 +1204,7 @@ class LoopSafetyTest(RigTest):
         self.assertTrue(rig.command("reset").accepted)
 
     def test_a_switched_off_arm_gets_its_torque_back_only_after_its_supply_has_read_normal_for_1_s(self) -> None:
-        # As on 2026-11-13: the servos answer for a moment at 6 V, then go silent; switched back on, they
+        # As measured on this arm: the servos answer for a moment at 6 V, then go silent; switched back on, they
         # answer before the supply is back to normal.
         rig = self.new_rig("switched-off", recorded=True)
         rig.start_policy()

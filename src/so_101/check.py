@@ -6,9 +6,9 @@ camera's UVC controls, the only thing written. Only `live_test` moves the follow
 asked for with `so101 check --live`.
 
 The checks open the buses and cameras they need and close them again. A caller that already holds
-a device open, such as the control center (`control/main.py`), passes it in instead: the checks use it as it is and leave
-it open. Opening a second connection isn't an option for an arm, because two processes on one
-serial port corrupt each other's packets.
+a device open, such as the control center (`control/main.py`), passes it in instead: the checks use it
+as it is and leave it open. Opening a second connection isn't an option for an arm, because two
+processes on one serial port corrupt each other's packets.
 """
 
 import shutil

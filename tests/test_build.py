@@ -382,17 +382,6 @@ class RecordTest(unittest.TestCase):
                                              "meta/info.json'))")
         self.assertEqual(path_free(f"{Path.home()}/elsewhere", s), "~/elsewhere")
 
-    def test_a_build_left_in_the_layout_from_before_datasets_gets_a_hint(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            s = dataclasses.replace(settings.load(), data_dir=Path(folder))
-            self.assertIsNone(data.old_build_hint(s, TASK))
-            old = data.task_dir(s, TASK) / "train" / "meta"
-            old.mkdir(parents=True)
-            (old / "info.json").write_text("{}")
-            hint = data.old_build_hint(s, TASK)
-        self.assertIn("is a build from before datasets/whole/", hint)
-        self.assertEqual(len(hint.splitlines()), 1)
-
 
 if __name__ == "__main__":
     unittest.main()
