@@ -35,7 +35,7 @@ speed_below = 10.0         # deg/s
 from_start_deg = 15.0      # some joint this far from where the attempt started
 seconds = 5.0
 [rules.chatter]
-crossings = 4              # crossings of closed_below, either way
+crossings = 4              # crossings of closed_below, either way, from the attempt's first close on
 within_s = 3.0
 [rules.frozen]
 speed_below = 3.0

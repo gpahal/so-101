@@ -33,8 +33,8 @@ OUT_OF_REACH = ("The controlling page (100.64.0.2) is out of reach, so the autop
                 "page back or take control on another, and the next attempt starts the run's reset time "
                 "(--reset-time), at least link_timeout_s + 0.5 s, after that; r at the robot's terminal starts it now.")
 # The autopilot's Resume with no page in control (`Controller._unwatched`).
-NO_PAGE = ("No control page is in control, so the autopilot moves nothing unwatched. Take control on the page, and the "
-           "next attempt starts the run's reset time (--reset-time), at least link_timeout_s + 0.5 s, after that; r at "
+NO_PAGE = ("No control page is in control, so the autopilot moves nothing unwatched. Open the page and take control "
+           "there, and the next attempt starts the run's reset time (--reset-time), at least link_timeout_s + 0.5 s, after that; r at "
            "the robot's terminal starts it now.")
 
 

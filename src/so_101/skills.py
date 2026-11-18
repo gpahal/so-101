@@ -54,7 +54,8 @@ CUT_RULES_VERSION = 5
 # 1 feeds Teleop frames and the Autonomous frames the live detector sees (the model drove or waited on),
 # through `grasp.replay.LiveFeed`: on the live clock (nothing for the first frame after a handback), and
 # hearing a Pause and Resume taken in one tick.
-RUN_LABEL_VERSION = 1
+# 2 counts the chatter rule's crossings only from the attempt's first close (`grasp.detector`).
+RUN_LABEL_VERSION = 2
 LIFT_DEG = 4.0  # shoulder_lift travel after the close that counts as the block leaving the mat
 WIDEST_WITHIN_S = 2.0  # the widest opening is looked for this long after the release
 MIN_SPAN_S = 0.5  # a skill's shortest span in any demo

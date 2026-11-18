@@ -6,8 +6,9 @@
 # The numbers were fitted offline on 150 recorded ACT and pi0.5 attempts from the first, 5-spot demos
 # (docs/supervisor.md), and scored on the same attempts. Those recordings are deleted, and the policies
 # trained on the new demos fail in their own ways: refit every number on new serve runs before trusting it.
-# The time limits below are unmeasured: no judge has answered from the arm yet.
-version = 1
+# Version 2 is fitted to the first shadow runs on the arm (results/act-pi05-block-container-supervisor-shadow.md):
+# 12 attempts of ACT and pi0.5, all of them successes, so nothing here has been scored on a failure yet.
+version = 2
 
 [timing]
 after_close_s = 1.0        # the event check looks this long after a close
@@ -17,7 +18,11 @@ after_release_s = 1.5      # and this long after a release
 # dropped, so a playback always starts soon enough after the close to undo it: after_close_s + this + 0.5 s
 # must be at most each miss_rewind_s. The 0.5 s (program.REACH_MARGIN_S) covers the ticks between the check
 # being due, sent and acted on, and the jaws' closing motion before the close is seen.
-after_close_answer_s = 1.5
+# In the shadow runs the chat judge (Gemini 3.8 Flash) answered in 3.0 to 5.2 s, never inside the 1.5 s this
+# once was, so no miss could ever have been played back: a playback needs both judges. 4.5 s takes 12 of its
+# 14 answers. A real grasp carries about 1.5 s after its close, which drops the check
+# anyway ("carried_or_released"), so the longer wait only matters for a miss.
+after_close_answer_s = 4.5
 hold_deadline_s = 5.0      # a hold whose watch check hasn't cleared it by then asks for a person
 home_within_s = 10.0       # a done ask waits for the arm at rest, or this many seconds of the policy's time (ticks at the task's fps) after the release
 
@@ -30,20 +35,28 @@ chat = "gemini-3.8-flash"         # asked at the same time at events; a playback
 escalation = "claude-opus-5.5"    # reads the attempt's closes and log when the others can't settle it
 sure_ok_below = 0.2               # p_wrong under this is a sure ok
 sure_wrong_above = 0.8            # and over this a sure wrong
-success_p_wrong = 0.1             # after a release, the task counts as done only when both judges answer under this
+# After a release, the task counts as done only when both judges answer under their cutoff. In the shadow runs
+# Jev answered 0.16 to 0.47 on 12 blocks plainly in the jar, never under the 0.1 both once had, so nothing was
+# ever called done; 0.3 passes 9 of those 12. Gemini answered 0.00 to 0.01 on all 8 it answered.
+# Both were fitted on successes only: check them on failures (so101-failbench) before trusting them.
+success_decision_below = 0.3
+success_chat_below = 0.1
 # A judge that hasn't answered a check by then counts as no answer. It is also each judge's request
 # timeout (failbench's is 180 s): the layer no longer waits after it, so a longer request would only keep
 # a worker busy and bill for an answer nothing acts on, and a slow provider would fill the pool.
-answer_within_s = 5.0
+# 8 s, up from 5: Gemini 3.8 Flash timed out at 5 s on 9 of 24 calls in the shadow runs, and its 14 answers
+# took 3.0 to 5.2 s (2 of them just past 5 s). An after_close check still drops its verdict at after_close_answer_s.
+answer_within_s = 8.0
 max_cost_usd = 2.0                # per run; a call starts only if its estimated cost fits under this
 
 [responses]
 # For the nth miss, which both judges must call wrong, the supervisor plays back this many seconds of the
 # policy's own motion, newest first, then hands the arm back to the policy. The seconds are the policy's
 # time, counted in ticks at the task's fps, as the perception's clock is, so a playback replays one
-# recorded pose a tick and reaches as far back on a loop slower than the fps. 3 s is the 2.5 s a check can
+# recorded pose a tick and reaches as far back on a loop slower than the fps. 6 s is the 5.5 s a check can
 # wait for its verdict (after_close_s + after_close_answer_s) and the 0.5 s margin, so even the latest miss
-# undoes the close, the jaws' closing and the lift after it. A miss past the list, or a stuck
+# undoes the close, the jaws' closing and the motion after it; 8 s goes 2 s further, along a different
+# approach. Both are untested on the arm: no shadow attempt missed. A miss past the list, or a stuck
 # rule, holds the arm, asks the watch check, and asks a person unless that check is sure nothing is wrong.
 # While the list has rungs left and both judges answer, a regrasp loop is left to it.
-miss_rewind_s = [3.0, 5.0]
+miss_rewind_s = [6.0, 8.0]

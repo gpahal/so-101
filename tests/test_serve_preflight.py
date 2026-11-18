@@ -133,6 +133,14 @@ class ServePreflightTest(ConfigTest):
         [line] = [line for line in self.printed.splitlines() if line.strip().startswith("FAIL")]
         self.assertIn("link_timeout_s", line)
 
+    def test_a_gripper_floor_that_would_keep_the_jaws_off_the_block_is_refused(self) -> None:
+        self.assertEqual(self.problems(self.write(self.valid_pose() + "gripper_floor = 2.0\n")), [])
+        self.assertEqual(self.problems(self.write(self.valid_pose() + "gripper_floor = 0\n")), [], "0 turns it off")
+        [problem] = self.problems(self.write(self.valid_pose() + "gripper_floor = 17\n"))
+        self.assertIn("gripper_floor = 17 is at or above 16.5", problem)
+        [problem] = self.problems(self.write(self.valid_pose() + "gripper_floor = -1\n"))
+        self.assertIn("gripper_floor", problem)
+
     def test_run_s_duration_0_starts_and_lasts_until_a_person_ends_the_attempt(self) -> None:
         import math
 

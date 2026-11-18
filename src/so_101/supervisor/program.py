@@ -41,7 +41,8 @@ class Judges:
     escalation: str
     sure_ok_below: float
     sure_wrong_above: float
-    success_p_wrong: float
+    success_decision_below: float  # after a release, done needs the decision model's p_wrong under this
+    success_chat_below: float  # and the chat model's under this
     answer_within_s: float
     max_cost_usd: float
 
@@ -92,6 +93,9 @@ def _parse(data: dict, path: Path, models: dict) -> Program:
     watch = Watch(lookback_s=_number(w, "lookback_s", "watch"))
     if watch.lookback_s > RING_S:
         raise ProgramError(f"watch.lookback_s is {watch.lookback_s:g}: the supervisor keeps only {RING_S:g} s of frames.")
+    if "success_p_wrong" in j:  # version 1's one cutoff for both judges, which the decision model never got under
+        raise ProgramError("judges.success_p_wrong is no longer read: set success_decision_below and success_chat_below, "
+                           "each judge's own cutoff for calling a release done, as in the package's program.toml.")
     roles = ("decision", "chat", "escalation")
     for key in roles:
         if j.get(key) not in models:
@@ -104,7 +108,8 @@ def _parse(data: dict, path: Path, models: dict) -> Program:
         decision=j["decision"], chat=j["chat"], escalation=j["escalation"],
         sure_ok_below=_number(j, "sure_ok_below", "judges"),
         sure_wrong_above=_number(j, "sure_wrong_above", "judges"),
-        success_p_wrong=_number(j, "success_p_wrong", "judges"),
+        success_decision_below=_number(j, "success_decision_below", "judges"),
+        success_chat_below=_number(j, "success_chat_below", "judges"),
         answer_within_s=_number(j, "answer_within_s", "judges"),
         max_cost_usd=_number(j, "max_cost_usd", "judges", strict=False),
     )
