@@ -6,8 +6,8 @@ command, so `uv run so101 teleop --teleop_time_s=30` works. `run` and `serve` fo
 `--inference.*`, `--policy.*`, `--robot.*` and `--rename_map` (`commands.serve.lerobot_extra`). Every
 other command refuses them.
 
-This file parses the arguments and dispatches. The longer commands, `serve` and `runs`, and what
-`run` and `serve` share, are in `so_101.commands`.
+This file parses the arguments and dispatches. The longer commands (`serve` and `run`, `runs`, `sim`,
+`skills`) and what `run` and `serve` share are in `so_101.commands`.
 """
 
 import argparse
@@ -165,7 +165,7 @@ def cmd_pose(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None
     from so_101.check import read_pose
 
     if ns.save_rest:
-        # Saved with the pose, so `serve` can tell when the follower was recalibrated since.
+        # Saved with the pose, so `serve` and `run` can tell when the follower was recalibrated since.
         fingerprint = s.follower.calibration_fingerprint()
         if fingerprint is None:
             sys.exit(f"No calibration file for the follower at {s.follower.calibration_file}, so no rest pose was "
@@ -382,12 +382,9 @@ def cmd_review(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> No
     open_page(s, task, source, ns.episode, ns.all)
 
 
-# Never uploaded: the build is remade from the sessions and edits, Finder's .DS_Store is noise, and
-# the rest are half-written files from a save in progress. `*` also matches `/` in these patterns.
-# The datasets `build` remakes from the recordings and edits are left out: datasets/ now, and train/ and
-# build.json where a task folder still has the layout from before datasets/.
-BACKUP_IGNORE = ["datasets/**", "train/**", "train.tmp/**", "build.json", "build.json.tmp", "**/.DS_Store", ".DS_Store",
-                 "*.toml.tmp", "**/meta-copy/.building-*"]
+# Never uploaded: the builds under datasets/, which `build` remakes from the sessions and edits, Finder's
+# .DS_Store, and files half-written by a save in progress. `*` also matches `/` in these patterns.
+BACKUP_IGNORE = ["datasets/**", "**/.DS_Store", ".DS_Store", "*.toml.tmp", "**/meta-copy/.building-*"]
 
 
 def folder_bytes(path: Path) -> int:
@@ -477,27 +474,26 @@ def push_dataset(root: Path, repo_id: str) -> str:
 
 # Flags each policy needs beyond its `[train.<policy>]` recipe in so101.toml.
 # Every policy's training: LeRobot's random brightness, contrast, colour, sharpness, shifts and rotations
-# of up to 5 degrees, at most 3 per frame. openpi always trains pi0.5 with augmentation of this kind. The
-# first pi0.5 saw only the demos' light: under light that blew out 41% of the top camera's pixels it held
-# the block in 4 of 8 attempts, against 9 of 10 under the demos' light. The ACT trained without it moved
-# its actions 1 degree for a demo frame blurred by a single pixel. `--dataset.image_transforms.enable=false`
-# after the command turns it off.
+# of up to 5 degrees, at most 3 per frame, as openpi always trains pi0.5. Without it, pi0.5 held the block
+# in 4 of 8 attempts under light that blew out 41% of the top camera's pixels, against 9 of 10 under the
+# demos' light, and ACT moved its actions 1 degree for a demo frame blurred by a single pixel.
+# `--dataset.image_transforms.enable=false` after the command turns it off.
 TRAIN_FLAGS = ["--dataset.image_transforms.enable=true"]
 
 POLICY_FLAGS = {
     "act": [],
     "pi05": [
         "--policy.pretrained_path=lerobot/pi05_base",
-        # Train the whole model, as Physical Intelligence's and LeRobot's own pi0.5 recipes do. The first
-        # recipe here trained only the action model, and after 12k steps its plans were 2.6 degrees from
-        # the demos it was trained on, against 0.83 degrees for ACT.
+        # Train the whole model, as Physical Intelligence's and LeRobot's own pi0.5 recipes do: training
+        # only the action model for 12k steps left its plans 2.6 degrees from its own demos, against 0.83
+        # for ACT.
         "--policy.train_expert_only=false",
         "--policy.freeze_vision_encoder=false",
         # Without it this batch ran out of an H200's 141 GB.
         "--policy.gradient_checkpointing=true",
         # Keep the weights in 32-bit and do the arithmetic in bfloat16. `--policy.dtype=bfloat16` keeps
         # the weights themselves in bfloat16, where an update under 1/512 of a weight rounds away: after
-        # that 12k-step run, 92% of the action model's 575M bfloat16 weights, and every one that started
+        # 12k steps that way, 92% of the action model's 575M bfloat16 weights, and every one that started
         # at 0.01 or more, were bit for bit the base model's. 32-bit arithmetic as well took 30 s a step
         # on an A100.
         "--policy.dtype=float32",
@@ -632,8 +628,6 @@ def build_sources(ns: argparse.Namespace) -> tuple[str, ...]:
 
 def cmd_build(s: settings.Settings, ns: argparse.Namespace, _: list[str]) -> None:
     task = get_task(ns.task)
-    if hint := data.old_build_hint(s, task):
-        print(hint)
     kind = dataset_kind(ns, task)
     sources = build_sources(ns)
     if data.build_is_current(s, task, sources, ns.keep_labels, kind) and not ns.force:
@@ -667,8 +661,6 @@ def cmd_train(s: settings.Settings, ns: argparse.Namespace, extra: list[str]) ->
     skills = kind == data.SKILLS
     if base:
         check_base(*base, ns.policy, len(task.skills) if skills else 0)
-    if hint := data.old_build_hint(s, task):
-        print(hint)
     sources = build_sources(ns)
     policy = task.policy_for(ns.policy, skills)  # needs a Hugging Face login; fail before building
     dataset_repo = task.dataset_repo(skills)
@@ -841,7 +833,7 @@ def make_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("info", help="show config, resolved ports, camera indices and calibration status").set_defaults(fn=cmd_info)
 
-    p = sub.add_parser("find-port", help="detect an arm's board by unplugging it, and save its port")
+    p = sub.add_parser("find-port", help="detect an arm's board by unplugging it, and save its port and serial number")
     p.add_argument("arm", choices=ARMS)
     p.set_defaults(fn=cmd_find_port)
 
@@ -849,7 +841,7 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("arm", nargs="?", choices=ARMS, help="default: both")
     p.set_defaults(fn=cmd_scan)
 
-    p = sub.add_parser("sim", help="build a simulated twin of a task from its demos, try policies in it, and aim the top camera back at the demos' view")
+    p = sub.add_parser("sim", help="build a simulated twin of the block-container task from its demos, try policies in it, and aim the top camera back at the demos' view")
     actions = p.add_subparsers(dest="action", required=True, metavar="ACTION",
                                parser_class=partial(argparse.ArgumentParser, allow_abbrev=False))
 
@@ -954,7 +946,7 @@ def make_parser() -> argparse.ArgumentParser:
     add_task(p)
     p.add_argument("--force", action="store_true", help="rebuild even if nothing changed")
     p.add_argument("--with", dest="with_", metavar="SOURCES",
-                   help="also train on serve and run runs: corrections, human-attempts, policy-successes, "
+                   help="also take serve and run runs: corrections, human-attempts, policy-successes, "
                         "comma-separated (default: the demos only)")
     p.add_argument("--keep-labels", action="store_true",
                    help="keep intervention and control.phase, and add control.label and control.attempt_success")

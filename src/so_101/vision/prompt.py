@@ -15,7 +15,8 @@ TASK_NAME = "block-container"
 TASK = "Pick up the red block and put it in the cylindrical container"
 
 # When the frame was taken, in the words the model sees. The controller always knows which of these it
-# is at, so telling the model is realistic, and without it an end frame looks like a start frame.
+# is at, so telling the model is realistic, and without it an end frame looks like a start frame. The
+# after_close and after_release delays are program.toml's after_close_s and after_release_s.
 MOMENTS = {
     "approach": "The arm is moving towards the block to pick it up.",
     "after_close": "About 1 second ago the gripper closed: the robot just tried to grasp the block.",
@@ -82,7 +83,6 @@ ANSWER_SCHEMA = {
     "additionalProperties": False,
 }
 
-# For decision models: the same context, as plain input text, then two questions.
 def decision_context(moment: str | None, images=("top", "wrist")) -> str:
     """The decision models' context for a request carrying `images` (as `describe` takes them)."""
     return SYSTEM + "\n\n" + (f"Moment: {MOMENTS[moment]}" if moment else "Moment: unknown.") + \

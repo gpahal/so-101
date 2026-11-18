@@ -6,8 +6,8 @@ them, and its clock. One copy, so the offline replays can't drift from what ran:
 `Perception` runs `LiveFeed` live, over each tick the model drove, and the replays run it offline, over the
 recorded frames, as `Controller._drive_tick` decides what the perception sees:
 
-- The detector sees each Autonomous frame the model drove or waited on (`control.driver` POLICY or WAITING),
-  or every Autonomous frame of a run recorded before that column (`live_masks`).
+- The detector sees each Autonomous frame the model drove or waited on (`control.driver` POLICY or WAITING,
+  `live_masks`).
 - After anything else had the arm, it's told `resumed(moved)` once, on the next frame it sees, where `moved`
   is whether anything moved the arm meanwhile: a Teleop, Rewinding or Returning frame, or a layer's playback
   (as the controller sets `attempt.moved`). A Pause and Resume taken in one tick leave no frame out of
@@ -27,23 +27,15 @@ from so_101.policy.base import PLAYBACK, POLICY, WAITING
 MOVED_PHASES = (Phase.TELEOP, Phase.REWINDING, Phase.RETURNING)
 
 
-def live_masks(phases: np.ndarray, drivers: np.ndarray | None,
-               waiting: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def live_masks(phases: np.ndarray, drivers: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per frame: (fed, drove, moved). `fed`: the live detector saw it. `drove`: of those, the model drove it
     rather than waited, which only the stuck rules read. `moved`: a frame the detector didn't see in which
-    something else moved the arm. `drivers` is `control.driver`, None for a run recorded before it, where every
-    Autonomous frame was fed and `waiting` (no policy action), when given, says which the model didn't drive."""
-    phases = np.asarray(phases)
+    something else moved the arm. `drivers` is `control.driver`."""
+    phases, drivers = np.asarray(phases), np.asarray(drivers)
     autonomous = phases == Phase.AUTONOMOUS
-    if drivers is None:
-        fed = autonomous
-        drove = autonomous & ~np.asarray(waiting, dtype=bool) if waiting is not None else autonomous.copy()
-        playback = np.zeros(len(phases), dtype=bool)
-    else:
-        drivers = np.asarray(drivers)
-        fed = autonomous & np.isin(drivers, (POLICY, WAITING))
-        drove = autonomous & (drivers == POLICY)
-        playback = autonomous & (drivers == PLAYBACK)
+    fed = autonomous & np.isin(drivers, (POLICY, WAITING))
+    drove = autonomous & (drivers == POLICY)
+    playback = autonomous & (drivers == PLAYBACK)
     moved = ~fed & (np.isin(phases, MOVED_PHASES) | playback)
     return fed, drove, moved
 

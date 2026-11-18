@@ -8,7 +8,8 @@ The top camera never moves, so its picture is the real empty scene with the simu
 drawn on top: most of its pixels are real. The jar is real too, a cut-out of it from the demos moved to
 where the simulated jar stands, and only drawn as a shape once it has been knocked over. The wrist
 camera moves, so its whole view is rendered: the mat and table textured from the top camera's picture,
-the wall, the floor, the jar, the block and the jaws.
+the wall, the floor, the jar, the block and the jaws. With the built demos (`SO101_SIM_DEMOS`), the top
+camera's arm and the whole wrist view are recoloured from the nearest real frame (`photo`).
 """
 
 import json
@@ -31,7 +32,8 @@ CAMERAS = ("top", "wrist")
 # Which rendering group each thing is in, so each camera and each fit can draw just what it needs.
 GROUP_SCENE, GROUP_BASE, GROUP_ARM, GROUP_HIDDEN, GROUP_BLOCK, GROUP_JAR = range(6)
 SCENE_DIR_ENV = "SO101_SIM_SCENE"
-# The built demos' folder. With it, the top camera's arm is drawn from the demos' real frames (`photo`).
+# The built demos' folder. With it, the top camera's arm and the wrist camera's whole view are drawn from the
+# demos' real frames (`photo`).
 DEMOS_DIR_ENV = "SO101_SIM_DEMOS"
 TASK = "so101_block_container"
 FPS = 30
@@ -45,12 +47,12 @@ JAR_SEGMENTS = 32
 WRIST_CAMERA_PARTS = ("wrist_camera_pcb", "wrist_camera_lens")
 GLOW = 0.6
 ARM_GLOW = 0.1
-# How hard things are to press into. MuJoCo's contacts give way in proportion to the lighter body's weight,
-# and with the arm model's settings the jaws sank 2 to 3 mm into each side of the 5 gram block: it then
-# stayed wedged when the real gripper lets go by opening 2 mm, and the gripper read 1 to 4 less than the
-# real one while holding it. With these the jaws sink 0.4 mm and read within 1 of the real gripper. The
-# jaws' settings are the ones that count against the block, because the arm model gives them priority; the
-# block's and jar's count against the mat, through their high `solmix`.
+# How hard things are to press into. MuJoCo's contacts give way in proportion to the lighter body's weight:
+# at the arm model's settings the jaws sink 2 to 3 mm into each side of the block, which then stays wedged
+# when the real gripper lets go by opening 2 mm, and the gripper reads 1 to 4 below the real one while
+# holding it. With these the jaws sink 0.4 mm and read within 1 of the real gripper. The jaws' settings
+# count against the block, because the arm model gives them priority; the block's and jar's count against
+# the mat, through their high `solmix`.
 HARD_JAWS = dict(solref=[0.0045, 1.0], solimp=[0.99, 0.994, 0.001, 0.5, 2.0])
 HARD = dict(solref=[0.0045, 1.0], solimp=[0.95, 0.99, 0.001, 0.5, 2.0], solmix=1000.0)
 
@@ -144,9 +146,9 @@ def build_model(scene: dict, scene_dir: Path) -> mujoco.MjModel:
         if joint.name in arm["motors"]:
             joint.frictionloss = arm["motors"][joint.name]["friction"]
             joint.armature = arm["motors"][joint.name]["armature"]
-            # MuJoCo 4 takes damping as polynomial coefficients, linear first; the motors' is linear only.
+            # MuJoCo takes damping as polynomial coefficients, linear first; the motors' is linear only.
             joint.damping = [arm["motors"][joint.name]["damping"], 0.0, 0.0]
-    # The follower's calibrated range for each joint, which LeRobot keeps its goals within, replaces the
+    # The follower's calibrated range for each joint, which LeRobot keeps its goals within, overrides the
     # model's: the real arm folds a few degrees further than the drawing allows.
     limits = np.array([arm["limits"][name] for name in JOINTS], dtype=np.float64)
     low, high = units.to_qpos(limits[:, 0]), units.to_qpos(limits[:, 1])
@@ -207,8 +209,8 @@ def build_model(scene: dict, scene_dir: Path) -> mujoco.MjModel:
     piece_mass = jar["mass"] * 0.7 / JAR_SEGMENTS
     can.add_geom(name="jar_base", type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[jar["radius"], jar["base"] / 2, 0], pos=[0, 0, jar["base"] / 2], mass=jar["mass"] * 0.3, **touch)
     middle = jar["radius"] - jar["wall"] / 2
-    # The wall starts above the base, so only the base rests on the mat: 32 pieces each touching it made
-    # every physics step several times slower.
+    # The wall starts above the base, so only the base touches the mat: 32 wall pieces touching it make each
+    # physics step several times slower.
     wall_half = (jar["height"] - jar["base"]) / 2
     for i in range(JAR_SEGMENTS):
         angle = 2 * np.pi * (i + 0.5) / JAR_SEGMENTS
@@ -281,8 +283,8 @@ class BlockContainerEnv(gym.Env):
     ):
         """`start` picks one demo's block and jar positions; without it each reset draws one at random.
         `jitter` scales the small random shift added to it, 3 mm and 3 degrees at 1. `demos_dir` is the
-        built demos' folder (default: SO101_SIM_DEMOS): with it the top camera's arm is drawn from their
-        real frames, and without it from the arm model alone."""
+        built demos' folder (default: SO101_SIM_DEMOS): with it the top camera's arm and the wrist camera's
+        whole view are drawn from their real frames, and without it from the arm model alone."""
         super().__init__()
         self.scene_dir = Path(scene_dir or os.environ[SCENE_DIR_ENV])
         self.scene = json.loads((self.scene_dir / "scene.json").read_text())

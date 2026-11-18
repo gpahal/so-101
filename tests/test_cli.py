@@ -155,8 +155,8 @@ class AllowListTest(unittest.TestCase):
                 self.assertIn("--display_data", str(stop.exception.code))
 
     def test_run_refuses_a_reset_time_or_duration_that_is_not_finite_seconds_before_its_checks(self) -> None:
-        # A nan or inf reset time made the autopilot's next_in_s nan or inf, which the page's strict JSON
-        # status can't hold: every /status failed once the arm reached rest.
+        # A nan or inf reset time would make the autopilot's next_in_s nan or inf, which the page's strict
+        # JSON status can't hold.
         task = types.SimpleNamespace(name="test", prompt="test", fps=30, reset_time_s=10)
         s = mock.Mock(run=mock.Mock(episodes=1), control=mock.Mock(on_link_loss="pause"))
         cases = [("reset_time", "--reset-time", value) for value in (float("nan"), float("inf"), -1.0)] + \

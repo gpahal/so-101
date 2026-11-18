@@ -27,7 +27,7 @@ prompt as LeRobot's `task` (for policies that read text, such as pi0.5) and the 
 
 `policy.skills.SkillSequencer` runs a skills model: a layer of the policy stack that starts each attempt
 on the first skill and switches at each handover, conditioning the model on the next skill's prompt and
-one-hot. The recording writes the skill on each frame as control.skill (`policy-layers.md`).
+one-hot. The recording writes the skill on each frame as control.skill (docs/policy-layers.md).
 """
 
 import copy
@@ -41,20 +41,14 @@ HANDOVERS = ("carry", "release")  # what the detector sees as the policy drives 
 # Raise with any change to LIFT_DEG, WIDEST_WITHIN_S, MIN_SPAN_S or how `events` and `spans` cut a demo, or
 # to how the detector finds a close, a carry or a release from the same thresholds (`grasp.detector`) that
 # moves a cut: a skills build records it (`data.build_inputs`), so one made under other rules is stale, and a
-# skills model trained on one is refused (`contract`). Version 5 is the detector's median hold
-# (`Detector._steady`). The band guard after it (a release must also leave `hold_band`) moved no event in the
-# 180 recorded demos, so it kept 5: a detector change that moves no demo cut raises only
-# `RUN_LABEL_VERSION`, which a skills build with runs records, since it can still move their labels.
+# skills model trained on one is refused (`contract`). A detector change that moves no demo cut raises only
+# `RUN_LABEL_VERSION`, which can still move a run's labels.
 CUT_RULES_VERSION = 5
 # Raise with any change to how `label_run` labels a run's frames, to what `build.run_skills` gives it, or to how
 # the grasp detector (`grasp.detector`) finds events from the same thresholds, which can move a run's labels
 # without moving any demo's cut: a skills build that takes runs records it (`data.build_inputs`), so one
 # labelled under other rules is stale, and a skills model trained on one is refused (`contract`). Each run's
 # run.json records it too, beside the thresholds' versions. A demos-only build doesn't record it.
-# 1 feeds Teleop frames and the Autonomous frames the live detector sees (the model drove or waited on),
-# through `grasp.replay.LiveFeed`: on the live clock (nothing for the first frame after a handback), and
-# hearing a Pause and Resume taken in one tick.
-# 2 counts the chatter rule's crossings only from the attempt's first close (`grasp.detector`).
 RUN_LABEL_VERSION = 2
 LIFT_DEG = 4.0  # shoulder_lift travel after the close that counts as the block leaving the mat
 WIDEST_WITHIN_S = 2.0  # the widest opening is looked for this long after the release
@@ -267,8 +261,8 @@ def label_run(skills: tuple[Skill, ...], state: np.ndarray, names: list[str], fp
     sequencer does.
 
     `fed` is, per frame, whether to replay it: an Autonomous frame the model drove or waited on, which the
-    live detector sees, or a Teleop frame, which it doesn't but the replay feeds on purpose (above). A frame neither scripted nor fed (Paused, Handover, a layer's hold) isn't
-    replayed either: it keeps the current skill, and the next frame fed tells the detector the arm was held
+    live detector sees, or a Teleop frame, which it doesn't but the replay feeds on purpose (above). A
+    frame neither scripted nor fed (Paused, Handover, a layer's hold) isn't replayed either: it keeps the current skill, and the next frame fed tells the detector the arm was held
     (`resumed(False)`), as the perception is told after a plain pause, unless a script or a person moved it
     since, which wins. `drove` is, per frame fed, whether the model drove it rather than waited, which only
     the stuck rules read. `handbacks` marks the frames before which a Pause and Resume came in one tick
@@ -347,9 +341,8 @@ def _regripped(saved: tuple, feed, current: int, closes: list, found: dict, last
                thresholds, labels: np.ndarray, end: int):
     """At the end of a person's Teleop stretch that began with a carried block: if a release happened in it
     and the gripper is back in the hold band by its last frame (`last`), on a block, not shut as at rest,
-    the person re-gripped the block. The replay
-    goes back to `saved`, and the stretch's frames take the skill it was on then. Returns the replay's
-    feed (`grasp.replay.LiveFeed`), skill, closes and events, rolled back or not."""
+    the person re-gripped the block. The replay goes back to `saved`, and the stretch's frames take the
+    skill it was on then. Returns the replay's feed (`grasp.replay.LiveFeed`), skill, closes and events, rolled back or not."""
     before, skill, kept_closes, kept_found, first = saved
     low, high = thresholds.gripper.hold_band
     holding = low <= float(last[names.index("gripper.pos")]) <= high

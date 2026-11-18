@@ -45,8 +45,6 @@ class PolicySetup:
         limit = f"limit {cap:g} per step" if cap else "no per-step limit"
         if not self.server:
             return f"Predicts every {n} steps ({n / self.task.fps:.1f} s), {limit}."
-        # The remote client asks again once the measured turnaround plus one step is left in its queue,
-        # or its refill_seconds if that's more.
         if remote.EXECUTION[self.server.labels["policy"]] == "chunk":
             asks = "asks for the next once the turnaround plus one step is left (at least 0.5 s)"
             return f"Predicts {n} steps ({n / self.task.fps:.1f} s) at a time and {asks}, {limit}."
@@ -91,7 +89,7 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task)
 
     The model is read at one Hub commit (`commit`): a remote run's is the one its server loaded, so a server
     started before a newer model reached main is checked as the model it serves; a local run's is the one
-    the revision names now, so a push meanwhile can't mix two models' files."""
+    the revision names when the run starts, so a push meanwhile can't mix two models' files."""
     skills = bool(getattr(ns, "skills", False))
     if skills:
         task.require_skills()
@@ -103,7 +101,7 @@ def policy_setup(s: settings.Settings, ns: argparse.Namespace, task: tasks.Task)
     if local is None:
         if ns.remote:
             running = remote.active_server_or_exit(task.name, ns.policy, revision, dataset)
-            commit = remote.served_commit(running, task.name, ns.policy, revision, dataset)
+            commit = remote.served_commit(running)
         else:
             commit = task.policy_commit(ns.revision, ns.policy, skills)
     config = json.loads((local / "config.json").read_text()) if local else task.policy_config(commit, ns.policy, skills)
@@ -189,8 +187,8 @@ def skills_build(s: settings.Settings, local: Path | None, repo: str | None, rev
     - after `--target local`, `data.build_revision` of the build.json it trained on: the copy `train` kept
       under that name (`data.trained_build_path`), which must still be that file. A later build doesn't
       touch it, so it doesn't retire the model.
-    Exits when the model records neither, as one trained before `train` recorded them does, or when the
-    build can't be read: which skills it was trained on would be a guess."""
+    Exits when the model records neither, or when the build can't be read: which skills it was trained on
+    would be a guess."""
     from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
 
@@ -217,9 +215,9 @@ def skills_build(s: settings.Settings, local: Path | None, repo: str | None, rev
         return json.loads(build.read_text())
     if not (isinstance(pinned, str) and re.fullmatch(r"[0-9a-f]{40}", pinned)) or not source or source.startswith("local/"):
         sys.exit(f"{model} recorded no build it was trained on: its train_config.json's dataset.revision is "
-                 f"{pinned!r}, where `so101 train` now records the Hub dataset's commit, or the build's sha256 on "
-                 "this Mac. It was trained before that, and its dataset's build.json may since describe a later "
-                 f"build, so which skills it was trained on can't be checked. {retrain}"
+                 f"{pinned!r}, not the Hub dataset's commit or the build's sha256 on this Mac that `so101 train` "
+                 "records. Its dataset's build.json may describe a later build, so which skills it was trained on "
+                 f"can't be checked. {retrain}"
                  f"{' --target local' if root else ''}.")
     try:
         return json.loads(Path(hf_hub_download(source, "build.json", repo_type="dataset", revision=pinned)).read_text())
@@ -236,10 +234,10 @@ def require_skills_contract(model: str, task: tasks.Task, gripper, build: dict) 
     """Exit unless the skills dataset's `build` (its build.json) recorded the same `skills.contract` as this
     checkout: every skill as `Skill.record` gives it (name, prompt, from, to and handover) in the same
     order, the same `[gripper]` thresholds, the same cut rules and, when the build took runs (`so101 build
-    --with`), the same run labelling and grasp detector. Those decide where the demos were cut, how runs were labelled and
-    when a skill switches, so a model trained under others would be told the wrong skill at the wrong
-    time. A build.json missing any of them is refused, naming what's missing. One refusal names every
-    difference."""
+    --with`), the same run labelling and grasp detector. Those decide where the demos were cut, how runs
+    were labelled and when a skill switches, so a model trained under others would be told the wrong
+    skill at the wrong time. A build.json missing any of them is refused, naming what's missing. One
+    refusal names every difference."""
     from so_101 import skills
 
     inputs = build.get("inputs") or {}

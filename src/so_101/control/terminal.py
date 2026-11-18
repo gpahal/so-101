@@ -9,11 +9,12 @@ controller refuses it once another attempt is the current one. With no attempt o
 where the attempt was already saved, or resting away from rest) the right arrow resets to rest
 without asking. The right arrow's question tells the controller once that a person started answering
 (`commands.ANSWERING`), which hands the attempt to them in `so101 run`: its autopilot neither resumes nor
-ends it, however long the answer takes. After a time limit ends an attempt, s, f or i answers the controller's outcome prompt. c runs the
-checks and prints their report, o the pose against the demos' start pose. Space only pauses, and r
-starts or resumes: a terminal sends no key-up, so it can't tell a held Space from a fresh press, and
-once the OS's key-repeat delay runs past the control loop's 1 s rule a held Space would start the arm
-again. On the page, where key-up is seen, Space still toggles. Esc quits and y confirms exiting where
+ends it, however long the answer takes. After a time limit ends an attempt, s, f or i answers the
+controller's outcome prompt. c runs the checks and prints their report, o the pose against the demos'
+start pose. Space only pauses, and r starts or resumes: a terminal sends no key-up, so it can't tell a
+held Space from a fresh press, and once the OS's key-repeat delay runs past the page's toggle rule
+(`commands.TOGGLE_RESUME_AFTER_S`, 1 s) a held Space would start the arm again. On the page, where
+key-up is seen, Space toggles. Esc quits and y confirms exiting where
 the arm can't get to rest, by the rules in `states`.
 """
 

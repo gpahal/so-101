@@ -51,8 +51,7 @@ usb_id = "32e6:9221"
 [cameras.top.controls]
 # Anti-flicker for 50 Hz mains (India). 0 = off, 1 = 50 Hz, 2 = 60 Hz.
 power-line-frequency = 1
-# Tuned for the room's daylight, which is brighter and warmer than the tube lights the first
-# settings were tuned under: in it the old 20 ms and gamma 150 clipped 41% of the picture.
+# Tuned for the room's daylight, in which 20 ms with gamma 150 clips 41% of the picture.
 # Fixed 10 ms exposure: one whole cycle of the tube lights' 10 ms flicker, so they can't band it,
 # and half the motion blur of 20 ms. Gamma 80 and brightness -16 average the picture 83/255 with
 # 0.2% of pixels clipped (0.3% on the arm). Gamma 90 clips 0.6% of the arm, brightness -8 1.1% and
@@ -136,7 +135,7 @@ device = "mps"
 # ACT on 100 demos (57,723 frames) ran at 0.046 s a step on rtx-pro-6000.
 
 [train.act]
-# 200k steps and about 3 hours and $8 at 100 demos (the first run took 2 hours 35 minutes, about
+# 200k steps and about 3 hours and $8 at 100 demos (a run took 2 hours 35 minutes, about
 # $7). An A100 takes 1.4x as long (about 4 hours and $10) and an A10G 3.3x (about 10 hours). ACT's
 # error on unseen demos levels off early, so this length is cheap insurance rather than a known need.
 job_target = "rtx-pro-6000"
@@ -157,9 +156,7 @@ a100-large = 0.071
 # It uses 120.7 GB of GPU memory at this batch size, so it needs an H200 (141 GB), where it measured
 # 1.04 s a step over 400 steps: 30k steps take about 9 hours and $47. That is the only flavor with a
 # speed below, so `--target` takes no other. An RTX PRO 6000 (96 GB) can't fit it compiled.
-# The first recipe trained only the action model with bfloat16 weights, for 120 steps per demo. That
-# model completes the task under the demos' light and fails under other light; cli.py says why the
-# recipe changed. This recipe hasn't been tested on a robot yet.
+# cli.py says why each flag is set.
 # Needs access to google/paligemma-3b-pt-224 on Hugging Face.
 job_target = "h200"
 steps_per_demo = 300
@@ -263,12 +260,12 @@ review_port = 8766
 # the control loop falls under 95% of the task's fps, previews drop to half this rate, then stop.
 preview_fps = 5
 # The lowest gripper goal `serve` and `run` send, in the gripper's 0-100 units; 0 sends every goal as given.
-# The jaws stop against each other at 1.1 to 1.3 on this arm, and the trained policies close them to 0.4
-# on the way to the block and back, which stalled the gripper at about 96% load for most of each attempt
-# and took it from 49 to 56 °C over eight 3-attempt runs. 2.0 is just above the stop, so closed jaws no longer
-# push against each other; the load it leaves is not yet measured on the arm. A
-# block holds the gripper at about 18, so the squeeze on it (a goal of about 8) is unchanged. Recorded runs
-# keep the policy's own goal in control.policy_action and the floored one in action.
+# The jaws stop against each other at 1.1 to 1.3 on this arm, and the trained policies close them to 0.4 on
+# the way to the block and back, which stalls the gripper at about 96% load for most of each attempt and took
+# it from 49 to 56 °C over eight 3-attempt runs. 2.0 is just above the stop, so closed jaws don't push against
+# each other; the load it leaves isn't measured on the arm. A block holds the gripper at about 18, so the
+# squeeze on it (a goal of about 8) is unchanged. Recorded runs keep the policy's own goal in
+# control.policy_action and the floored one in action.
 gripper_floor = 2.0
 
 # The supervisor in `so101 serve` and `so101 run` (docs/supervisor.md), a policy over the policy: rules
@@ -297,7 +294,7 @@ mode = "off"
 # src/so_101/grasp/grasp.toml. A path is relative to this file.
 # thresholds = "grasp.toml"
 
-# `uv sync --extra sim`, then `uv run so101 sim build`: a simulated twin of the default task, worked out
+# `uv sync --extra sim`, then `uv run so101 sim build`: a simulated twin of the block-container task, worked out
 # from its demos. Rebuild after recording new demos, or after changing anything here. Every setting is
 # optional and in metres or kilograms; the defaults are in DEFAULTS in src/so_101/sim/build.py. Measure
 # the ones marked "measure" for accuracy: the demos can't show them.

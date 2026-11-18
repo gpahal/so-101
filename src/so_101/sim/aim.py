@@ -6,9 +6,9 @@ moves the camera a few pixels and turns it, and the mat, a loose mouse pad, slid
 This compares the live picture with the median of the demos' first frames, window by window, by normalised
 cross-correlation. The camera's shift and turn come from windows on things fixed to the room or the table: the
 socket and skirting, the floor tiles and the arm's base plate, each searched around a first, coarse reading
-of the room's corner at half size. The mat's slide is
-what its edges moved beyond that. Every window keeps clear of where the arm (at the start pose or at rest)
-and the jar appear; take the block off the mat while aiming.
+of the room's corner at half size. The mat's slide is what its edges moved beyond that. Every window keeps
+clear of where the arm (at the start pose or at rest) and the jar appear; take the block off the mat while
+aiming.
 
 Needs only OpenCV and the demos' videos, not MuJoCo.
 """
@@ -129,9 +129,9 @@ def _picture_way(dx: float, dy: float) -> str:
 def _shift(reference_gray: np.ndarray, live_padded: np.ndarray, window: tuple[int, int, int, int], guess: np.ndarray, search: int) -> tuple[float, float, bool]:
     """How far a window's content moved: where the reference's window, less `search` px each side, best
     matches the live picture (padded by `PAD`) around `guess`, by normalised cross-correlation, to a
-    tenth of a pixel. Phase correlation weighed every frequency alike, so the video's compression blocks,
-    which stand still wherever the camera points, pulled dark windows' matches to zero; this weighs them
-    by how strong they are. The last value is False for a match at the search's edge, or a weak one."""
+    tenth of a pixel. Unlike phase correlation, it weighs each frequency by its strength, so the video's
+    compression blocks, which stand still wherever the camera points, don't pull dark windows' matches to
+    zero. The last value is False for a match at the search's edge, or a weak one."""
     x, y, w, h = window
     ox, oy = (int(round(v)) for v in guess)
     template = reference_gray[y + search : y + h - search, x + search : x + w - search]

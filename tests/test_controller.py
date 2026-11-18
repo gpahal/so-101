@@ -905,10 +905,9 @@ class LinkLossTest(RigTest):
         self.assertEqual(self.rig.status()["state"], "starting")
         self.rig.tick_until("autonomous", client=self.PHONE)
 
-    # The user chose that the autopilot moves the arm only while a page in control watches it, whatever
-    # on_link_loss says: this replaces the test of `states._resume`'s old refusal, which applied only to a lost
-    # link with on_link_loss "pause". `states.step` now refuses the autopilot's Resume and Reset on
-    # `Facts.unwatched`, and never a person's command or the autopilot's Quit.
+    # The autopilot moves the arm only while a page in control watches it, whatever on_link_loss says:
+    # `states.step` refuses the autopilot's Resume and Reset on `Facts.unwatched`, never a person's command or the
+    # autopilot's Quit.
     NO_PAGE = ("No control page is in control, so the autopilot moves nothing unwatched. Open the page and take control "
                "there, and the next attempt starts the run's reset time (--reset-time), at least link_timeout_s + 0.5 s, after "
                "that; r at the robot's terminal starts it now.")
@@ -976,7 +975,7 @@ class LinkLossTest(RigTest):
 
 
 class LoopSafetyTest(RigTest):
-    """No error in a tick drops the arm, and no restarted motor is sent toward its old goal."""
+    """No error in a tick drops the arm, and no restarted motor is sent toward its last goal."""
 
     def test_a_dead_terminal_and_a_full_disk_during_a_fault_never_escape_the_tick(self) -> None:
         rig = self.new_rig(recorded=True)
@@ -1107,7 +1106,7 @@ class LoopSafetyTest(RigTest):
         self.assertEqual(rig.goals()[sent:], [last_goal] * 3, "it holds its last goal, keeping any grip")
 
         fell = {motor: steps - 300 for motor, steps in last_goal.items()}
-        rig.motors.power_off()  # now the power goes, while it's already in Fault
+        rig.motors.power_off()  # then the power goes, while it's already in Fault
         sent = len(rig.goals())
         rig.tick(3)
         self.assertEqual(rig.goals()[sent:], [], "no goal while the follower is silent")

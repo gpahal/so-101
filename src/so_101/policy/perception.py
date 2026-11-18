@@ -1,19 +1,14 @@
-"""Perception: the gripper rules over each tick the model drove, for every layer above to read.
+"""Perception: the grasp detector over each tick the model drove, for every layer above to read.
 
-One `grasp.detector.Detector` per attempt, with the grasp thresholds (`ctx.grasp`), fed the measured joints on
-each tick the model drove (its Output's driver is POLICY or WAITING), at the model's own clock: the ticks it
-drove, each 1/fps of the task's fps (`ctx.fps`), the first after a handback adding nothing, so a pause, a
-layer's playback or a slow loop never counts. It runs `grasp.replay.LiveFeed`, the feed the offline replays
-(`skills.label_run`, `so101-failbench candidates`) run over recorded frames, which LeRobot stamps at
-frame_index / fps, so the live clock and the replays' are one piece of code and agree at any loop speed. Each
-tick's signals and the detector's state go up the stack in the Output (`signals`, `readings`), so the layers
-above read one detector and can't disagree about whether a carry happened.
+One `grasp.detector.Detector` per attempt, with `ctx.grasp`'s thresholds, fed the measured joints on each
+tick whose Output's driver is POLICY or WAITING, through `grasp.replay.LiveFeed`, the feed the offline
+replays use: 1/`ctx.fps` per tick fed, the first after a handback adding nothing, so a pause, a playback
+or a slow loop never counts. Each tick's signals and the detector's state go up in the Output (`signals`,
+`readings`), so the layers above read one detector.
 
 It logs a `grasp` event for each close, carry, regrasp and release, and a `rule` event when a stuck rule
-fires, each with the model's seconds, so every run's events mark its grasps whatever model ran. After a
-handback, on the next tick it feeds, it tells the detector whether the arm moved and where it is
-(`Detector.resumed`): the detector's timers start again, and after a move with the jaws open (above
-`hold_band`'s top after a carry or release) its grasp does too, so a close a playback undid is never counted as a regrasp.
+fires, each at the model's seconds. After a handback it tells the detector, on the next tick fed, whether
+the arm moved (`Detector.resumed`), so a close a playback undid is never counted as a regrasp.
 """
 
 from dataclasses import replace
@@ -44,7 +39,7 @@ class Perception(Layer):
 
     def run(self, handback: Handback) -> None:
         self.inner.run(handback)
-        if self.feed is not None:  # kept, a move winning, until the detector hears it on the next tick fed
+        if self.feed is not None:  # held, a move outweighing a still handback, until the next tick fed (`LiveFeed.handback`)
             self.feed.handback(handback.moved)
 
     @property
@@ -75,7 +70,7 @@ class Perception(Layer):
 
     def readings(self) -> Readings:
         d = self.detector
-        # Unrounded: the supervisor compares it with check times the detector's signals set, and a rounded clock
-        # sent a check due at 4.93333 s a tick late (`tests/test_supervisor.py`'s SchedulesMatchTest).
+        # Unrounded: the supervisor compares it with due times the detector's signals set, and rounding sends a
+        # check a tick late (`tests/test_supervisor.py`'s SchedulesMatchTest).
         return Readings(t=self.t, closes=d.closes, regrasps=d.regrasps, carried=d.carried, released=d.released,
                         fired=tuple(sorted(d.fired)))

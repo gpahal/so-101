@@ -3,7 +3,7 @@
     {"wrong": bool | None, "p_wrong": float | None, "category": str | None, "observation": str | None,
      "tokens_in": int | None, "tokens_out": int | None, "cost_usd": float | None, "latency_s": float, "raw": str}
 
-`p_wrong` is a finite number in [0, 1] or None (`probability`): a NaN once clamped to 0.0, a sure ok. A
+`p_wrong` is a finite number in [0, 1] or None (`probability`), never NaN. A
 chat model's answer whose `wrong` contradicts its `p_wrong` (wrong with p_wrong under 0.5, or not wrong
 with it over 0.5) has `p_wrong` None and the number in `p_wrong_dropped`, so the supervisor acts on
 neither side of it while failbench still scores `wrong`. A decision model's probability that isn't a
@@ -11,8 +11,8 @@ finite number is an error, not an answer.
 
 It raises `ProviderError` (retryable or not) when there's no answer. `cost_usd` is None when the provider
 reported no usage, so a caller keeping to a budget charges its own estimate instead of nothing. Each
-request starts with `prompt.describe(images)` and labels each image with `prompt.label`. SDKs are imported here,
-lazily, so every other module and the tests run without the `failbench` dependency group.
+request says which images it carries (`prompt.describe`) and labels each with `prompt.label`. SDKs are imported
+here, lazily, so every other module and the tests run without the `failbench` dependency group.
 
 - OpenRouter (Claude, GPT, Gemini): the `openai` SDK pointed at OpenRouter's OpenAI-compatible endpoint,
   with a strict JSON schema, `reasoning.effort`, and `provider.require_parameters` so a request is only
@@ -22,9 +22,9 @@ lazily, so every other module and the tests run without the `failbench` dependen
   answered with a probability and a choice over the categories. `wrong` is the probability ≥ 0.5.
 - Jev: `typesafe-sdk` `system_one`, with TypeSafe's opt-in image header.
 
-Every adapter takes a request timeout, `TIMEOUT_S` (180 s) unless `timeout_s` says otherwise:
-`so101-failbench` waits for slow answers, while the supervisor passes its `answer_within_s`, after which
-it no longer waits, so a call never runs on billing for an answer nothing reads. With a timeout given,
+Every adapter but Jev's has a request timeout of `TIMEOUT_S` (180 s) unless `timeout_s` says otherwise;
+without one, Jev's keeps its SDK's own. `so101-failbench` waits for slow answers, while the supervisor passes
+its `answer_within_s`, after which it stops waiting, so a call never runs on billing for an answer nothing reads. With a timeout given,
 Jev's client also makes no retries. `adapter_for` keeps one adapter per model and timeout.
 
 `openrouter_json` is the supervisor's escalation call, and `sdk_missing` says whether a provider's SDK
@@ -318,13 +318,13 @@ class TypeSafeJev:
 
 _ADAPTERS = {OPENROUTER: OpenRouterChat, GEMINI: GeminiChat, GEMINI_DECISIONS: GeminiDecisions,
              OPENAI_DECISIONS: OpenAIDecisions, TYPESAFE: TypeSafeJev}
-_cache: dict[str, object] = {}  # model key -> adapter with `TIMEOUT_S`
+_cache: dict[str, object] = {}  # model key -> adapter with its default timeout
 _timed: dict[tuple[str, float], object] = {}  # (model key, timeout_s) -> adapter with that timeout
 _lock = threading.Lock()
 
 
 def adapter_for(m: Model, timeout_s: float | None = None):
-    """`m`'s adapter with a request timeout of `timeout_s`, or `TIMEOUT_S` without one, made once per
+    """`m`'s adapter with a request timeout of `timeout_s`, or its default without one, made once per
     timeout and kept. A failure to make it is a non-retryable `ProviderError`, and isn't kept: the next
     call tries again."""
     cache, key = (_cache, m.key) if timeout_s is None else (_timed, (m.key, timeout_s))

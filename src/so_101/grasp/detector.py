@@ -67,7 +67,7 @@ class Detector:
         self._last_g: float | None = None
         self._window: deque[tuple[float, dict[str, float]]] = deque()
         self._crossings: deque[float] = deque()
-        self._close: dict | None = None  # the open close: when, and the elbow then
+        self._close: dict | None = None  # the open close: when, the elbow then, and its travel since
         self._hold_value: float | None = None  # where the gripper is holding steady, and since when
         self._hold_since: float | None = None
         self._carry_hold: float | None = None  # where the gripper held the carried block
@@ -79,18 +79,14 @@ class Detector:
 
     def resumed(self, moved: bool, pose: dict[str, float]) -> None:
         """The policy drives again after something else held the arm, or moved it (`moved`), leaving
-        it at `pose`. With the jaws open after a move, the open close, the carry and the release are
-        forgotten, and the gripper's last reading is this one, so reopened jaws aren't a regrasp. Open means
-        at `closed_below` or above, or, after a carry or release, above `hold_band`'s top, where no block is
-        held: the line a release crosses, so a narrow release (18.9 to 23.8) followed by a person undoing it
-        re-arms too. The next close then needs the jaws opened past `closed_below` first, which a policy does
-        anyway to fit the block. With them closed, the last reading stays the policy's: jaws a person closed
-        count as a close.
+        it at `pose`. After a move with the jaws open (at `closed_below` or above, or, after a carry or
+        release, above `hold_band`'s top, the line a release crosses), the open close, carry and release
+        are forgotten and this reading becomes the gripper's last, so reopened jaws aren't a regrasp and a
+        narrow release (18.9 to 23.8) a person undid re-arms too. Jaws a person closed count as a close.
 
-        Forgetting a carry or a release also starts `no_carry` again, from the policy's driving time now:
-        the block is back to be picked, as at the attempt's start, and the time before the handback was
-        spent carrying, which the rule never counted, so it would otherwise fire on the first tick. A
-        handback that undid only a close (a playback of a miss) leaves it counting from the start, or a
+        Forgetting a carry or release restarts `no_carry` from the policy's driving time now: the time
+        before was spent carrying, which the rule never counted, so it would fire on the first tick. A
+        handback that undid only a close (a playback of a miss) keeps it counting from the start, or a
         policy that keeps missing would never trip it."""
         self._last_t = None
         self._window.clear()
@@ -99,8 +95,6 @@ class Detector:
         self._held.clear()
         self._hover_s = self._frozen_s = 0.0
         g, gp = pose[GRIPPER], self.p.gripper
-        # Jaws above the hold band hold no block (a release crosses the same line), so a carry or release is
-        # undone. With nothing carried, jaws a person closed below closed_below still count as a close.
         held = self.carried or self.released
         if moved and (g >= gp.closed_below or (held and g > gp.hold_band[1])):
             if held:
@@ -128,10 +122,8 @@ class Detector:
         closed_below = p.gripper.closed_below
         prev = self._last_g
         self._last_g = g
-        # Chatter counts crossings from the attempt's first close on (this tick's included). The policies keep
-        # the jaws shut on the way to the block, so the crossing that opens them for the grasp isn't a flicker:
-        # counted, it made one missed grasp (open, close, reopen, close) fire chatter on an attempt that then
-        # carried and placed the block.
+        # Chatter counts crossings from the attempt's first close on (this tick's included): the policies keep
+        # the jaws shut on the way, so opening them for the grasp isn't a flicker.
         if prev is not None and (prev < closed_below) != (g < closed_below) and (self.closes or g < closed_below):
             self._crossings.append(t)
         while self._crossings and self._crossings[0] < t - p.rules.chatter_within_s:
@@ -224,7 +216,7 @@ class Detector:
 
     def progress(self) -> dict[str, float]:
         """How close each rule that still applies is to firing: 1 fires it. Rules already fired, and
-        rules that no longer apply (before-carry rules after a carry, all of them after a release), are left out."""
+        rules that don't apply (before-carry rules after a carry, all of them after a release), are left out."""
         if self.released:
             return {}
         r = self.p.rules

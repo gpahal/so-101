@@ -3,8 +3,9 @@
 Answers are appended to `<run>/predictions.jsonl` as they arrive, one JSON object per line, keyed by
 model, variant and sample id, each with what it was asked under (`asked`: the sha256 of the shared prompt
 and of the provider adapters, and the model's id and effort). A run refuses to resume a folder holding a
-selected model's answers asked under anything else, before asking anything (`Result.stale`): mixed with new ones, they would be scored as one
-experiment, and the supervisor's thresholds are tuned from that report. Use a new folder instead. Running the same command again skips everything already answered, so a
+selected model's answers asked under anything else, before asking anything (`Result.stale`): mixed with
+new ones, they would be scored as one experiment, and the supervisor's thresholds are tuned from that
+report. Use a new folder instead. Running the same command again skips everything already answered, so a
 crash, a Ctrl+C or the cap stopping a run costs nothing already paid for; `--retry-errors` asks again
 for samples that errored. A line cut off by a kill is skipped with a warning and its answer asked again
 (`Cache`); the file is never rewritten.
@@ -13,10 +14,10 @@ The queue is sample-major: every model is asked about one sample before any is a
 a run the cap or a Ctrl+C stops leaves the models a shared subset to compare on.
 
 The cap (`max_cost`, a finite number above 0: `cli.max_cost` refuses anything else, since NaN would
-compare as never reached) counts only what this invocation spends. Before each call the runner reserves the
-model's average cost so far over the calls that answered with a cost (or its `estimate` from `models.py`
-before the first) and doesn't start the call if that would pass the cap, so it can end a little under the
-cap but not far over it. A call that errored, or answered without saying what it used, is charged what
+compare as never reached) counts only what this invocation spends. Before a sample's first call the runner
+reserves, for every call still to make for it, the model's average cost so far over the calls that answered
+with a cost (or its `estimate` from `models.py` before the first), and admits the sample only if that total
+fits under the cap, so it can end a little under the cap but not far over it. A call that errored, or answered without saying what it used, is charged what
 was reserved, since the provider may have billed it anyway.
 
 Ctrl+C (or `stop`) stops the run: nothing more starts, the calls in flight finish and are cached, and the
@@ -135,8 +136,8 @@ class Result:
     interrupted: bool = False  # Ctrl+C or `stop` ended it before everything was asked
     capped: bool = False  # the spending cap did
     skipped: dict[str, str] = field(default_factory=dict)  # model key -> why it was asked nothing, or stopped
-    # The selected models whose cached answers were asked under another prompt, adapter or model settings (`asked`): the
-    # run asked nothing.
+    # Selected models whose cached answers were asked under another prompt, adapter or model settings
+    # (`asked`): the run asked nothing.
     stale: list[str] = field(default_factory=list)
 
 

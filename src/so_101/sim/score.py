@@ -120,7 +120,7 @@ def images_and_geometry(demos_root: Path, scene_dir: Path, device: str, sheet: P
                 if found and drawn and fit.whole(found[2]) and fit.whole(drawn[2]):
                     block_px[camera].append(float(np.linalg.norm(found[0] - drawn[0])))
                     block_size[camera].append(float(np.sqrt(found[1] / drawn[1])))
-    fits = env.scene.get("fits", {})
+    fits = env.scene["fits"]
     env.close()
     if sheet is not None:
         sheet.parent.mkdir(parents=True, exist_ok=True)

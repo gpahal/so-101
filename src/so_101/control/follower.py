@@ -15,10 +15,9 @@ marks on every tick, before any goal goes out: about 1.5 ms of a 33 ms tick.
 
 In Fault, a follower that may have lost power (it stopped answering, or a motor restarted) gets no
 goal until it answers again and its reads have settled, then holds where it's found
-(`hold_in_fault`). A servo that is still starting up can answer with a wrong position: on this arm
-the first read after switching the power back on was off by each motor's homing offset, about 40°
-on four joints. So it gets no write that could turn its torque on until its reads have agreed, and
-its supply has read normal, for RESTART_SETTLE_S. Any other fault, such as a motor alarm, holds the
+(`hold_in_fault`). A servo that is starting up can report a wrong position (`RESTART_SETTLE_S`), so
+it gets no write that could turn its torque on until its reads have agreed, and its supply has read
+normal, for RESTART_SETTLE_S. Any other fault, such as a motor alarm, holds the
 last goal, which keeps a grip and keeps loaded joints from sagging.
 
 A servo can keep answering after its motor power is gone: its chip runs on what's left in the
@@ -47,8 +46,8 @@ TEMP_WARN_C = 55  # a warning before 60 °C, where `so101 check` fails: a joint 
 MOTORS_READ_S = 1.0  # how often the loop reads the motors' temperatures and alarms: one bus read
 # The overload bit. LeRobot sets the gripper to trip at 25% load held for 2 s (`Overload_Torque` 25),
 # and a gripper closed on an object stalls at its 50% torque limit, so every firm grasp trips it.
-# The servo then grips at its holding torque, 20%, and `so101 run` carries on: on the gripper it's a
-# warning, not a fault. On any other joint, and any other bit on the gripper, it still faults.
+# The servo then grips at its holding torque, 20%, and the attempt carries on: on the gripper it's a
+# warning, not a fault. On any other joint, and any other bit on the gripper, it faults.
 OVERLOAD = 32
 GRIPPER_TRIPPED = ("The gripper's overload protection tripped: it gripped above 25% load for 2 s, as a firm grasp "
                    "does. It now grips at 20% force, and the attempt carries on. If it stops opening, switch the "
@@ -373,11 +372,10 @@ class Follower:
 
     def mark(self) -> None:
         """Set each motor's torque_limit one below its max_torque_limit, the mark `check_marks` looks for,
-        and keep each max_torque_limit. A motor restart copies max_torque_limit back, so the mark tells a
-        restart apart. Marking again, after the follower was lost, only a motor whose torque_limit
-        reads the mark or its max_torque_limit, a restart, is written: any other value was changed by
-        something else, such as the servo's protection, and is left as found. One `check_marks`
-        hadn't reported yet is reported on the next tick."""
+        and keep each max_torque_limit, which a restart copies back. Marking again after the follower was
+        lost writes only motors that read the mark or max_torque_limit; any other value was set by
+        something else, such as the servo's protection, and is left as found, reported on the next tick
+        if `check_marks` hadn't yet."""
         bus = self.inner.bus._connected_bus
         ids = {name: motor.id for name, motor in self.inner.bus.motors.items()}
         try:
@@ -514,21 +512,17 @@ class Follower:
         return device, message
 
     def hold_in_fault(self, policy) -> None:
-        """Hold the arm, and keep reading it so the status shows when the follower answers again.
+        """Hold the arm, and keep reading it so the status shows when the follower answers again. Every
+        hold in Fault goes through here.
 
-        Every hold in Fault goes through here. The arm and its motors' restart marks are read before the hold,
-        so a power cut or a restart is caught before it resends the old goal. A failure that doesn't
-        mean the follower is lost, such as a motor alarm, is noted and the arm holds all the same.
-        After the follower was lost, it gets no write until its reads have settled (`_settled`), then
-        it's marked again, its goal is set to its measured pose, and only then is its torque turned
-        on: explicitly, rather than trusting the goal write to turn it on. A power loss before it
-        went silent ends there too, with its `power` back event. A fault always closes the attempt,
-        so no camera is required here: one that fails is only noted in `read_errors`, as in
-        `observe` with no attempt open. While the power is
-        lost (`unpowered`), the arm is tracked rather than held: every goal is its measured pose, and
-        the torque is turned on there once the power is back (`_track`). Nothing is raised
-        but a torque_limit found changed, once the arm has held, so the loop reports it as a fault of
-        its own."""
+        The arm and its restart marks are read before the hold, so a power cut or restart is caught before
+        the last goal is resent. A failure that doesn't mean the follower is lost, such as a motor alarm, is
+        noted and the arm holds all the same. A lost follower gets no write until its reads have settled
+        (`_settled`); then it's marked again, aimed at its measured pose, and its torque turned on
+        explicitly, which also ends a power loss from before it went silent, with its `power` back event.
+        While the power is lost the arm is tracked, not held (`_track`). No camera is required: a fault
+        always closes the attempt. Only a torque_limit found changed is raised, once the arm has held, so
+        the loop reports it as a fault of its own."""
         if self.lost:
             try:
                 if not self._settled():

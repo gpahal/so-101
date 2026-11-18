@@ -3,25 +3,21 @@
 # format. Raise `version` with every change, because each run's events record the version they ran with.
 # The gripper and stuck-rule thresholds are in src/so_101/grasp/grasp.toml.
 #
-# The numbers were fitted offline on 150 recorded ACT and pi0.5 attempts from the first, 5-spot demos
-# (docs/supervisor.md), and scored on the same attempts. Those recordings are deleted, and the policies
-# trained on the new demos fail in their own ways: refit every number on new serve runs before trusting it.
-# Version 2 is fitted to the first shadow runs on the arm (results/act-pi05-block-container-supervisor-shadow.md):
-# 12 attempts of ACT and pi0.5, all of them successes, so nothing here has been scored on a failure yet.
+# The timing and cutoffs are fitted to 12 shadow attempts on the arm
+# (results/act-pi05-block-container-supervisor-shadow.md), all of them successes, so nothing here is scored on
+# a failure. Refit every number on serve and run runs before trusting it.
 version = 2
 
 [timing]
 after_close_s = 1.0        # the event check looks this long after a close
 after_release_s = 1.5      # and this long after a release
 # An after_close check still unanswered this many seconds of the policy's time (counted in ticks at the
-# task's fps, as the playback history is) after it was asked is
-# dropped, so a playback always starts soon enough after the close to undo it: after_close_s + this + 0.5 s
-# must be at most each miss_rewind_s. The 0.5 s (program.REACH_MARGIN_S) covers the ticks between the check
-# being due, sent and acted on, and the jaws' closing motion before the close is seen.
-# In the shadow runs the chat judge (Gemini 3.8 Flash) answered in 3.0 to 5.2 s, never inside the 1.5 s this
-# once was, so no miss could ever have been played back: a playback needs both judges. 4.5 s takes 12 of its
-# 14 answers. A real grasp carries about 1.5 s after its close, which drops the check
-# anyway ("carried_or_released"), so the longer wait only matters for a miss.
+# task's fps, as the playback history is) after it was asked is dropped, so a playback always starts soon
+# enough after the close to undo it: after_close_s + this + 0.5 s must be at most each miss_rewind_s. The 0.5 s
+# (program.REACH_MARGIN_S) covers the ticks between the check being due, sent and acted on, and the jaws'
+# closing motion before the close is seen. In the shadow runs the chat judge (Gemini 3.8 Flash) answered in
+# 3.0 to 5.2 s, and a playback needs both judges; 4.5 s takes 12 of its 14 answers. A real grasp carries about
+# 1.5 s after its close, which drops the check anyway ("carried_or_released"), so the wait only matters for a miss.
 after_close_answer_s = 4.5
 hold_deadline_s = 5.0      # a hold whose watch check hasn't cleared it by then asks for a person
 home_within_s = 10.0       # a done ask waits for the arm at rest, or this many seconds of the policy's time (ticks at the task's fps) after the release
@@ -33,19 +29,20 @@ lookback_s = 2.0           # the watch check's second frame is from this long be
 decision = "jev"                  # a failbench model key: fast, a probability per question
 chat = "gemini-3.8-flash"         # asked at the same time at events; a playback needs it to say wrong too
 escalation = "claude-opus-5.5"    # reads the attempt's closes and log when the others can't settle it
+# Unscored until so101-failbench scores them on the prompt the judges get.
 sure_ok_below = 0.2               # p_wrong under this is a sure ok
 sure_wrong_above = 0.8            # and over this a sure wrong
 # After a release, the task counts as done only when both judges answer under their cutoff. In the shadow runs
-# Jev answered 0.16 to 0.47 on 12 blocks plainly in the jar, never under the 0.1 both once had, so nothing was
-# ever called done; 0.3 passes 9 of those 12. Gemini answered 0.00 to 0.01 on all 8 it answered.
+# Jev answered 0.16 to 0.47 on 12 blocks plainly in the jar, so 0.3 passes 9 of those 12; Gemini answered
+# 0.00 to 0.01 on all 8 it answered.
 # Both were fitted on successes only: check them on failures (so101-failbench) before trusting them.
 success_decision_below = 0.3
 success_chat_below = 0.1
 # A judge that hasn't answered a check by then counts as no answer. It is also each judge's request
-# timeout (failbench's is 180 s): the layer no longer waits after it, so a longer request would only keep
-# a worker busy and bill for an answer nothing acts on, and a slow provider would fill the pool.
-# 8 s, up from 5: Gemini 3.8 Flash timed out at 5 s on 9 of 24 calls in the shadow runs, and its 14 answers
-# took 3.0 to 5.2 s (2 of them just past 5 s). An after_close check still drops its verdict at after_close_answer_s.
+# timeout (failbench's is 180 s): the layer doesn't wait past it, so a longer request would only keep a
+# worker busy and bill for an answer nothing acts on, and a slow provider would fill the pool. In the shadow
+# runs Gemini 3.8 Flash timed out at 5 s on 9 of 24 calls, and its 14 answers took 3.0 to 5.2 s. An
+# after_close check still drops its verdict at after_close_answer_s.
 answer_within_s = 8.0
 max_cost_usd = 2.0                # per run; a call starts only if its estimated cost fits under this
 

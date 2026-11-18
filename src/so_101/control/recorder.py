@@ -1,8 +1,8 @@
 """Record a `so101 serve` or `so101 run` run: one LeRobot dataset episode per attempt, and an event log.
 
-The controller owns the recorder and is its only caller (the supervisor's layer, stepped by the controller
-as its policy, writes its `supervisor` events with `event` on the same thread). Every tick of an open attempt adds one
-frame, whatever the arm is doing, so timestamps stay evenly spaced. The episode is saved when the
+The controller owns the recorder and is its only caller (the supervisor's layer, stepped by the
+controller as its policy, writes its `supervisor` events with `event` on the same thread). Every tick of
+an open attempt adds one frame, whatever the arm is doing, so timestamps stay evenly spaced. The episode is saved when the
 arm arrives at rest, or where the arm holds: at once after a fault, or where a quit's drive to rest
 stopped short. Each attempt's data file is finished (finalized) on disk before the attempt counts as
 saved, its `attempt_end` is written or the next one starts, and events are written as they happen,
@@ -69,13 +69,14 @@ OTHER in every other phase, where `control.phase` already says).
     grasp          the perception's (`policy.perception`): grasp (close, carry, regrasp or release),
                    policy_t (seconds the model had driven), and the detector's fields (gripper, close,
                    regrasps, elbow_travel, held_at); name for a carry: how it was seen (hold or elbow)
-    rule           the perception's: name (a stuck rule), policy_t, progress, closes, regrasps
+    rule           the perception's: name (a stuck rule), policy_t, progress, policy_s, closes, regrasps
     skill          the skill sequencer's (`policy.skills`): skill, index, cause (start, the handover
                    event, or reopened after a handback with the gripper open) and previous
-    playback       a layer's playback of the model's motion: layer, and the `rewind` event's start_frame,
+    playback       a layer's playback of the model's motion: layer, for_attempt, and the `rewind` event's start_frame,
                    end_frame, seconds, cause, farthest and gap
     supervisor     what the supervisor saw, asked and did (`supervisor.layer`): kind (start, attempt,
-                   check, decision, escalation, attempt_end or error), mode (shadow or act), for_attempt
+                   check, decision, escalation, ignored, hold_ended, late_answer or attempt_end, or error
+                   as for any layer), mode (shadow or act), for_attempt
                    (the attempt it's about, which a late check's event may name after the next attempt
                    opened) and policy_t, then the kind's own fields. A decision has acted (false in
                    shadow mode, or while the stack doesn't have the arm)
@@ -126,9 +127,8 @@ class Phase(IntEnum):
 OUTCOMES = ("succeeded", "failed", "ignored")
 KEEP_EVENTS = 500  # recent events kept in memory for the control page
 # Frames LeRobot's streaming encoder queues per camera before it drops one (after 0.1 s of a full
-# queue). LeRobot's default of 30 is 1 s at 30 fps: a stall of an encoder thread for longer, as when a
-# save and another app load the Mac at once, dropped frames, and the build then leaves that attempt
-# out. 90 frames is 3 s, about 80 MB per 640x480 camera at most, held only while the encoder is behind.
+# queue). LeRobot's default of 30 is 1 s at 30 fps; a longer encoder stall, as when a save and another
+# app load the Mac at once, drops frames, and the build leaves that attempt out. 90 frames is 3 s, about 80 MB per 640x480 camera at most, held only while the encoder is behind.
 ENCODER_QUEUE_FRAMES = 90
 
 

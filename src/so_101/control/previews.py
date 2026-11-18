@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable
 
 WIDTH = 320  # px: enough to see the scene on a phone, at a quarter of a 640x480 frame's pixels
 JPEG_QUALITY = 70
-# A frame older than this is no longer served, so the page says "No preview" rather than show a
+# A frame older than this isn't served, so the page says "No preview" rather than show a
 # picture that looks live. At 5 fps, shed to half, frames come every 0.4 s. A preview_fps so low
 # that two frames span more than this keeps a frame for two of its periods instead.
 STALE_S = 2.0

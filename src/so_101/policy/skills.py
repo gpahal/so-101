@@ -6,19 +6,13 @@ block-container's place, the release for its return), it conditions the model on
 clears the model's queued actions in the leaf, and logs a `skill` event. Each tick's Output keeps the
 current skill's index in `skill`, which the recording writes as control.skill.
 
-A handback with `moved` (a layer above played motion back, or a person rewound or teleoperated) means
-what was held or let go may have been undone. The sequencer follows the perception below: on the first
-tick it feeds after the handback, the perception tells its detector the arm moved
-(`Detector.resumed`), and the Output's readings say whether a carry or a release still stands. If
-neither does, whatever the current skill, the sequencer starts again on the first skill, as for a
-missed grasp: a block dropped outside the jar and rewound to before the close is picked again. With
-the jaws closed after the move (inside `hold_band` once a block was carried or let go, `Detector.resumed`)
-the detector keeps what it had, so a block still held keeps its skill,
-and a block a person closed the jaws on counts as a close, whose carry switches to the next skill as
-usual. A person who teleoperates after a real release, with the jaws open, also sends the attempt back
-to the first skill: the perception can't tell a release from a block put back. The model drove that
-first tick on the skill it had; the switch conditions it from the next, and the frame records the new
-skill, as at a handover.
+A handback with `moved` (a playback, a person's Rewind or Teleop) may have undone what was held or let go.
+On the next tick the perception feeds, its readings say whether a carry or release still stands
+(`Detector.resumed`); if neither does, the sequencer starts again on the first skill, as for a missed
+grasp. Jaws still closed keep the skill, and jaws a person closed on a block count as a close whose carry
+switches skill as usual. Teleop after a real release, with the jaws open, also goes back to the first
+skill: the perception can't tell a release from a block put back. The switch conditions the model from
+the next tick, and that frame records the new skill.
 
 Deciding to switch is the layer's own logic and runs under `safely`; conditioning the model below runs
 outside it, so an error from the model reaches the loop as the model's.

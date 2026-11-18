@@ -25,7 +25,7 @@ page is for this Mac's browser only, and a request Serve or Funnel passed on is 
 won't start there at all while a TCP forward to the port exists. On the Tailscale address, a Funnel
 TCP forward to the port at any address but this Mac's loopback could reach the page from the public
 internet, so it is unsafe there. Routes can change while a page runs, so they are checked again
-every ROUTES_EVERY_S (1 s) on a thread of the server's own (`route_warning`), never a request's, so
+every ROUTES_EVERY_S (1 s) on a thread of the server's own (`_watch_routes`, calling `route_warning`), never a request's, so
 no request, the control page's Pause included, waits on the Tailscale CLI. While an unsafe route
 exists, every request is refused with a message naming the route, until it's gone. A check that
 can't read Tailscale's status (the CLI timed out, or tailscaled didn't answer) keeps the last
@@ -355,9 +355,9 @@ class PageServer(ThreadingHTTPServer):
     def __init__(self, bind: Bind, port: int, handler: type["Handler"], *, site: Site,
                  routes: Callable[[], str | None]) -> None:
         """Binds now, so a port in use fails at once. `bind` is where to listen, from `resolve_bind`,
-        and `warning` joins its warnings. `routes()` is asked before the first request and every
-        ROUTES_EVERY_S on a thread of its own, what makes a request without a login unsafe
-        (`route_warning`)."""
+        and `warning` joins its warnings. `routes()` returns what makes a request without a login unsafe
+        (`route_warning`), asked before the first request and then every ROUTES_EVERY_S on a thread of
+        its own."""
         super().__init__((bind.address, port), handler)
         self.site = site
         self.warning = " ".join(bind.warnings) or None
@@ -423,7 +423,7 @@ class PageServer(ThreadingHTTPServer):
         """The routes' latest check found `warning`, or nothing unsafe. A new warning is printed once,
         and while it stands every request is refused with it, so the page shows it. A request with a
         Tailscale login is refused too: a raw TCP forward passes on any header its caller sends, so
-        a login proves nothing while one exists. Printed again when it clears."""
+        a login proves nothing while one exists. A message is printed when it clears."""
         if warning == self.route_warning:
             return
         previous, self.route_warning = self.route_warning, warning
@@ -437,7 +437,7 @@ class PageServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address) -> None:
         """A caller that hung up mid-reply, as a phone does when it locks during a poll, ends only its
         own request, quietly: printed, its traceback would land among the terminal's messages. Any
-        other error is printed as before."""
+        other error is printed."""
         if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
             return
         super().handle_error(request, client_address)
@@ -502,7 +502,7 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, handle: Callable[[SplitResult], None], url: SplitResult) -> None:
         """Run a page's `get` or `post` after every check passed. An error it didn't answer itself is a 500
         naming the error, when nothing was sent yet, and its message goes to the terminal; once a response
-        has started, the error closes the connection as before, since a second response can't follow."""
+        has started, the error closes the connection, since a second response can't follow."""
         try:
             handle(url)
         except Exception as error:
@@ -576,8 +576,8 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _json(self, status: HTTPStatus, body: dict) -> None:
-        # Strict JSON: Python writes NaN and infinities as bare words no browser's JSON.parse reads, so a
-        # page would show a dead link rather than a value it can't parse. Raises on one instead.
+        # allow_nan=False: Python would write NaN and infinities as bare words JSON.parse rejects, and the
+        # page would show a dead link. It raises on one instead.
         self._send(status, json.dumps(body, allow_nan=False).encode(), "application/json")
 
     def _send(self, status: HTTPStatus, body: bytes, content_type: str, send_s: float | None = None) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 def load_env(path: Path) -> list[str]:
     """Read KEY=value lines, or `export KEY=value` as a shell would source them, into the environment,
-    without overriding variables already set. Returns the names it set (never the values)."""
+    without overriding variables already set to a value. Returns the names it set (never the values)."""
     if not path.exists():
         return []
     names = []

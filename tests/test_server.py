@@ -286,7 +286,7 @@ class RouteErrorTest(unittest.TestCase):
 
 class UnsafeRouteTest(unittest.TestCase):
     """While a Tailscale route forwards raw connections to the port, or offers it through Funnel
-    behind HTTPS (`route_warning`, checked every 5 s), every request is refused, even one that looks
+    behind HTTPS (`route_warning`, checked every ROUTES_EVERY_S), every request is refused, even one that looks
     like this Mac's own browser. Even one with a login: a raw TCP forward passes on any header."""
 
     ROUTE = ("Tailscale Serve forwards TCP port 2222 straight to the control page's port 8101. Until it's gone, the "
@@ -333,10 +333,10 @@ class UnsafeRouteTest(unittest.TestCase):
             self.assertEqual((code, body["server_warning"]), (200, None))
 
     def watch(self, https: str | None = None, reads: bool = True) -> tuple[Server, list[str | None], list[int]]:
-        """A started server whose route watch asks `route_warning` as `serve`'s does, but every 10 ms
-        instead of 5 s, with the Tailscale CLI faked, printing nothing at first unless it `reads`. Returns the server; a list whose one item
-        is what the CLI prints for `serve status --json`, None for a CLI that printed nothing (it timed
-        out, say); and the checks so far."""
+        """A started server whose route watch asks `route_warning` as `serve`'s does, but every 10 ms, with
+        the Tailscale CLI faked, printing nothing at first unless it `reads`. Returns the server; a list whose
+        one item is what the CLI prints for `serve status --json`, None for a CLI that printed nothing (it
+        timed out, say); and the checks so far."""
         answer: list[str | None] = [serve_status({}) if reads else None]
         checks: list[int] = []
 

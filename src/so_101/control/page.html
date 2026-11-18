@@ -284,7 +284,7 @@ function el(tag, className, text) {
 const CLIENT = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 const HEADERS = { "X-SO101-Client": CLIENT };
 let status = null;
-let serverId = null;  // the server's id from /status: a new one means `so101 serve` restarted
+let serverId = null;  // the server's id from /status: a new one means the control center restarted
 let lastSeen = 0;
 let events = [];
 let fetchingEvents = false;
@@ -437,9 +437,8 @@ function renderAutopilot(st) {
   if (!pilot) return;
   $("autopilot-made").textContent = `Autopilot: ${pilot.made} of ${pilot.of} attempts made`;
   let text = pilot.waiting || "";
-  if (!text && pilot.held) text = st.attempt_open ? "Held: this attempt runs on as before, and the next doesn't start until Continue." : "Held: the next attempt doesn't start until Continue.";
+  if (!text && pilot.held) text = st.attempt_open ? "Held: this attempt runs on, and the next doesn't start until Continue." : "Held: the next attempt doesn't start until Continue.";
   else if (!text && pilot.next_in_s != null) text = pilot.next_in_s > 0 ? `The next attempt starts in ${Math.ceil(pilot.next_in_s)} s.` : "The next attempt is starting.";
-  // limit_s is null with no time limit (so101 run --duration 0): then only you or a done verdict ends it.
   else if (!text && st.attempt_open) text = (st.limit_s == null
     ? "This attempt has no time limit: the autopilot ends it only when the supervisor judges it done. Any other pause waits for you."
     : "It ends this attempt at its time limit, or when the supervisor judges it done. Any other pause waits for you.")
@@ -448,7 +447,7 @@ function renderAutopilot(st) {
   const button = $("autopilot-hold");
   button.textContent = pilot.held ? "Continue" : "Hold";
   button.disabled = !st.allowed.autopilot_hold;
-  button.title = st.refusals.autopilot_hold || (pilot.held ? "Let the next attempt start after the reset time." : "Keep the next attempt from starting. An attempt running now carries on as before.");
+  button.title = st.refusals.autopilot_hold || (pilot.held ? "Let the next attempt start after the reset time." : "Keep the next attempt from starting. An attempt already running carries on.");
 }
 
 const TOOL_NAMES = { check: "Run checks", pose: "Check pose" };
@@ -691,7 +690,7 @@ async function poll() {
   }
   try {
     if (st) {
-      // A new id means `so101 serve` restarted: reload, so nothing of the old run is left on the page
+      // A new id means the control center restarted: reload, so nothing of the run it served is left on the page
       // (its previews, events, sheets and control). The reloaded page starts with no id, so it can't
       // loop. A lost status needs nothing: previews retry every 3 s and events carry on from lastSeen.
       if (serverId !== null && st.server_id !== serverId) { location.reload(); return; }
@@ -729,7 +728,6 @@ function describe(e) {
     case "rewind": return `Rewound ${e.seconds} s`;
     case "playback": return `${e.layer ? e.layer.charAt(0).toUpperCase() + e.layer.slice(1) : "A layer"} played back ${e.seconds} s of the policy's motion`;
     case "supervisor":
-      if (e.kind === "rewind") return `Supervisor played back ${e.seconds} s`;
       return e.kind === "decision" && e.acted ? `Supervisor: ${e.decision}` : null;
     case "handover": return "The leader lined up with the follower: Teleop";
     case "fault": return `Fault: ${e.error}`;
@@ -802,13 +800,10 @@ for (const button of document.querySelectorAll("[data-outcome]")) {
   button.onclick = () => send({ command: "outcome", outcome: button.dataset.outcome, for_attempt: status ? status.prompt : null });
 }
 
-// Keys on a laptop, mostly as at the robot's terminal; Esc here only closes a sheet. Each acts through its button, so a key does
-// only what the button would, and says why when the button is disabled. Space sends "toggle": the
-// control loop decides between pause and resume against the state it has, not this page's copy. A held
-// Space sends nothing more: its repeats are ignored, and so is any keydown until the key has come up,
-// so only a fresh press can resume. The loop's 1 s rule backs this up. (The terminal sees no key-up,
-// so there Space only pauses.) With the Reset or results sheet open, Space and P both pause, and Space
-// never resumes: the policy keeps driving behind a sheet, and these keys must still stop it.
+// Laptop keys, mostly as at the terminal; Esc here only closes a sheet. Each presses its button, so a key does only
+// what the button would, and a disabled one says why. Space sends "toggle", which the loop resolves against its own
+// state; a held Space sends nothing until key-up, and `commands.TOGGLE_RESUME_AFTER_S` backs that up. With a sheet
+// open, Space and P only pause: the policy keeps driving behind a sheet.
 const COMMAND_KEYS = { p: "pause", r: "resume", b: "rewind", t: "teleop" };
 const TOOL_KEYS = { c: "check", o: "pose" };
 const OUTCOME_KEYS = { s: "succeeded", f: "failed", i: "ignored" };
@@ -863,7 +858,7 @@ function onKey(event) {
 document.addEventListener("keydown", onKey);
 
 // Out of sight (the screen locked, another app or tab in front), a phone's browser slows or stops
-// this page's polls, so it tells serve at once: a running policy pauses, as on a lost link. Only the
+// this page's polls, so it tells the control center at once: a running policy pauses, as on a lost link. Only the
 // page in control reports it, and the server ignores any other page. Its first poll back in sight
 // brings the link back.
 function reportHidden() {

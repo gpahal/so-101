@@ -67,7 +67,7 @@ def pick_models(names: str | None) -> list[models.Model]:
 
 def max_cost(text: str) -> float:
     """`--max-cost` as a number of dollars above 0. NaN, infinity and 0 or less are refused, because the cap
-    compares with it before each call: NaN and infinity would turn the cap off, and 0 or less would ask nothing."""
+    compares with it before each sample: NaN and infinity would turn the cap off, and 0 or less would ask nothing."""
     try:
         value = float(text)
     except ValueError:
@@ -121,9 +121,9 @@ def cmd_candidates(a) -> None:
           + ". Label them, then: so101-failbench build --labels " + str(a.out))
     if stale:
         print(f"{stale} labelled row{'' if stale == 1 else 's'} at the end of the file {'is' if stale == 1 else 'are'} "
-              "no longer picked: a moment the supervisor wouldn't check, as it now drops a check not yet sent at a "
-              "pause or resume or for a close a newer one replaced, or a run that's gone. Delete any that shouldn't "
-              "be scored.", flush=True)
+              "not picked by the current rules: a moment the supervisor doesn't check (a check not yet sent when a "
+              "pause or resume came, or for a close a newer one replaced), or a run that's gone. Delete any that "
+              "shouldn't be scored.", flush=True)
 
 
 def cmd_models(a) -> None:

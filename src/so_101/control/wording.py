@@ -2,8 +2,7 @@
 
 Each new state is announced (`announcement`); a move that stops short says where and why
 (`shortfall`); and a Quit where the arm can't get to rest says why and how to exit there
-(`confirm_message`). These are the controller's own, kept in a file beside `controller.py`: they read the
-controller's state and change nothing.
+(`confirm_message`). They read the controller's state and change nothing.
 """
 
 from so_101 import rollout

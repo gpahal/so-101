@@ -156,7 +156,7 @@ class LiveFeedTest(unittest.TestCase):
     def test_a_slow_loop_keeps_the_perception_on_the_replays_clock(self) -> None:
         # The loop ticks at 25 Hz while the task's fps is 32: the perception counts each tick fed as 1/fps, as the
         # replay counts each recorded frame (LeRobot stamps frame_index / fps), so neither the clock nor a signal
-        # drifts. Summing the loop's real gaps, as the perception once did, made a 14 s rule fire 28% late.
+        # drifts. Summing the loop's real gaps would make a 14 s rule fire 28% late.
         layers: list = []
         live_heard, live_clocks, live_signals = live(self.states, self.phases, self.drivers, self.handbacks,
                                                      tick_s=1 / 25, layers=layers)
@@ -177,9 +177,6 @@ class LiveFeedTest(unittest.TestCase):
         self.assertTrue(moved[71:76].all() and moved[96:101].all(), "Teleop and a playback moved the arm")
         self.assertFalse(moved[50:55].any() or moved[151:156].any(), "a pause or a layer's hold didn't")
         self.assertTrue(fed[60] and not drove[60], "a waiting tick is seen but not driven")
-        old_fed, old_drove, _ = live_masks(self.phases, None, waiting=self.drivers != POLICY)
-        np.testing.assert_array_equal(old_fed, self.phases == Phase.AUTONOMOUS)
-        self.assertFalse(old_drove[60])
 
     def test_the_clock_adds_nothing_for_the_first_frame_after_a_handback(self) -> None:
         feed = LiveFeed(GRASP, FPS)

@@ -193,9 +193,9 @@ def push_while_closing(demos: Demos, episode: int, hold: int) -> float | None:
     the wrist camera didn't see the whole block at both ends.
 
     The moving jaw meets the block first and shoves it across until the fixed jaw stops it, by a few
-    millimetres against the gripper and a little less over the mat. The wrist camera
-    rides on the gripper, so the block's outline crossing its picture between the frame the jaws start to
-    close and the hold is that slide. The block's own width is the ruler, so no fitted camera is needed.
+    millimetres against the gripper and a little less over the mat. The wrist camera rides on the gripper,
+    so the block's outline crossing its picture between the frame the jaws start to close and the hold is
+    that slide. The block's own width is the ruler, so no fitted camera is needed.
     """
     state = demos.episode(episode)[0]
     start = closing_starts(state, hold)
@@ -252,8 +252,9 @@ def fit_top_camera(
 
     The drawn arm has to cover the real arm's pixels in frames spread over the demos, the block has to
     appear where it lay before the jaws closed on it (where they held it, less the slide closing gave it:
-    `push_while_closing`) and as big as it really looks, and that grasp has to sit on the mat. Each alone leaves something open: outlines barely change when the camera backs off and zooms
-    in, the block's sightings are nearly flat, its size says how far the mat is from the camera but not
+    `push_while_closing`) and as big as it really looks, and that grasp has to sit on the mat. Each alone
+    leaves something open: outlines barely change when the camera backs off and zooms in, the block's
+    sightings are nearly flat, its size says how far the mat is from the camera but not
     from the arm, and only a grasp on the mat ties the arm's reach to it.
 
     `table_height` is the mat's top in the arm model's axes, if it was measured (the model's base has its
@@ -266,8 +267,8 @@ def fit_top_camera(
     `previous` is the scene's last top camera, one more place to start from: a camera that was moved keeps
     its lens, and from the blocks alone the fit can settle on a lens that bends the picture the wrong way.
     Every start is followed to the end, and the one that fits best is kept.
-    `offsets`, shoulder_lift to wrist_roll in degrees, holds the joint offsets where they were found before,
-    for a follower whose calibration hasn't changed since: then only the camera and the mat are fitted.
+    `offsets`, shoulder_lift to wrist_roll in degrees, fixes the joint offsets (`[sim] joint_offsets_deg`),
+    for a follower calibrated as it was when they were fitted: then only the camera and the mat are fitted.
     """
     units = arm.Units((0.0,) * 5, gripper_closed, deg_per_percent)
     grasped = held_block(units, data.block_states)
@@ -322,7 +323,7 @@ def fit_top_camera(
         starts.append((np.r_[position, facing, scale * distance, 0.15, 0.0, held_offsets, height_guess, 0.0, 0.0], f"a camera {distance:.2f} m from the blocks"))
     if previous is not None:
         lens = previous["lens"]
-        starts.append((np.r_[previous["pose"], lens["focal"], lens["k1"], lens["k2"], held_offsets, height_guess, lens.get("centre", (0.0, 0.0))], "the last build's camera"))
+        starts.append((np.r_[previous["pose"], lens["focal"], lens["k1"], lens["k2"], held_offsets, height_guess, lens["centre"]], "the last build's camera"))
     best = None
     for x, name in starts:
         x, cost = solve(x, camera_only, 30)
@@ -653,8 +654,8 @@ class WristViews:
     from many gripper poses as the gripper comes down to it, and the fixed jaw.
 
     `sightings` holds, for each demo, the gripper's rotation and position at each calm frame, where the
-    real block's patch was centred and how big it was, and how many seconds before the jaws began to close. `jaw_points` are the gripper's printed surface in
-    its own axes, `jaw_core` the pixels always the fixed jaw (`fixed_jaw_core`)."""
+    real block's patch was centred and how big it was, and how many seconds before the jaws began to
+    close. `jaw_points` are the gripper's printed surface in its own axes, `jaw_core` the pixels always the fixed jaw (`fixed_jaw_core`)."""
 
     sightings: dict[int, list[tuple[np.ndarray, np.ndarray, np.ndarray, float, float]]]
     points: np.ndarray
@@ -795,7 +796,7 @@ def fit_wrist_camera(views: WristViews, places: dict[int, list[float]], report=p
     starts = [(np.r_[start_pose, focal, k1, 0.0, 0.0, 0.0], f"a {focal:.0f} px lens bent {k1:.1f}") for focal in (330.0, 400.0) for k1 in (0.0, 0.3)]
     if previous is not None:
         lens = previous["lens"]
-        starts.append((np.clip(np.r_[previous["pose"], lens["focal"], lens["k1"], lens["k2"], lens.get("centre", (0.0, 0.0))], low, high), "the last build's camera"))
+        starts.append((np.clip(np.r_[previous["pose"], lens["focal"], lens["k1"], lens["k2"], lens["centre"]], low, high), "the last build's camera"))
     candidates = []
     for first, name in starts:
         placed = {e: np.asarray(places[e], dtype=np.float64) for e in episodes}

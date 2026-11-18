@@ -10,14 +10,14 @@ from so_101 import settings, tasks
 
 class TeleopTest(ConfigTest):
     def test_a_whole_number_max_relative_target_is_one_lerobot_accepts(self) -> None:
-        # TOML reads `10` as an int, and LeRobot's cap takes only a float or a dict: it raised
-        # TypeError(10) on the live test's first step, which passes the value to LeRobot directly.
+        # TOML reads `10` as an int, and LeRobot's cap takes only a float or a dict: an int raises
+        # TypeError at the live test's first step, which passes the value to LeRobot directly.
         self.config.write_text(ARMS + "\n[teleop]\nmax_relative_target = 10\n")
         cap = settings.load().teleop.max_relative_target
         self.assertEqual(ensure_safe_goal_position({"elbow_flex": (25.0, 0.0)}, cap), {"elbow_flex": 10.0})
 
     def test_a_negative_or_unusable_max_relative_target_is_refused(self) -> None:
-        # LeRobot clamps a goal to within the cap of where the arm is: -10 moved an unchanged goal 10.
+        # LeRobot clamps a goal to within the cap of where the arm is: a cap of -10 moves an unchanged goal by 10.
         self.assertEqual(ensure_safe_goal_position({"elbow_flex": (20.0, 20.0)}, -10.0), {"elbow_flex": 30.0})
         for value in ("-10", "nan", "inf", '"ten"', "true"):
             with self.subTest(value):
@@ -29,18 +29,6 @@ class TeleopTest(ConfigTest):
 
 
 class RunTest(ConfigTest):
-    def test_a_leftover_duration_names_the_settings_that_replaced_it(self) -> None:
-        # `so101 run` once read its attempts' length from here; it's [control] attempt_limit_s now, and
-        # a value left here would otherwise be ignored without a word.
-        self.config.write_text(ARMS + "\n[run]\nduration_s = 60\n")
-        with self.assertRaises(settings.ConfigError) as error:
-            settings.load()
-        message = str(error.exception)
-        self.assertIn("[run] duration_s", message)
-        self.assertIn("[control] attempt_limit_s", message)
-        self.assertIn("--duration", message)
-        self.assertEqual(len(message.splitlines()), 1)
-
     def test_episodes_is_a_whole_number_of_one_or_more(self) -> None:
         self.config.write_text(ARMS + "\n[run]\nepisodes = 5\n")
         self.assertEqual(settings.load().run.episodes, 5)
@@ -57,7 +45,7 @@ class TasksTest(ConfigTest):
     TASK = '[test]\nprompt = "Put the block in the jar"\n'
 
     def test_a_reset_time_that_is_not_finite_seconds_of_0_or_more_is_refused(self) -> None:
-        # `so101 run` waits reset_time_s between attempts: nan or inf broke the control page's status.
+        # `so101 run` waits reset_time_s between attempts: nan or inf would break the control page's strict JSON status.
         for value in ("nan", "inf", "-1", '"ten"', "true"):
             with self.subTest(value):
                 (self.root / "tasks.toml").write_text(self.TASK + f"reset_time_s = {value}\n")

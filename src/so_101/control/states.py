@@ -72,7 +72,7 @@ class Event(StrEnum):
     TIME_LIMIT = "time_limit"  # the attempt has used its policy or its Teleop seconds
     LEADER_LOST = "leader_lost"  # the leader was unplugged or stopped answering
     LINK_LOST = "link_lost"  # the controlling page stopped polling or was hidden, with on_link_loss = "pause"
-    POLICY_ASKED = "policy_asked"  # the policy asked for a person (the supervisor's layer: stuck, or done)
+    POLICY_ASKED = "policy_asked"  # a layer of the policy stack asked for a person (`policy.base.ASK_KINDS`)
     LEADER_RESTED = "leader_rested"  # the leader's move to rest ended: it arrived, stopped short or was lost
     FAULT = "fault"  # a hardware, camera, motor-alarm or policy failure
 
@@ -358,7 +358,7 @@ def _arrived(state: State, facts: Facts) -> Transition:
 
 def _stopped_short(state: State, facts: Facts) -> Transition:
     if state is State.STARTING:
-        # Matches `so101 run`: never start the policy from the wrong pose.
+        # Never start the policy from the wrong pose.
         return Transition(State.PAUSED)
     if state is State.HANDOVER:
         # The leader couldn't line up with the follower: it holds, motors on, rather than be freed

@@ -1,6 +1,6 @@
 # SVT-AV1's macOS crash when an encoder closes
 
-Status: built (`src/so_101/svtshim.py`, `src/so_101/svtsem.c`). It's a stopgap until PyAV bundles SVT-AV1 4.3.0 or later and LeRobot allows that PyAV. The user-facing part is in the README, under [The video encoder's macOS crash](../README.md#the-video-encoders-macos-crash). Written against LeRobot 0.7.0, PyAV 15.1.0 (SVT-AV1 3.0.0), macOS on an M3 Max and Python 3.13. The measurements were made on that Mac; none was made on the real arm or on CI's macOS VMs.
+Status: built (`src/so_101/svtshim.py`, `src/so_101/svtsem.c`), a stopgap until PyAV bundles SVT-AV1 4.3.0 or later and LeRobot allows that PyAV; the user-facing part is in the README, under [The video encoder's macOS crash](../README.md#the-video-encoders-macos-crash). Measured on an M3 Max with LeRobot 0.7.0, PyAV 15.1.0 (SVT-AV1 3.0.0) and Python 3.13, not on the arm or CI's macOS VMs.
 
 ## The bug
 
@@ -15,15 +15,15 @@ LeRobot encodes each camera's video with SVT-AV1, through PyAV, on one encoder t
 - **What it looks like.** SIGTRAP and exit code 133, shown as `zsh: trace trap`, with no Python traceback.
   - The crash report (`~/Library/Logs/DiagnosticReports/python3.13-*.ips`) says "BUG IN CLIENT OF LIBDISPATCH: Semaphore object deallocated while in use … Abort Cause 1": exactly one count short.
   - All 24 reports collected here had that signature.
-- **How often.** About 0.1 to 0.4% of encoder closes, mostly for very short clips. A full test run closes about 250 encoders, and 2 of 5 runs crashed. Long 640×480 episodes had 0 crashes in 800 closes, which is too few to give a rate.
+- **How often.** About 0.1 to 0.4% of encoder closes, mostly for very short clips. Long 640×480 episodes had 0 crashes in 800 closes, too few to give a rate.
 - **Where it's tracked.**
   - SVT-AV1 [issue #2961](https://github.com/AOMediaCodec/SVT-AV1/issues/2961) (GitLab #2251) came from libavif's Apple-silicon CI. It reproduced on an M1 but not on Intel Macs. SVT-AV1 3.0.1 listed it as a known issue.
   - The fix is [commit 049193fc](https://github.com/AOMediaCodec/SVT-AV1/commit/049193fc0e16ba7f1afe8baa51292157b681cb2a), "Fix the Apple teardown SIGTRAP (#2251)". It is +8/−1 in `svt_threads.c`, first released in SVT-AV1 4.3.0.
-  - We reported it to LeRobot as [huggingface/lerobot#5308](https://github.com/huggingface/lerobot/issues/5308), after finding no earlier report there or in PyAV.
+  - We reported it to LeRobot as [huggingface/lerobot#5308](https://github.com/huggingface/lerobot/issues/5308).
 
 ## Why we can't just upgrade
 
-- **PyAV.** No release bundles SVT-AV1 4.3.0 yet. The newest on PyPI, 19.0.2, bundles 4.2.0. PyAV's FFmpeg builds ([pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg)) use 4.3.0, so the next PyAV release will probably have it.
+- **PyAV.** No release bundles SVT-AV1 4.3.0: the newest, 19.0.2, bundles 4.2.0, though PyAV's FFmpeg builds ([pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg)) use 4.3.0.
 
   | PyAV wheel (macOS arm64) | SVT-AV1 | libaom |
   | --- | --- | --- |
@@ -32,7 +32,7 @@ LeRobot encodes each camera's video with SVT-AV1, through PyAV, on one encoder t
   | 17.0.1 | 3.1.2 | none |
   | 19.0.2 | 4.2.0 | none |
 
-- **LeRobot.** Both 0.7.0 and main pin `av>=15,<16`. Overriding the pin with uv doesn't work past av 17.0:
+- **LeRobot.** LeRobot 0.7.0 pins `av>=15,<16`, as does its main branch. Overriding the pin with uv doesn't work past av 17.0:
   - PyAV 17.1 removed `av.option` and `Codec.descriptor`;
   - LeRobot's `datasets/pyav_utils.py` uses both;
   - so `import lerobot.datasets` fails with `AttributeError: module 'av' has no attribute 'option'`.
@@ -48,9 +48,9 @@ LeRobot encodes each camera's video with SVT-AV1, through PyAV, on one encoder t
   - `ensure()` restarts the process with `os.execve(sys.executable, sys.orig_argv, env)`, adding the library to `DYLD_INSERT_LIBRARIES`. It sets `SO101_SVT_SHIM_TRIED` so a library that won't load can't cause a restart loop.
   - `loaded()` asks dyld whether the library is in the process (`RTLD_NOLOAD`) and whether it came in through the variable, since only an inserted library's interposing takes effect.
 - **Where it's called.**
-  - `cli.main` calls `ensure()` for `record`, `run`, `serve`, `build` and `train`, before the stderr filter starts its thread.
-  - `so101-control` calls `ensure()` then `require()`. `run_build` calls `require()`.
-  - The preflight checks of `record`, its dry run, `run` and `serve` fail unless it's loaded, through `check.check_video`.
+  - `cli.main` calls `ensure()` for `record`, `run`, `serve`, `build`, `train` and `sim nudge`, before the stderr filter starts its thread.
+  - `so101-control` and `so101-record` call `ensure()` then `require()`. `run_build` calls `require()`.
+  - The preflight checks of `record`, its dry run, `sim nudge`, `run` and `serve` fail unless it's loaded, through `check.check_video`.
   - `tests/fakes.py` calls `ensure()`, so the recorder and build tests run with it.
 - **Why it can load at all.** uv's Python (`cpython-3.13.14`) is ad-hoc signed without the hardened runtime (`codesign -dv`: `flags=0x20002(adhoc,linker-signed)`), so dyld honours `DYLD_INSERT_LIBRARIES`. A hardened-runtime Python would ignore it, and the checks would then fail rather than run unprotected.
 - **Child processes.** This venv's Python processes inherit the variable, so the LeRobot commands `so101` starts, and their worker processes, load the shim too. Every other program `so101` starts (`git`, `ssh`, `caffeinate`, `tailscale`, `uvc-util`, `cc`) is started with `svtshim.other_env()`, which leaves the shim out. Three cases matter:
@@ -92,5 +92,5 @@ Once a PyAV release bundles SVT-AV1 4.3.0 or later and LeRobot allows it:
 
 1. upgrade;
 2. confirm `uv run so101 check` says "has its teardown crash fixed";
-3. delete `svtshim.py`, `svtsem.c`, `tests/test_svtshim.py`, `cli.VIDEO_COMMANDS`, every `svtshim` import and `env=svtshim.other_env()` argument, and the `ensure()` (`tests/fakes.py` has one too), `require()` and `check_video` calls;
+3. delete `svtshim.py`, `svtsem.c`, `tests/test_svtshim.py`, `cli.VIDEO_COMMANDS` and `cli.main`'s check for `sim nudge`, every `svtshim` import and `env=svtshim.other_env()` argument, and the `ensure()` (`tests/fakes.py` has one too), `require()` and `check_video` calls;
 4. update the README section and this note's `Status:`.

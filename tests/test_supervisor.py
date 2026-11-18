@@ -119,9 +119,6 @@ class ProgramTest(unittest.TestCase):
                 text.replace("miss_rewind_s = [6.0, 8.0]", "miss_rewind_s = [5.5, 8.0]"), r"miss_rewind_s\[0\] is 5.5 s"),
             "a later playback that can't reach the close": (
                 text.replace("miss_rewind_s = [6.0, 8.0]", "miss_rewind_s = [6.0, 2.0]"), r"miss_rewind_s\[1\] is 2 s"),
-            "version 1's one success cutoff": (
-                text.replace("success_chat_below = 0.1", "success_chat_below = 0.1\nsuccess_p_wrong = 0.1"),
-                "judges.success_p_wrong is no longer read"),
             "no success cutoff for the decision model": (
                 text.replace("success_decision_below = 0.3", ""), "judges.success_decision_below"),
             "no hold deadline": (text.replace("hold_deadline_s = 5.0", ""), "timing.hold_deadline_s"),
@@ -172,7 +169,7 @@ class DetectorTest(unittest.TestCase):
     def test_jaws_that_approach_shut_and_miss_once_are_not_chatter(self) -> None:
         # As pi0.5 did in a run whose block it then placed: jaws shut (1.3) on the way, opened for the grasp, a
         # brief close (22.7), open again, then the grasp. The opening is the first crossing, before any close;
-        # counted, it made four in 1.7 s.
+        # counting it would make four in 1.7 s.
         trace = Trace(pose(gripper=1.3)).to(6, pan=20).to(0.2, gripper=27).to(0.1, gripper=22.7)
         trace.to(0.2, gripper=39).to(1.0).to(0.3, gripper=18).to(2, elbow=40)
         self.assertEqual(kinds(trace.run(Detector(GRASP))), ["close", "regrasp", "close", "carry"])
@@ -274,7 +271,7 @@ class DetectorTest(unittest.TestCase):
         self.assertEqual(kinds(out), ["close", "carry", "release", "close", "carry", "release"])
 
     def test_a_narrow_release_then_a_handback_above_the_band_re_arms(self) -> None:
-        # The council's case: a release at 23.8, under closed_below (25), then a person undoes it and hands the
+        # A release at 23.8, under closed_below (25), then a person undoes it and hands the
         # arm back with the jaws still at 23.8. Above the hold band no block is held, so the next grasp counts.
         detector = Detector(GRASP)
         narrow = Trace().to(3, pan=20).to(1, gripper=18.9).to(2, elbow=40).to(2, pan=40).to(0.3, gripper=23.8)
@@ -391,8 +388,8 @@ class ChatText:
         return {**providers.parse_answer(self.text), "cost_usd": 0.001, "latency_s": 0.1}
 
 
-# Chat answers the supervisor must take as no answer: a NaN once clamped to 0.0, a sure ok, and an
-# answer whose wrong contradicts its p_wrong.
+# Chat answers the supervisor must take as no answer: a NaN, which clamping would make 0.0, a sure ok, and
+# an answer whose wrong contradicts its p_wrong.
 NO_ANSWERS = {"NaN": '{"wrong": false, "p_wrong": NaN, "category": "none", "observation": ""}',
               "-Infinity": '{"wrong": false, "p_wrong": -Infinity, "category": "none", "observation": ""}',
               "contradictory": '{"wrong": true, "p_wrong": 0.02, "category": "none", "observation": ""}'}
@@ -510,9 +507,7 @@ class JudgesTest(unittest.TestCase):
         j._adapters["jev"].cost = None  # the provider reported no usage
         answers = [j.ask("jev", [("top", b"x")], "end") for _ in range(4)]
         # One budget rule with failbench's (`vision.budget.Budget`): a call starts only if its estimate fits under
-        # the cap. The third call's would take the run to 3 estimates, past 2.5, so it never starts; under the old
-        # rule, which let a call start while the run had spent under the cap, it did, and this read [True, True,
-        # True, False] and 3 estimates spent.
+        # the cap. The third call's would take the run to 3 estimates, past 2.5, so it never starts.
         self.assertEqual([a.error is None for a in answers], [True, True, False, False])
         self.assertAlmostEqual(j.spent, 2 * estimate)
 
@@ -1379,7 +1374,10 @@ class CandidatesTest(unittest.TestCase):
         n = len(trace.poses)
         phases = np.array([0] * 10 + [1] * n + [6] * 10)  # starting, the policy, returning
         states = np.array([[p[k] for k in NAMES] for p in [trace.poses[0]] * 10 + trace.poses + [trace.poses[-1]] * 10])
-        rows = candidates.pick("run1", 0, phases, np.zeros(len(phases), bool), states, NAMES, FPS, PROGRAM, GRASP)
+        from so_101.policy.base import OTHER
+
+        drivers = np.where(phases == 1, POLICY, OTHER)  # control.phase 1 is Autonomous
+        rows = candidates.pick("run1", 0, phases, states, NAMES, FPS, PROGRAM, GRASP, drivers=drivers)
         self.assertEqual([r["moment"] for r in rows], ["after_close", "after_release", "approach", "end"])
         closed = 10 + next(i for i, p in enumerate(trace.poses) if p[GRIPPER] < GRASP.gripper.closed_below)
         close = next(r for r in rows if r["moment"] == "after_close")
@@ -1472,8 +1470,7 @@ class SchedulesMatchTest(unittest.TestCase):
         phases = np.array([phase for _, phase in script])
         drivers = np.array([POLICY if phase == Phase.AUTONOMOUS else OTHER for _, phase in script])
         states = np.array([[p[k] for k in NAMES] for p, _ in script])
-        rows = candidates.pick("run1", 0, phases, np.zeros(len(script), bool), states, NAMES, FPS, PROGRAM, GRASP,
-                               drivers=drivers)
+        rows = candidates.pick("run1", 0, phases, states, NAMES, FPS, PROGRAM, GRASP, drivers=drivers)
         picked = [(r["t"], r["moment"]) for r in rows if r["moment"] in ("after_close", "after_release")]
         self.assertEqual([m for _, m in sent], ["after_close", "after_release"],
                          "the first close's check dropped at the pause, the second's stale")

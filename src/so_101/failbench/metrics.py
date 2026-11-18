@@ -12,7 +12,7 @@ marked down for what it wasn't asked.
 
 With the supervisor's thresholds (`sure`, its program's `sure_ok_below` and `sure_wrong_above`), three
 more say how a model would do as its judge: the share of answers it would call unsure, the share of its
-sure-wrong calls that were wrong (a sure wrong after a close plays the attempt back), and the share of
+sure-wrong calls that were wrong (a sure wrong after a close, from both judges, plays the attempt back), and the share of
 its sure-ok calls that were in fact wrong (failures the supervisor would let pass).
 """
 
@@ -207,7 +207,8 @@ def report(title: str, samples: list, scores: list[Scores], notes: list[str],
                   f"The supervisor calls a check sure wrong at p_wrong at or over {sure[1]:g}, sure ok at or under "
                   f"{sure[0]:g}, and unsure between (its program's `sure_wrong_above` and `sure_ok_below`). "
                   "*Unsure* is the share of answers it would call unsure; *Sure wrong, right* the share of sure-wrong "
-                  "calls that were wrong, since a sure wrong after a close plays the attempt back; *Wrong among sure "
+                  "calls that were wrong, since a sure wrong after a close, with the other judge agreeing, plays the attempt "
+                  "back; *Wrong among sure "
                   "ok* the share of sure-ok calls that were wrong, failures it would let pass. Only answers with a "
                   "probability count.", "",
                   "| Model | Unsure | Sure wrong, right | Wrong among sure ok |", "|---|---|---|---|"]

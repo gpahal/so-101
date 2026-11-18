@@ -1,6 +1,6 @@
 # Hardware notes
 
-Status: reference for debugging, and plans for hardware changes nobody has built yet. What `so101` already does about each item is marked. Written from Feetech's STS memory table, LeRobot 0.7.0's motor code and this repo's tests. Items marked "untested" haven't been tried on this arm.
+Status: reference, from Feetech's STS memory table, LeRobot 0.7.0's motor code and this repo's tests, with hardware changes considered and not built. What `so101` does about each item is marked; items marked "untested" haven't been tried on this arm.
 
 ## The servos
 
@@ -10,7 +10,7 @@ The SO-101 uses Feetech STS3215 servos on a Waveshare bus servo board. Register 
 
 The STS3215 has no watchdog or communication timeout: none of its registers (0 to 86) is one. If the host process dies, each servo keeps driving to the last goal it received, then holds it with torque on. Only cutting its power makes it go limp.
 
-- **A clean exit** (Esc, Ctrl+C, SIGTERM, or SIGHUP from closing its terminal) turns torque off: `serve` first drives the arm to rest. Where it can't (after a fault, after a move to rest that stopped short, or resting away from the rest pose), only `y` at the terminal exits there, and no signal does, so with no terminal the arm holds until someone switches its power off. The exception is a follower that doesn't answer: any quit exits at once and leaves its motors as they are, since `serve` can't reach them.
+- **A clean exit** (Esc, Ctrl+C, SIGTERM, or SIGHUP from closing its terminal) turns torque off: `serve` and `run` first drive the arm to rest. Where it can't (after a fault, after a move to rest that stopped short, or resting away from the rest pose), only `y` at the terminal exits there, and no signal does, so with no terminal the arm holds until someone switches its power off. The exception is a follower that doesn't answer: any quit exits at once and leaves its motors as they are, since `serve` can't reach them.
 - **A crash or `kill -9`** skips that. The arm most likely finishes its last move and holds there until someone switches the power off. Untested. To settle it, run `kill -9` on `so101-control` while the arm moves to the start pose, again while the policy drives, and pull the follower's USB cable mid-move, with a hand under the arm each time. Then note whether the arm stops and holds, finishes its last move and holds, or goes limp.
 - **For operators away from the robot**, see [Stopping the arm](#stopping-the-arm).
 
@@ -18,7 +18,7 @@ The STS3215 has no watchdog or communication timeout: none of its registers (0 t
 
 A servo that loses power, or restarts in a brownout, comes back with torque off. Writing a goal turns its torque back on by itself (writing Goal_Position, address 42, sets Torque_Enable, 40, to 1), so the next goal drives it there at full speed.
 
-`serve` handles this (README, "Devices and faults"):
+`serve` and `run` (both `so101-control`, called `serve` below) handle this (README, [Devices and faults](../README.md#devices-and-faults)):
 - **While the follower is silent,** it gets no goal, whatever other error comes meanwhile.
 - **Once it answers,** `serve` first waits, writing nothing, until its reads have agreed for 1 s (`RESTART_SETTLE_S`): each motor within 20 steps (1.8°) of the read before, and the supply above 75% of its start voltage. Then it re-marks the motors, sets each goal to where the motor is found, and writes `Torque_Enable` = 1 itself rather than rely on the goal write turning it on. Meanwhile the follower counts as missing, so Reset sends it no goal either.
 - **Why it waits.** Measured: the first read after switching the arm back on can be off by each motor's homing offset: shoulder_pan 481 steps (its offset 494), shoulder_lift 477 (525), elbow_flex −453 (−478), wrist_flex −456 (−485), about 40° on four joints. A read 0.58 s later was right. Taking the goal from that first read and turning the torque on at once, with every later goal through the 10° step cap, makes the arm jerk up to 10° toward the wrong pose and hold there. In a second power cycle the first read was right, but 0.53 s later, before the torque came back on there, the joints read up to 5° from it, so turning the torque on pulled them back up to 5°. The goal write itself has no step cap, so a servo that applied its offset after the torque came on could have driven about 40°. A wrong first read differs from the next by the offset, so it restarts the 1 s wait.
@@ -39,9 +39,9 @@ Untested on this firmware:
 
 ### The gripper's overload trips (left as is)
 
-**Measured:** the ACT policy closing the gripper on the block set the overload bit (32) in the gripper's status replies about 7 to 11 s into each autonomous attempt, in two runs out of two, with every LED steady. `serve` warns on it rather than faulting (`follower.OVERLOAD`) and logs the gripper's load once a second while it's over 20% (`gripper_load` events), to measure a grasp before changing any threshold. Those runs' events show 92 to 100% load from the grasp until Reset opens the gripper, Fault holds included, with the gripper reaching 54 °C: the policy commands it further closed than the block allows. Any other alarm bit on the gripper, and an overload on any other joint, still faults.
+**Measured:** the ACT policy closing the gripper on the block set the overload bit (32) in the gripper's status replies about 7 to 11 s into each autonomous attempt, with every LED steady. `serve` warns on it rather than faulting (`follower.OVERLOAD`) and logs the gripper's load once a second while it's over 20% (`gripper_load` events). Any other alarm bit on the gripper, and an overload on any other joint, still faults.
 
-**Measured in eight `so101 run` runs of ACT and π0.5:** the gripper sat at 94 to 99% load not only while it held the block but for most of each attempt. The policies close the empty jaws to about 0.4 on the way to the block and back, and the jaws stop against each other at 1.1 to 1.3, so the servo pushed jaw against jaw at stall for about 6 s before each grasp and until Reset. Holding the block, with the goal near 8 against the block at 18, it read 92.4% and set the overload bit on every grasp. The gripper went from 49 to 56 °C over the eight runs, and the preflight warned of a hot gripper before six of them. The unnamed 0x10 bit (below) came 10 to 24 times a run, all on shoulder_lift. `serve` and `run` raise every gripper goal to `[control] gripper_floor` (2.0), just above where the empty jaws stop, which ends the stall away from the block; the squeeze on the block is unchanged. Its effect on the load and the temperature is not yet measured.
+**Measured in eight `so101 run` runs of ACT and π0.5:** the gripper sat at 94 to 99% load not only while it held the block but for most of each attempt. The policies close the empty jaws to about 0.4 on the way to the block and back, and the jaws stop against each other at 1.1 to 1.3, so the servo pushed jaw against jaw at stall for about 6 s before each grasp and until Reset. Holding the block, with the goal near 8 against the block at 18, it read 92.4% and set the overload bit on every grasp. The gripper went from 49 to 56 °C over the eight runs, and the preflight warned of a hot gripper before six of them. The unnamed 0x10 bit (above) came 10 to 24 times a run, all on shoulder_lift. `serve` and `run` raise every gripper goal to `[control] gripper_floor` (2.0), just above where the empty jaws stop, which ends the stall away from the block; the squeeze on the block is unchanged. Its effect on the load and the temperature isn't measured.
 
 The follower's gripper sometimes stops answering and blinks red until its power is switched off and on (README, Troubleshooting). The likely cause is the overload threshold LeRobot sets.
 
@@ -51,11 +51,11 @@ The follower's gripper sometimes stops answering and blinks red until its power 
   - `Overload_Torque` 25, commented as "25% torque when overloaded".
 - **What the register actually is.** In Feetech's table, `Overload_Torque` (address 36) is the trip threshold, not the torque after a trip. When the load stays above it for `Protection_Time` (address 35, 2 s by default), output drops to the holding torque (address 34, 20% by default). So a grip that needs more than 25% load for 2 s trips. LeRobot's open PR #4783 reads the register the same way.
 - **The fix, if it's needed:** raise `Overload_Torque` to 40 or 50 after LeRobot's `configure()`. The 50% torque limit and 1.6 A current limit stay as burn protection, and `serve` already watches the motors' temperature.
-- **Why it isn't done:** it isn't measured on this arm yet. LeRobot rewrites the value on every connect, so `teleop` and `record` (which run LeRobot's commands) would need a wrapper too.
+- **Why it isn't done:** it isn't measured on this arm. LeRobot rewrites the value on every connect, so it would go in `connect.install()`, which every command that connects the follower runs.
 - **Things to try first:**
   - Close the leader's gripper only until the follower grips.
   - Print the TPU compliant fingers from the SO-ARM100 repo. They spread a squeeze over time, so the servo spends less time near stall.
-- **Clearing a trip without the power switch:** the servo protocol has a Restart instruction (0x08), which rustypot 1.13 exposes as `reboot(id)`. The servo doesn't answer it, takes about 1.8 s, and comes back limp with RAM settings at their defaults. Untested on this firmware.
+- **Clearing a trip without the power switch:** the servo protocol has a Restart instruction (0x08), which rustypot 1.14 exposes as `reboot(id)`. The servo doesn't answer it, takes about 1.8 s, and comes back limp with RAM settings at their defaults. Untested on this firmware.
 
 ### Registers worth knowing
 
@@ -85,7 +85,7 @@ Measured on 60 teleoperated pick-and-place demos on this arm: 99.9% of joint mot
 
 ## Stopping the arm
 
-Today the only stop that works when the software is dead is the arm's power switch. Pause and Reset are software. These were considered and not built:
+The only stop that works when the software is dead is the arm's power switch. Pause and Reset are software. These were considered and not built:
 
 | Option | What it stops | Cost |
 | --- | --- | --- |
@@ -111,9 +111,9 @@ Power cut at rest is safe: the rest pose is one the arm keeps with no power (`so
 
 ## Calibration drift
 
-A leader and follower whose calibrations disagree train a policy with an offset: one LeRobot user found 17° on one joint, about 6 cm at the gripper (LeRobot issue 3758). On still frames of a demo, `action - observation.state` should be close to 0; a steady gap on one joint means recalibrating. Nothing checks this automatically yet.
+A leader and follower whose calibrations disagree train a policy with an offset: one LeRobot user found 17° on one joint, about 6 cm at the gripper (LeRobot issue 3758). On still frames of a demo, `action - observation.state` should be close to 0; a steady gap on one joint means recalibrating. Nothing checks this automatically.
 
-## The Jetson (not supported yet)
+## The Jetson (not supported)
 
 `so101` runs on macOS. What a Jetson Orin needs, from NVIDIA's and the kernel's docs:
 

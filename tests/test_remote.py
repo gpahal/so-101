@@ -89,12 +89,12 @@ class RequireServerTest(unittest.TestCase):
                     self.require(labels, pin=not started)
                 self.assertIn(described, str(exited.exception.code))
 
-    def test_a_pi05_server_from_before_the_pin_is_refused_and_says_so(self) -> None:
+    def test_a_pi05_server_without_a_pin_label_is_refused(self) -> None:
         labels = remote._labels("task", "pi05", "main", 50, True)
         del labels[remote.PIN_LABEL]
         with self.assertRaises(SystemExit) as exited:
             self.require(labels)
-        self.assertIn("started before the unused action columns setting", str(exited.exception.code))
+        self.assertIn("isn't serving this model", str(exited.exception.code))
 
     def test_an_act_server_has_no_pin_to_match(self) -> None:
         labels = remote._labels("task", "act", "main", 100, True)
@@ -102,12 +102,11 @@ class RequireServerTest(unittest.TestCase):
         self.assertEqual(self.require(labels, "act", 100, pin=False).id, "job")
         self.assertNotIn("unused action columns", remote.describe(server(labels)))
 
-    def test_a_server_from_before_real_time_chunking_is_refused_with_the_start_command(self) -> None:
-        old = {"task": "task", "policy": "pi05", "revision": "main", "action_steps": "50"}
+    def test_a_pi05_server_without_real_time_chunking_is_refused_with_the_start_command(self) -> None:
+        other = {"task": "task", "policy": "pi05", "revision": "main", "action_steps": "50"}
         with self.assertRaises(SystemExit) as exited:
-            self.require(old)
+            self.require(other)
         message = str(exited.exception.code)
-        self.assertIn("plain chunks from before real-time chunking", message)
         self.assertIn("uv run so101 server start task --policy pi05 --revision main", message)
         self.assertNotIn("--action-steps", message)
 
@@ -172,15 +171,6 @@ class PolicySetupTest(unittest.TestCase):
         section = settings.Remote(job_target="l4x1", job_timeout="1h", pin_unused_actions=True)
         self.setup(types.SimpleNamespace(path="so101.toml", remote={"pi05": section}))
         self.assertEqual(self.read_at, [self.SERVED], "never main, which may name a newer model")
-
-    def test_a_server_from_before_the_commit_label_is_refused_with_how_to_restart_it(self) -> None:
-        old = server(remote._labels("task", "pi05", "main", 50, True))
-        with self.assertRaises(SystemExit) as exited:
-            remote.served_commit(old, "task", "pi05", "main")
-        message = str(exited.exception.code)
-        self.assertIn("started before so101 recorded the commit it serves", message)
-        self.assertIn("uv run so101 server stop", message)
-        self.assertIn("uv run so101 server start task --policy pi05 --revision main", message)
 
     def test_a_server_that_changed_during_the_checks_stops_the_run(self) -> None:
         ns = argparse.Namespace(task="task", policy="pi05", remote=True, revision=None, checkpoint=None,
@@ -315,7 +305,7 @@ class SkillsServerTest(unittest.TestCase):
             with self.subTest(policy_type):
                 model = types.SimpleNamespace(config=types.SimpleNamespace(input_features=checkpoint_inputs(policy_type, 3)))
                 validate(model, served_features(policy_type, skill_list()))
-                # Without it, as before: the job loads the model, fails validation and exits, billed.
+                # Without it the job loads the model, fails validation and exits, billed.
                 with self.assertRaises(ValueError):
                     validate(model, served_features(policy_type))
                 whole = types.SimpleNamespace(config=types.SimpleNamespace(input_features=checkpoint_inputs(policy_type)))
@@ -539,7 +529,7 @@ class Pi05ServerScriptTest(unittest.TestCase):
     def test_with_the_pin_the_model_sees_the_unused_columns_as_in_training(self) -> None:
         model_type, policy_type, started = run_server_script("pi05", True)
         self.assertEqual(started, ["server"])
-        self.assertTrue(callable(policy_type.validate_chunk_input_features))  # the empty camera slots, as before
+        self.assertTrue(callable(policy_type.validate_chunk_input_features))  # kept for the empty camera slots
         model = model_type()
         for seed in (1, 2):  # the second chunk must pin to its own noise, not the first chunk's
             with self.subTest(seed=seed):

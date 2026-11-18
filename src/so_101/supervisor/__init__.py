@@ -8,7 +8,7 @@ of the stack `serve` and `run` step (docs/policy-layers.md); it sends them no co
 Modules:
 - `program`   its timing, judges, responses and budget, from `program.toml` or the file `[supervisor] program`
               names. The gripper and rule thresholds, and the detector the perception steps, are in `grasp/`.
-- `judges`    the vision checks through failbench's adapters (event, watch, escalation), within a cost cap
+- `judges`    the vision checks through `vision`'s adapters (event, watch, escalation), within a cost cap
 - `schedule`  when the after_close and after_release checks fall due, which `failbench.candidates` shares
 - `layer`     `Supervisor`: reads the perception's signals, schedules checks, decides, plays back, logs
 """

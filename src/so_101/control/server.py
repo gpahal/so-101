@@ -5,7 +5,7 @@ and read `status` and `events`, so the control loop stays the one thread that dr
 
     GET  /               the page (page.html beside this file)
     GET  /status         the controller's status as this page sees it, plus the server's: task, bind
-                         warning and server_id, a random id per `so101 serve` run, so the page can tell
+                         warning and server_id, a random id per `so101 serve` or `so101 run` process, so the page can tell
                          a restarted server from the one it was watching. A poll from the page in
                          control is the link's heartbeat; it sends X-SO101-Visible (link.py)
     GET  /events?after=N the run's events numbered above N, oldest first (at most the newest 50)
@@ -14,7 +14,7 @@ and read `status` and `events`, so the control loop stays the one thread that dr
                          the preview rate, so no request stays open to use up the browser's connections.
                          A camera missing from the loop's last handover, or a handover over 2 s old,
                          has no frame (previews.py)
-    POST /command        {"command": ..., "outcome"?: ..., "label"?: ..., "for_attempt"?: ...}.
+    POST /command        {"command": ..., "outcome"?: ..., "label"?: ..., "for_attempt"?: ..., "hold"?: ...}.
                          Any other key is refused. Waits for the tick that applies it, then replies
                          {"command", "accepted", "reason", "status"}, where "command" is the pause or
                          resume a toggle became. The commands `check` (Run checks: `so101
@@ -86,9 +86,9 @@ class ControlServer(web.PageServer):
                  routes: Callable[[], str | None], command: str = "so101 serve") -> None:
         """Binds now, so a port in use fails before the arm and policy load. Set `controller` before
         `start`. `bind` is where to listen, from `resolve_bind`: the page's status shows its
-        warnings. `routes()` is asked before the first request and every ROUTES_EVERY_S on a thread
-        of its own, never the control loop's, what makes a request without a login unsafe
-        (`route_warning`). `command` is the one that started it, which its messages name."""
+        warnings. `routes()` says what makes a request without a login unsafe (`route_warning`); it's
+        asked before the first request and every ROUTES_EVERY_S, on a thread of its own, never the
+        control loop's. `command` is the one that started it, which its messages name."""
         super().__init__(bind, port, Handler, site=site(command), routes=routes)
         self.controller = None
         self.task = task

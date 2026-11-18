@@ -14,19 +14,21 @@ frame indices, timestamps, video files and normalization stats are all consisten
 re-encoding loses a little image quality, so the build encodes at a higher quality (lower CRF)
 than recording does.
 
-`--with` adds frames of `so101 serve` runs, from `control.analysis.training_cuts`: each cut is its
-own episode, after the demos. The cuts already leave out scripted, suspect and waiting frames and
-ignored attempts (`analysis.training_cuts` has the full list). A cut whose episode the run's episode index doesn't list, as when a kill
-came after its data file was finished and before its index row was written, is left out with a note.
+`--with` adds frames of `so101 serve` and `so101 run` runs, from `control.analysis.training_cuts`:
+each cut is its own episode, after the demos. The cuts already leave out scripted, suspect and waiting
+frames and ignored attempts (`analysis.training_cuts` has the full list). A cut whose episode the
+run's episode index doesn't list, as when a kill came after its data file was finished and before its
+index row was written, is left out with a note.
 Only the demos' columns are written, unless `keep_labels` is set. A cut's `action` is what a demo's
 is: what the arm was asked for, before the follower's `max_relative_target` cap (lerobot-record saves
 the leader's pose, not the capped goal). So a Teleop cut takes the run's `control.leader`, and a
 policy-success cut its `control.policy_action`, rather than the run's `action`, the capped goal
 (`ACTION_COLUMN`).
 With either, build.json records `analysis.RULES_VERSION`, so a build made under other cut or label
-rules isn't current. A skills build also records `skills.contract` (`data.build_inputs`): the skills, the
-`[gripper]` thresholds' hash, `skills.CUT_RULES_VERSION` and, when it takes runs, `skills.RUN_LABEL_VERSION`
-(how runs were labelled, the grasp detector included), which a skills model is checked against before it runs (`commands.policy.require_skills_contract`).
+rules isn't current. A skills build also records `skills.contract` (`data.build_inputs`): the skills,
+the `[gripper]` thresholds' hash, `skills.CUT_RULES_VERSION` and, when it takes runs,
+`skills.RUN_LABEL_VERSION` (how runs were labelled, the grasp detector included), which a skills model
+is checked against before it runs (`commands.policy.require_skills_contract`).
 
 build.json sits inside the dataset and names no folder of this computer (`path_free`), since `train`
 uploads it with the dataset. The new build replaces the old by `swap`.
@@ -273,11 +275,11 @@ def run_skills(run: data.Run, attempt: analysis.Attempt, task: Task, grasp) -> t
     Frames a script moved (the move to the start pose, a Rewind, the return to rest, a layer's playback)
     aren't replayed, as the live detector sees none of them. Of the rest, the replay feeds (`fed`) Teleop
     frames, on purpose, since a person's grasp and release count (a re-grip is rolled back), and the frames
-    the live detector sees: Autonomous frames the model drove or waited on (`control.driver` POLICY or WAITING, or every Autonomous
-    frame of a run recorded before that column). Paused and Handover frames and a layer's hold aren't, and
-    count on no clock, and only frames the model drove (or Teleop frames, or every frame without the
-    column) count as driven for the stuck rules (`drove`). The masks are `grasp.replay.live_masks`'s, and a
-    Pause and Resume taken in one tick (`attempt.handbacks`) reach the replay as the live detector heard them.
+    the live detector sees: Autonomous frames the model drove or waited on (`control.driver` POLICY or
+    WAITING). Paused and Handover frames and a layer's hold aren't, and count on no clock, and only frames
+    the model drove, or Teleop frames, count as driven for the stuck rules (`drove`). The masks are
+    `grasp.replay.live_masks`'s, and a Pause and Resume taken in one tick (`attempt.handbacks`) reach the
+    replay as the live detector heard them.
     In a skills run, Autonomous frames take the skill the model was told (control.skill,
     indexed in its own run.json's policy.skills and mapped onto the task's by name; of those, the ones the
     model didn't drive, waiting or a layer's hold, are in no cut anyway, `control.analysis`); every other frame,
@@ -293,9 +295,7 @@ def run_skills(run: data.Run, attempt: analysis.Attempt, task: Task, grasp) -> t
     phases = attempt.phases
     if len(state) != len(phases):
         return None, f"its {len(state)} frames of joint readings don't match its {len(phases)} phases"
-    driver = None
-    if "control.driver" in table and not table["control.driver"].isna().any():
-        driver = np.array([int(np.ravel(v)[0]) for v in table["control.driver"]])
+    driver = np.array([int(np.ravel(v)[0]) for v in table["control.driver"]])
     # What the live detector saw (`grasp.replay.live_masks`), plus Teleop frames, fed on purpose.
     live, model_drove, moved = live_masks(phases, driver)
     teleop = phases == Phase.TELEOP
@@ -431,10 +431,8 @@ def build(s: Settings, task: Task, sources: tuple[str, ...] = (), keep_labels: b
                     out.add_frame(frame)
             except (ValueError, IndexError, StopIteration, AssertionError) as e:
                 raise ConfigError(p.damaged(task, e)) from e
-            # Parallel encoding starts a process pool per episode, and on macOS each
-            # worker is a fresh Python that imports torch and LeRobot. Serial encoding
-            # takes a 300-frame, two-camera episode 4.7-4.9 s against 5.7-6.1 s in
-            # parallel, and the build tests 7.6 s against 59.7 s.
+            # Serial: parallel encoding starts a process pool per episode, each worker a fresh Python importing
+            # torch and LeRobot. A 300-frame, two-camera episode takes 4.7-4.9 s serial against 5.7-6.1 s.
             out.save_episode(parallel_encoding=False)
             done += p.stop - p.start
             mapping.append(p.entry(task))

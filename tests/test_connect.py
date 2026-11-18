@@ -73,8 +73,8 @@ class ConnectTest(unittest.TestCase):
 
 
     def test_a_joint_resting_just_past_its_limit_is_pulled_back_to_the_limit(self) -> None:
-        # Folded, this arm's elbow has read 3035 against a Max_Position_Limit of 3031: the servo stored
-        # a goal of 3035 as 3031, so the read-back never matched and every connect refused.
+        # Folded, this arm's elbow reads 3035 against a Max_Position_Limit of 3031: the servo stores a goal
+        # of 3035 as 3031, so a read-back of the goal never matches it.
         for side, offset in (("max", connect.OVERSHOOT_MAX_STEPS), ("min", -connect.OVERSHOOT_MAX_STEPS)):
             with self.subTest(side=side):
                 clock = FakeClock()
@@ -84,7 +84,7 @@ class ConnectTest(unittest.TestCase):
                 rest = dict(REST, elbow_flex=REST["elbow_flex"] + offset)
                 motors = FakeMotors(clock, calib, rest)
                 for i, register in motors.registers.items():
-                    register["goal_position"] = REST[motors.names[i]] - 400  # old goals, inside every limit
+                    register["goal_position"] = REST[motors.names[i]] - 400  # stale goals, inside every limit
 
                 connect.install()
                 robot = follower(motors, calib)

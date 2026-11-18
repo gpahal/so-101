@@ -4,24 +4,21 @@ The grasp detector (`grasp.detector`) replays each saved attempt as the percepti
 `grasp.replay` (`live_masks`, `LiveFeed`): only the Autonomous frames the model drove or waited on
 (`control.driver` POLICY or WAITING), on the model's own clock, with `resumed` called where the model drives
 again after anything else held or moved the arm (a pause, a person's Teleop or Rewind, a layer's playback
-or hold, or a Pause and Resume taken in one tick, `analysis.Attempt.handbacks`). Each moment the supervisor would have checked
-becomes a candidate row: `after_close` and `after_release` at the program's delays, `stuck` where a rule
-fired, `approach` halfway from the policy's first frame to its first close (3 s in without one), and `end`
-at the episode's last frame. A run recorded before the `control.driver` column counts every Autonomous
-frame as the model's.
+or hold, or a Pause and Resume taken in one tick, `analysis.Attempt.handbacks`). Each moment the
+supervisor would have checked becomes a candidate row: `after_close` and `after_release` at the program's
+delays, `stuck` where a rule fired, `approach` halfway from the policy's first frame to its first close
+(3 s in without one), and `end` at the episode's last frame.
 
-The after_close and after_release checks are scheduled and sent by the supervisor's own rules
-(`supervisor.schedule.Schedule`, which `supervisor.layer.Supervisor` sends its checks by): each is due at
-its delay on the model's clock, and one not yet sent is dropped when the controller paused the attempt
-before it was due (any frame out of Autonomous: a pause, a Teleop, a Rewind, a return; or a
-Pause and Resume in one tick; the layer's own playback or hold drops nothing, as live), and an after_close
-one when a newer close came first. A check the supervisor sent and then found stale (too old, or a carry or release since) stays a
-candidate: its frames were judged.
+The after_close and after_release checks follow the supervisor's own rules (`supervisor.schedule.Schedule`):
+each is due at its delay on the model's clock; one not yet sent is dropped when the controller took the arm
+first (any frame out of Autonomous, or a Pause and Resume in one tick; the layer's own playback or hold drops
+nothing), and an after_close one when a newer close came first. A check the supervisor sent and then
+dropped as stale (too old, or a carry or release since) stays a candidate: its frames were judged.
 
 Rows have the columns `dataset.read_labels` reads, with `label` and `category` empty. A row's id names its
 run, episode, frame and moment, since the moment is part of the question its label answers: two moments at
 one frame are two rows. `write` merges into the file it writes: a row whose id is already there keeps its
-label, category and note, whatever they hold, and a row the rules no longer pick stays when its label or
+label, category and note, whatever they hold, and a row the rules don't pick stays when its label or
 category is filled in, so running it again after more runs never loses a person's work. `src` is the
 run's folder name under the runs folder.
 """
@@ -49,18 +46,17 @@ HEADER = """# Candidate samples from so101 serve and run runs, picked by the gra
 """
 
 
-def pick(run: str, episode: int, phases: np.ndarray, waiting: np.ndarray, states: np.ndarray, names: list[str],
-         fps: float, program, thresholds, drivers: np.ndarray | None = None,
+def pick(run: str, episode: int, phases: np.ndarray, states: np.ndarray, names: list[str],
+         fps: float, program, thresholds, drivers: np.ndarray,
          handbacks: np.ndarray | None = None) -> list[dict]:
-    """The candidate rows of one attempt. `phases`, `waiting` (no policy action), `states` (frames x joints,
-    named `names`) and `drivers` (`control.driver`, None for a run recorded before it) are the episode's
-    columns in frame order; `handbacks` marks the frames a Pause and Resume in one tick came before
+    """The candidate rows of one attempt. `phases`, `states` (frames x joints, named `names`) and `drivers`
+    (`control.driver`) are the episode's columns in frame order; `handbacks` marks the frames a Pause and Resume in one tick came before
     (`analysis.Attempt.handbacks`). `program` gives the supervisor's check delays, `thresholds` the detector's."""
     from so_101.grasp.replay import LiveFeed, live_masks
     from so_101.supervisor.schedule import Schedule
 
     feed = LiveFeed(thresholds, fps)
-    fed, drove, moved = live_masks(phases, drivers, waiting)
+    fed, drove, moved = live_masks(phases, drivers)
     gripper = names.index("gripper.pos")
     frames, rows = [], []  # (the model's seconds, frame) of each frame it drove
     picked: list[tuple[int, str, str]] = []  # (frame, moment, note)
@@ -125,7 +121,7 @@ def from_runs(runs: Path, program, thresholds) -> list[dict]:
             continue
         names = list(info["features"]["observation.state"]["names"])
         table, _ = read_data(run.dataset_root, ["episode_index", "frame_index", "observation.state", "control.phase",
-                                                "control.policy_action"], optional=("control.driver",))
+                                                "control.driver"])
         if table is None:
             continue
         # Each saved episode's same-tick handbacks, from the run's events. Blame plays no part in them.
@@ -135,12 +131,10 @@ def from_runs(runs: Path, program, thresholds) -> list[dict]:
         for episode, ep in table.groupby("episode_index"):
             ep = ep.sort_values("frame_index")
             phases = np.array([int(np.ravel(p)[0]) for p in ep["control.phase"]])
-            waiting = np.array([bool(np.isnan(np.asarray(v, dtype=float)).all()) for v in ep["control.policy_action"]])
             states = np.stack([np.asarray(v, dtype=float) for v in ep["observation.state"]])
-            drivers = (np.array([int(np.ravel(d)[0]) for d in ep["control.driver"]])
-                       if "control.driver" in ep and not ep["control.driver"].isna().any() else None)
+            drivers = np.array([int(np.ravel(d)[0]) for d in ep["control.driver"]])
             marks = handbacks.get(int(episode))
-            rows += pick(folder.name, int(episode), phases, waiting, states, names, float(info["fps"]), program,
+            rows += pick(folder.name, int(episode), phases, states, names, float(info["fps"]), program,
                          thresholds, drivers=drivers,
                          handbacks=marks if marks is not None and len(marks) == len(phases) else None)
     return rows
@@ -154,9 +148,8 @@ def _existing(path: Path) -> list[dict]:
 
 
 def unpicked(rows: list[dict], path: Path) -> int:
-    """How many rows in the file at `path` with a label or category filled in aren't among `rows`: picked by an
-    earlier version of the rules, or from a run since removed. `write` keeps them; a person decides whether
-    they still count."""
+    """How many rows in the file at `path` with a label or category filled in aren't among `rows`: picked
+    under other rules, or from a run that's gone. `write` keeps them; a person decides whether they count."""
     picked = {row["id"] for row in rows}
     return sum(1 for row in _existing(path) if _worked(row) and row["id"] not in picked)
 

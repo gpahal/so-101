@@ -11,7 +11,7 @@
         skills/         each kept demo's skills, in order (`so_101.skills`, `so101 build --skills`)
           build.json    what it was built from, with the skill definitions and every demo's cuts
       runs/<YYYYmmdd-HHMMSS>/
-        dataset/        one LeRobot dataset per `so101 serve` run, one episode per attempt; never modified
+        dataset/        one LeRobot dataset per `serve` or `run` run, one episode per attempt; never modified
         run.json        what it ran with: settings, calibration, cameras, checks, policy, software.
                         Written once, when the run starts, and never changed
         events.jsonl    every command, state change and attempt end, one JSON object per line. It
@@ -206,7 +206,7 @@ def new_session(s: Settings, task: "Task") -> Session:
 
 @dataclass(frozen=True)
 class Run(Recording):
-    """One `so101 serve` run: its attempts, as recorded by `control.recorder`."""
+    """One `so101 serve` or `so101 run` run: its attempts, as recorded by `control.recorder`."""
 
     FOLDER = "runs"
     MANIFEST = "run.json"
@@ -453,10 +453,10 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
     skills build also depends on `skills.contract`: the skill definitions (names, prompts, bounds and
     handovers, in order), the `[gripper]` thresholds that find the events, by the hash of their values,
     the cut rules (`skills.CUT_RULES_VERSION`) and, only when it takes runs, how their frames are labelled
-    (`skills.RUN_LABEL_VERSION`, which covers the grasp detector too), so a
-    demos-only build stays current when only those change. A skills
-    model is checked against the same fields (`commands.policy.require_skills_contract`). The stuck rules
-    (`[rules]`) cut nothing, so retuning them changes no build.
+    (`skills.RUN_LABEL_VERSION`, which covers the grasp detector too), so a demos-only build stays
+    current when only those change. A skills model is checked against the same fields
+    (`commands.policy.require_skills_contract`). The stuck rules (`[rules]`) cut nothing, so retuning
+    them changes no build.
     """
     inputs = {
         "prompt": task.prompt,
@@ -493,15 +493,6 @@ def build_inputs(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_
         # exactly when it takes them.
         inputs |= {"dataset": SKILLS, **skills.contract(task.skills, gripper, runs=bool(sources))}
     return inputs
-
-
-def old_build_hint(s: Settings, task: "Task") -> str | None:
-    """A line about a build left in the layout from before `datasets/`, which nothing reads now, or None."""
-    old = task_dir(s, task) / "train"
-    if not (old / "meta" / "info.json").is_file():
-        return None
-    return (f"{old} is a build from before datasets/whole/, and nothing reads it now: delete it, and "
-            f"{task_dir(s, task) / 'build.json'} beside it, to free the space.")
 
 
 def build_is_current(s: Settings, task: "Task", sources: tuple[str, ...] = (), keep_labels: bool = False,

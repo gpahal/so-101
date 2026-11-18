@@ -1,4 +1,4 @@
-"""`so101 runs`: summarise a task's serve runs and export their failure-fix pairs."""
+"""`so101 runs`: summarise a task's `serve` and `run` runs and export their failure-fix pairs."""
 
 import argparse
 import sys

@@ -3,14 +3,13 @@
 LeRobot's follower `connect` runs `configure`, which turns every motor's torque off, writes its
 settings, and turns the torque on again on the way out (`torque_disabled`). Each servo then drives to
 its Goal_Position register at full speed, outside `max_relative_target`, which caps only the goals
-software sends. That register keeps the last goal until the servo loses power. So after `serve`'s
-`y`, which turns the motors off with the arm raised, and the arm lowered by hand, the next command to
-connect snapped it back up to where it was.
+software sends. That register keeps the last goal until the servo loses power, so after `serve`'s
+`y` turns the motors off with the arm raised and a hand lowers it, the next connect would snap the
+arm back up.
 
 `install` makes `configure` write each motor's Goal_Position as its Present_Position just before the
 torque comes back on, so the arm holds where it is. Every command that connects the follower calls
-it first: `serve` (`control/main.py`), `run` and `check --live` in their process,
-and `teleop`, `record`, `record --dry-run --replay` and `calibrate` through the `so101-teleoperate`,
+it first: `serve` and `run` (`control/main.py`) and `check --live` in their process, and `teleop`, `record`, `record --dry-run --replay` and `calibrate` through the `so101-teleoperate`,
 `so101-record`, `so101-replay` and `so101-calibrate` entry points below, which run LeRobot's scripts.
 
 A joint can rest a few steps past its calibrated limit: folded, this arm's elbow has read 3035 against a

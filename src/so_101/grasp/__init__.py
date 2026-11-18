@@ -6,4 +6,5 @@ Modules:
 - `detector`   the arm's readings into gripper events and stuck rules; pure, so the perception steps it
                live, `so101 skills` and `build --skills` cut demos with it, and `so101-failbench
                candidates` replays recorded runs through it
+- `replay`     the live perception's feed (`LiveFeed`, `live_masks`), which the offline replays run too
 """

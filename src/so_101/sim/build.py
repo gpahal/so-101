@@ -26,10 +26,9 @@ DEFAULTS = {
     # the jar at 0.3 to 0.45.
     "jaw_friction": 0.35,
     "table_friction": 0.4,  # the mat, against the block and the jar: a smooth cloth mouse pad. `so101 sim physics` fits this from real pushes
-    # The mat's top above the surface the arm's base stands on: a thin mat on the same table. The joint
-    # offsets are fitted so that every demo's grasp lands on it. Set to "fit", it's fitted with the top
-    # camera instead, from how big the block looks, which the demos can't pin: held lower, the arm's outline
-    # fits about as well. So it isn't the default.
+    # The mat's top above the table the arm's base stands on; the joint offsets are fitted so every demo's
+    # grasp lands on it. "fit" fits it with the top camera, from the block's size in the picture, which the
+    # demos can't pin (held lower, the arm's outline fits about as well), so it isn't the default.
     "mat_height": 0.003,
     # The jar. Its diameter and tinted band are fitted to the top camera's frames unless jar_diameter is set.
     "jar_diameter": None,
@@ -56,7 +55,7 @@ BLOCK_PLACE_NAMES = {
     "seen": "the top camera's places", "by_wrist": "the wrist camera's", "seen_clear": "the top camera's moved clear of the jaws",
     "by_wrist_clear": "the wrist camera's moved clear",
 }  # fmt: skip
-TABLE = {"x": [-0.12, 0.42], "y": [-0.45, 0.1], "texel": 0.001}  # replaced by the edges the top camera sees
+TABLE = {"x": [-0.12, 0.42], "y": [-0.45, 0.1], "texel": 0.001}  # its far x and left y come from the mat's edges the top camera sees (fit.table_edges)
 
 
 def joint_limits(calibration_file: Path) -> dict[str, list[float]]:
@@ -116,7 +115,7 @@ def build(
 
     if options["mat_height"] != "fit" and not isinstance(options["mat_height"], (int, float)):
         raise ValueError(f'mat_height in [sim] in so101.toml is {options["mat_height"]!r}: give it in metres, or "fit".')
-    # In the arm model's axes: its base's underside, which stands on the table, is 2.4 mm below its z = 0.
+    # [sim] mat_height is above the table, which in the model's axes is the base's underside.
     mat_height = None if options["mat_height"] == "fit" else round(float(options["mat_height"]) + arm.base_underside(), 4)
     offsets = options["joint_offsets_deg"]
     if offsets is not None and not (isinstance(offsets, list) and len(offsets) == 4 and all(isinstance(v, (int, float)) for v in offsets)):
@@ -466,7 +465,8 @@ def _match_softness(scene: dict, out: Path, demos: fit.Demos, held: dict, episod
 def replay(demos_root: Path, scene_dir: Path, episodes: list[int] | None, limit: float, video: Path | None) -> dict:
     """Replay real demos' commands in the sim. A sim that can't redo them can't judge a policy.
 
-    Each demo's block starts where the top camera saw it, as in `so101 sim eval`. Nothing corrects the
+    Each demo's block starts at its layout's `block`, the place the build chose by replaying, as in
+    `so101 sim eval`. Nothing corrects the
     arm along the way as a policy would, so a few millimetres' error in the block's place or the arm's
     path can cost a grasp: expect most demos to succeed, not all.
     """

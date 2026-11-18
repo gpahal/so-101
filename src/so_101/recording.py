@@ -1,5 +1,5 @@
-"""Shared by `so101 record`, its dry run and `serve`: the lerobot-record command line, and the session and run
-records."""
+"""Shared by `so101 record`, its dry run, `sim nudge`, `serve` and `run`: the lerobot-record command line, and
+the session and run records."""
 
 import json
 import platform
@@ -107,7 +107,7 @@ def run_manifest(
     policy: dict,
     image_sizes: dict[str, tuple[int, int]],
 ) -> dict:
-    """Everything a `so101 serve` run ran with: a session's record, plus how the arm was driven and
+    """Everything a `serve` or `run` run ran with: a session's record, plus how the arm was driven and
     `policy`: its type, repo, revision, commit, action steps, and whether it ran here or remotely; for a
     model `train --target local` saved, `checkpoint` is its folder, and repo and revision are None. For a
     remote run, `so101-control` adds the checkpoint the server admitted it to (`artifact_identity`), and

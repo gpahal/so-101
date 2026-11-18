@@ -14,8 +14,7 @@ Pure: it keeps its own list and touches nothing.
 
 from dataclasses import dataclass, field
 
-# A check due exactly at a tick is sent on it. The live clock sums real tick gaps and the replay counts frames,
-# so without the slack one of them could see a check a tick later by rounding.
+# A check due exactly at a tick is sent on it: without the slack, float rounding in t + after_close_s could put it a tick later.
 SLACK_S = 1e-9
 
 

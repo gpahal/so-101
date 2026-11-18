@@ -1,6 +1,7 @@
-"""Real pixels for the simulated cameras: the arm in the top camera's picture, taken from the demos.
+"""Real pixels for the simulated cameras, from the demos: the arm in the top camera's picture (`ArmPhotos`)
+and the wrist camera's whole view (`WristPhotos`).
 
-A rendered arm has the right outline but none of the real one's cables, print lines, holes and shading,
+For the top camera: a rendered arm has the right outline but none of the real one's cables, print lines, holes and shading,
 and a policy trained on real frames reads those. The top camera never moves, so how the arm looks
 depends only on its joints, and the demos hold tens of thousands of real frames of it. For the pose
 being drawn, the nearest of those frames is found, and each of the drawn arm's pixels takes the colour
@@ -30,7 +31,6 @@ MARGIN = 12.0  # pixels round the drawn arm that may show more of the real one
 REGISTER_REACH = 45.0  # pixels: further off than this, a patch of the right colour is something else
 # Pixels round the real block's red that are still its dark, shaded edge, and must not be read as mat.
 BLOCK_EDGE = 9
-BLOCK_PATCH = True  # a block the frame can't paint spot by spot gets the frame's real block, scaled onto it
 LINKS = arm.MOVING_BODIES
 
 
@@ -338,8 +338,9 @@ class WristPhotos:
         seen &= np.where(block, reads_red, ~near_red)
         patch = None
         if block.any() and seen[block].mean() < WHOLE_BLOCK:
+            # A block the frame can't paint spot by spot gets the frame's real block, scaled onto it.
             seen[block] = False
-            patch = self._block_patch(real, red, rows[block], columns[block]) if BLOCK_PATCH else None
+            patch = self._block_patch(real, red, rows[block], columns[block])
         # The jaws are fixed to the camera, so they're read from the very pixels they're drawn at, with the
         # opening of the nearest frame, which is rarely more than a pixel different.
         jaws = (part == LINKS.index("gripper")) | (part == LINKS.index("moving_jaw_so101_v1"))

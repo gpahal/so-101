@@ -106,8 +106,9 @@ class Task:
         return path
 
     def policy_commit(self, revision: str | None, policy_type: str, skills: bool = False) -> str:
-        """The Hub commit `revision` (main without one) of the model names now: a run reads the model's config,
-        its skills build and its checkpoint at this one commit, so a push to main meanwhile can't mix two models."""
+        """The Hub commit `revision` (main without one) of the model names when the run starts: a run reads the
+        model's config, its skills build and its checkpoint at this one commit, so a push to main meanwhile can't
+        mix two models."""
         from huggingface_hub import HfApi
         from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
 

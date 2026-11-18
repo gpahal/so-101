@@ -4,16 +4,15 @@
 # meaning change, because each run's events record the versions they ran with. A change to how the
 # detector reads them raises `RUN_LABEL_VERSION` (src/so_101/skills.py) instead, since it can move a run's labels.
 #
-# The numbers were fitted offline on 150 recorded ACT and pi0.5 attempts from the first, 5-spot demos
-# (docs/supervisor.md), and scored on the same attempts. Those recordings are deleted, and the policies
-# trained on the new demos fail in their own ways: refit every number on new serve runs before trusting it.
+# The numbers aren't scored on failures of the current policies: refit them on serve and run runs
+# (`so101-failbench candidates` replays each attempt through the detector) before trusting them.
 
 # What a close, a carry and a release are. A skills build cuts demos at these events.
 [gripper]
 version = 1
 closed_below = 25.0        # a close is the gripper falling below this
 carry_open_above = 12.0    # a close carries when the elbow then moves carry_elbow_deg with the gripper above this
-carry_elbow_deg = 25.0     # a miss reopened after a median of 5 deg of elbow travel; a real grasp moved 36
+carry_elbow_deg = 25.0     # degrees of elbow travel after a close that count as carrying the block
 hold_band = [16.5, 22.0]   # a held block keeps the gripper here (18 to 19 on this arm); after a person
                            # moves the arm, jaws above it mean no block is held
 hold_steady = 2.0          # within this of where it was, to count as holding steady

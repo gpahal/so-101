@@ -3,8 +3,8 @@
 - **Event check** (after a close, after a release): the decision model and the chat model get the same
   frames, as two calls the layer sends at the same time. After a close, a miss needs both sure it's
   wrong (`both_wrong`); after a release, the decision model's answer stands when it's sure, the chat
-  model's when only it is (`combine`), and success needs both, each under its own cutoff (`success`). `decided` says when the
-  answers in so far settle a check, so a sure answer doesn't wait for the other.
+  model's when only it is (`combine`), and success needs both, each under its own cutoff (`success`).
+  `decided` says when the answers in so far settle a check, so a sure answer doesn't wait for the other.
 - **Watch check** (when a stuck rule holds the arm): the decision model, with each camera now and
   `lookback_s` before.
 - **Escalation**: a frontier chat model through OpenRouter reads a contact sheet of the attempt's closes
@@ -226,7 +226,7 @@ class Judges:
             if key == self.p.judges.escalation:
                 adapters[key] = None  # called through `escalate`, which makes its own client
                 continue
-            try:  # the layer stops waiting at answer_within_s, so a request outlasting it would only bill
+            try:
                 adapters[key] = model.adapter(timeout_s=self.p.judges.answer_within_s)
             except Exception as error:  # the SDK isn't installed, or its client refused the key
                 self.missing[key] = f"{type(error).__name__}: {error}"
@@ -258,7 +258,7 @@ class Judges:
         return f"the run has spent its ${self.p.judges.max_cost_usd:g} on checks (max_cost_usd)"
 
     def out_of_budget(self) -> str | None:
-        """Why checks no longer call their models: a call's estimate didn't fit under `max_cost_usd`, or the
+        """Why checks don't call their models: a call's estimate didn't fit under `max_cost_usd`, or the
         run has spent it. None while neither."""
         return self._why_not() if self.budget.exhausted() else None
 
@@ -309,8 +309,7 @@ class Judges:
         key = self.p.judges.escalation
         if key not in self._adapters:
             return {"error": self.missing.get(key, "not available")}
-        # Reserved before the call and settled to its cost after; a call that raises may still have been
-        # billed, so it keeps the estimate, as `ask` charges a failed call.
+        # Reserved before the call and settled after; a failed call keeps the estimate, as in `ask`.
         estimate = self.models[key].estimate
         if reason := self._reserve(estimate):
             return {"error": reason}
