@@ -28,6 +28,8 @@ The signals, in the order they can happen in one attempt:
   where a held block keeps the gripper, is never a release. Nothing after a release is a grasp: the arm is
   on its way back to rest.
 - `rule`: a stuck rule fired, once per attempt each. All but `not_released` apply only before a carry.
+  `chatter` counts the gripper's crossings of `closed_below` from the attempt's first close on, so jaws that
+  approach shut and open once for the grasp don't count that opening.
 """
 
 from collections import deque
@@ -126,7 +128,11 @@ class Detector:
         closed_below = p.gripper.closed_below
         prev = self._last_g
         self._last_g = g
-        if prev is not None and (prev < closed_below) != (g < closed_below):
+        # Chatter counts crossings from the attempt's first close on (this tick's included). The policies keep
+        # the jaws shut on the way to the block, so the crossing that opens them for the grasp isn't a flicker:
+        # counted, it made one missed grasp (open, close, reopen, close) fire chatter on an attempt that then
+        # carried and placed the block.
+        if prev is not None and (prev < closed_below) != (g < closed_below) and (self.closes or g < closed_below):
             self._crossings.append(t)
         while self._crossings and self._crossings[0] < t - p.rules.chatter_within_s:
             self._crossings.popleft()

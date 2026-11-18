@@ -53,6 +53,7 @@ OVERLOAD = 32
 GRIPPER_TRIPPED = ("The gripper's overload protection tripped: it gripped above 25% load for 2 s, as a firm grasp "
                    "does. It now grips at 20% force, and the attempt carries on. If it stops opening, switch the "
                    "arm's power off and on at rest.")
+GRIPPER = "gripper.pos"  # the gripper's key in a goal, which `Arm.floored` raises to `[control] gripper_floor`
 GRIP_LOG_PCT = 20.0  # the gripper's load, in %, above which each motor read logs a gripper_load event
 # Feetech names five alarm bits (`scan.ERROR_BITS`), and only those are protections. Another bit, as
 # the 0x10 seen on the elbow and shoulder_lift with no LED and no torque cut (unloading_condition 44),
@@ -144,17 +145,33 @@ class Arm:
     written through the follower's own `send_action` without that check: under the wrapper's lock,
     through the same step cap, and still refused by the motor bus when its own port is closed. That
     keeps the arm held after a camera fault, and lets Reset drive it to rest.
+
+    Every goal's gripper is raised to `gripper_floor` first (`floored`): the policy's, Teleop's, a
+    playback's, a hold's and the way to rest. Only a goal that must be the measured pose, the power-loss
+    tracking (`Follower._track`), goes without it. The recorded goal is the floored one, and the policy's
+    own action stays in `control.policy_action`.
     """
 
-    def __init__(self, robot) -> None:
+    def __init__(self, robot, gripper_floor: float = 0.0) -> None:
         self.robot = robot
+        self.gripper_floor = gripper_floor  # `[control] gripper_floor`; 0 sends every gripper goal as given
         self.goal: dict[str, float] | None = None
         self.present: dict[str, float] = {}
 
-    def send_action(self, action: dict) -> dict:
-        sent = self._write(action)
+    def send_action(self, action: dict, floor: bool = True) -> dict:
+        """Send `action`, with its gripper goal raised to `gripper_floor` unless `floor` is False."""
+        sent = self._write(self.floored(action) if floor else action)
         self.goal = {key: float(value) for key, value in sent.items()}
         return sent
+
+    def floored(self, action: dict) -> dict:
+        """`action` with a gripper goal under `gripper_floor` raised to it. The jaws stop against each other
+        just above 1 on this arm, and every goal below the stop (the policies close to about 0.4 on their way to
+        the block and back) stalls the gripper at about 96% load, which heats it and trips its overload."""
+        value = action.get(GRIPPER)
+        if self.gripper_floor and value is not None and float(value) < self.gripper_floor:
+            return {**action, GRIPPER: self.gripper_floor}
+        return action
 
     def _write(self, action: dict) -> dict:
         """Send `action` through the follower's step cap, whether or not its cameras are connected."""
@@ -191,10 +208,10 @@ class Follower:
 
     def __init__(self, robot, present: dict[str, float], clock: Callable[[], float],
                  say: Callable[[str], None], previews: Previews | None,
-                 log: Callable[..., None] = lambda type_, **fields: None) -> None:
+                 log: Callable[..., None] = lambda type_, **fields: None, gripper_floor: float = 0.0) -> None:
         self.robot = robot
         self.inner = robot.inner
-        self.arm = Arm(robot)
+        self.arm = Arm(robot, gripper_floor)
         self.keys = tuple(present)  # the joints, in the order `observe` keeps them
         self.arm.present = present  # what a hold before the first tick keeps
         self.clock = clock
@@ -462,8 +479,8 @@ class Follower:
         re-aiming: a powered joint under load settles a little below its goal, and aiming at where it
         settled would lower the arm a little every tick. Once the power is back, turn the torque on
         there explicitly."""
-        if self.limp:
-            self.arm.send_action(dict(self.present))
+        if self.limp:  # where the arm is, the gripper too: no floor, which would move the jaws when the power returns
+            self.arm.send_action(dict(self.present), floor=False)
         else:
             self.arm.hold()
         if self.power_back:

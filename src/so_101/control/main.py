@@ -517,6 +517,7 @@ def control(cfg) -> None:
                                              episodes=autopilot["episodes"], reset_s=autopilot["reset_s"],
                                              link_timeout_s=s.control.link_timeout_s)
         server.controller = controller
+        controller.page_url = server.url
         server.start()
         cleanup.callback(interrupt_on_signals)
         quit_on_signals(controller.submit)
@@ -537,6 +538,8 @@ def control(cfg) -> None:
             print(awake, flush=True)
         if autopilot:
             print(f"Ready. The autopilot makes {autopilot['episodes']} attempt(s), {autopilot['reset_s']:g} s apart. "
+                  f"It starts and ends attempts only while a control page is in control: open {server.url} and take "
+                  "control there. Without one, start each attempt with r and end it with the right arrow yourself. "
                   "Your Pause, Resume, Rewind, Teleop or Reset takes over the attempt it's in, and Hold on the page "
                   f"keeps the next one from starting.\n{terminal.HELP}", flush=True)
         else:

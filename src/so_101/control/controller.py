@@ -207,6 +207,8 @@ class Controller:
         self.fault_since_attempt = False
         # `so101 run`'s, stepped every tick after people's commands and the link check (`_step_autopilot`).
         self.autopilot: autopilot.Autopilot | None = None
+        # The control page's address, which `main` sets once its server is up, so the autopilot's waits can name it.
+        self.page_url: str | None = None
         # The commands a person sent this tick from the terminal, a signal or the page in control, accepted or
         # refused, a Quit only when accepted, and never page_hidden (`commands.intake`), each with the attempt open
         # when it arrived, or None.
@@ -217,7 +219,7 @@ class Controller:
         self.toggle = Toggle(clock)
         self._last_tick = clock()
         self.follower = Follower(robot, rollout.positions(robot, rest_pose), clock, self._say,
-                                  self.previews, log=self.recorder.event)
+                                  self.previews, log=self.recorder.event, gripper_floor=control.gripper_floor)
         self.follower.mark()
         self.follower.measure_supply()
         # The status as of the last tick, and the page in control then: replaced whole, in one
@@ -645,13 +647,14 @@ class Controller:
         cause = self._unwatched_cause()
         if cause is None:
             return None
+        page = f" ({self.page_url})" if self.page_url else ""
         if self.link.client is None:
-            return ("No control page is in control, so the autopilot moves nothing unwatched. Take control on the "
-                    "page, and the next attempt starts the run's reset time (--reset-time), at least link_timeout_s "
-                    "+ 0.5 s, after that; r at the robot's terminal starts it now.")
+            return (f"No control page is in control, so the autopilot moves nothing unwatched. Open the page{page} and "
+                    "take control there, and the next attempt starts the run's reset time (--reset-time), at least "
+                    "link_timeout_s + 0.5 s, after that; r at the robot's terminal starts it now.")
         return (f"The controlling page ({self.link.who}) is out of reach, so the autopilot starts nothing unwatched. "
-                "Bring the page back or take control on another, and the next attempt starts the run's reset time "
-                "(--reset-time), at least link_timeout_s + 0.5 s, after that; r at the robot's terminal starts it now.")
+                f"Bring the page back or take control on another{page}, and the next attempt starts the run's reset "
+                "time (--reset-time), at least link_timeout_s + 0.5 s, after that; r at the robot's terminal starts it now.")
 
     def _unwatched_cause(self) -> str | None:
         """Why no page watches the arm, as the autopilot says it hands an attempt over, or None."""

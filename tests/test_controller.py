@@ -21,7 +21,7 @@ import pandas as pd
 from fakes import (MOTORS, DeadStream, FakeCamera, FakeClock, FullDisk, NoRecorder, control, make_engine, make_follower,
                    make_leader)
 
-from so_101 import rollout
+from so_101 import rollout, settings
 from so_101.control.commands import Result
 from so_101.control.controller import Controller
 from so_101.control.follower import pose_from_steps
@@ -909,8 +909,8 @@ class LinkLossTest(RigTest):
     # on_link_loss says: this replaces the test of `states._resume`'s old refusal, which applied only to a lost
     # link with on_link_loss "pause". `states.step` now refuses the autopilot's Resume and Reset on
     # `Facts.unwatched`, and never a person's command or the autopilot's Quit.
-    NO_PAGE = ("No control page is in control, so the autopilot moves nothing unwatched. Take control on the page, and "
-               "the next attempt starts the run's reset time (--reset-time), at least link_timeout_s + 0.5 s, after "
+    NO_PAGE = ("No control page is in control, so the autopilot moves nothing unwatched. Open the page and take control "
+               "there, and the next attempt starts the run's reset time (--reset-time), at least link_timeout_s + 0.5 s, after "
                "that; r at the robot's terminal starts it now.")
     OUT_OF_REACH = ("The controlling page (100.64.0.2) is out of reach, so the autopilot starts nothing unwatched. "
                     "Bring the page back or take control on another, and the next attempt starts the run's reset "
@@ -957,6 +957,14 @@ class LinkLossTest(RigTest):
             self.assert_watch_rule(rig, self.OUT_OF_REACH)
             self.assertEqual(rig.command("resume", source="autopilot"), Result("resume", False, self.OUT_OF_REACH))
 
+    def test_the_refusal_names_the_control_page_once_its_address_is_known(self) -> None:
+        from so_101.control import states
+
+        controller = self.rig.controller
+        controller.page_url = "http://100.64.0.1:8101/"
+        refused = states.step(controller.state, states.Command.RESUME, controller.facts("autopilot")).refused
+        self.assertEqual(refused, self.NO_PAGE.replace("Open the page and", "Open the page (http://100.64.0.1:8101/) and"))
+
     def test_a_fault_is_still_the_reason_given_first(self) -> None:
         from so_101.control import states
 
@@ -981,6 +989,29 @@ class LoopSafetyTest(RigTest):
             self.assertEqual(rig.status()["state"], "fault")
             rig.holds(FPS)
         self.assertTrue(rig.motors.torqued())
+
+    def test_a_gripper_goal_under_the_floor_is_raised_to_it_and_the_policy_s_own_is_recorded(self) -> None:
+        # The policy closes the empty jaws to 0.4, past where they stop (about 1.2 on the arm): every such goal
+        # stalls the gripper. The floor sends 2.0 instead; the recording keeps both.
+        floor = settings.CONTROL_SETTINGS["gripper_floor"].default
+        closing = [[*a[:5], 0.4] for a in POLICY_ACTIONS]
+        rig = self.new_rig("floor", recorded=True, actions=closing)
+        rig.start_policy(FPS)
+        gripper = rig.units(rig.goals()[-1])["gripper.pos"]
+        self.assertAlmostEqual(gripper, floor, delta=0.1, msg="the goal the gripper got")
+        rig.reset("failed")
+        frames, names = rig.frames()
+        driven = frames[frames["control.phase"] == Phase.AUTONOMOUS]
+        g = names.index("gripper.pos")
+        sent = np.stack(driven["action"].to_numpy())[:, g]
+        policy = np.stack(driven["control.policy_action"].to_numpy())[:, g]
+        self.assertTrue((policy[~np.isnan(policy)] == np.float32(0.4)).all(), "the policy's own goal")
+        self.assertGreaterEqual(sent[-FPS // 2:].min(), floor - 1e-4, "the goal sent, at the floor once it got there")
+
+        # 0 turns the floor off: the policy's goal goes through as given.
+        rig = self.new_rig("no floor", recorded=False, actions=closing, control=control(preview_fps=0, gripper_floor=0))
+        rig.start_policy(FPS)
+        self.assertLess(rig.units(rig.goals()[-1])["gripper.pos"], 1.0)
 
     def test_a_tripped_gripper_only_warns_and_its_load_is_logged_but_other_alarms_fault(self) -> None:
         rig = self.new_rig("grasp", recorded=True)

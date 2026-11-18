@@ -262,6 +262,14 @@ review_port = 8766
 # sees, at a sixth of the cameras' 30 fps, so previews over Tailscale stay light on a phone. When
 # the control loop falls under 95% of the task's fps, previews drop to half this rate, then stop.
 preview_fps = 5
+# The lowest gripper goal `serve` and `run` send, in the gripper's 0-100 units; 0 sends every goal as given.
+# The jaws stop against each other at 1.1 to 1.3 on this arm, and the trained policies close them to 0.4
+# on the way to the block and back, which stalled the gripper at about 96% load for most of each attempt
+# and took it from 49 to 56 °C over eight 3-attempt runs. 2.0 is just above the stop, so closed jaws no longer
+# push against each other; the load it leaves is not yet measured on the arm. A
+# block holds the gripper at about 18, so the squeeze on it (a goal of about 8) is unchanged. Recorded runs
+# keep the policy's own goal in control.policy_action and the floored one in action.
+gripper_floor = 2.0
 
 # The supervisor in `so101 serve` and `so101 run` (docs/supervisor.md), a policy over the policy: rules
 # on the arm's readings catch stuck attempts, and vision models check the cameras after each close and

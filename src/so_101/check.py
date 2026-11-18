@@ -747,6 +747,12 @@ def check_supervisor(report: Report, s: Settings, problem, task: str | None = No
         problem("perception", str(error), f"fix the file, or delete thresholds under [perception] in {s.path} for "
                 "the package's own")
         return
+    floor, held = s.control.gripper_floor, grasp.gripper.hold_band[0]
+    if _number(floor) and math.isfinite(floor) and floor >= held:
+        # A held block keeps the gripper in hold_band, a few points above where the jaws are told to go.
+        problem("control", f"gripper_floor = {floor:g} is at or above {held:g}, the bottom of hold_band in the grasp "
+                "thresholds: the jaws couldn't squeeze a block", f"set gripper_floor under [control] in {s.path} to "
+                "just above where the jaws close on nothing (about 1.2 on this arm), or 0 to turn it off")
     versions = (f"grasp thresholds [gripper] v{grasp.gripper.version} and [rules] v{grasp.rules.version}, "
                 f"run labels v{RUN_LABEL_VERSION}")
     if s.supervisor.mode == "off":

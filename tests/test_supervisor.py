@@ -7,6 +7,7 @@ program's own; the tests check what the rules do, not that the numbers are right
 """
 
 import dataclasses
+import math
 import os
 import tempfile
 import threading
@@ -113,11 +114,16 @@ class ProgramTest(unittest.TestCase):
             "a lookback longer than the frames kept": (text.replace("lookback_s = 2.0", "lookback_s = 9.0"),
                                                        "watch.lookback_s.*4 s"),
             "a first playback that can't reach the close": (
-                text.replace("after_close_answer_s = 1.5", "after_close_answer_s = 3.0"), "miss_rewind_s"),
+                text.replace("after_close_answer_s = 4.5", "after_close_answer_s = 6.0"), "miss_rewind_s"),
             "a first playback that reaches the close with no margin": (
-                text.replace("miss_rewind_s = [3.0, 5.0]", "miss_rewind_s = [2.5, 5.0]"), r"miss_rewind_s\[0\] is 2.5 s"),
+                text.replace("miss_rewind_s = [6.0, 8.0]", "miss_rewind_s = [5.5, 8.0]"), r"miss_rewind_s\[0\] is 5.5 s"),
             "a later playback that can't reach the close": (
-                text.replace("miss_rewind_s = [3.0, 5.0]", "miss_rewind_s = [3.0, 2.0]"), r"miss_rewind_s\[1\] is 2 s"),
+                text.replace("miss_rewind_s = [6.0, 8.0]", "miss_rewind_s = [6.0, 2.0]"), r"miss_rewind_s\[1\] is 2 s"),
+            "version 1's one success cutoff": (
+                text.replace("success_chat_below = 0.1", "success_chat_below = 0.1\nsuccess_p_wrong = 0.1"),
+                "judges.success_p_wrong is no longer read"),
+            "no success cutoff for the decision model": (
+                text.replace("success_decision_below = 0.3", ""), "judges.success_decision_below"),
             "no hold deadline": (text.replace("hold_deadline_s = 5.0", ""), "timing.hold_deadline_s"),
         }
         with tempfile.TemporaryDirectory() as folder:
@@ -161,6 +167,21 @@ class DetectorTest(unittest.TestCase):
         trace = Trace().to(2, pan=20, gripper=30)
         for _ in range(3):
             trace.to(0.3, gripper=20).to(0.3, gripper=30)
+        self.assertIn("rule:chatter", kinds(trace.run(Detector(GRASP))))
+
+    def test_jaws_that_approach_shut_and_miss_once_are_not_chatter(self) -> None:
+        # As pi0.5 did in a run whose block it then placed: jaws shut (1.3) on the way, opened for the grasp, a
+        # brief close (22.7), open again, then the grasp. The opening is the first crossing, before any close;
+        # counted, it made four in 1.7 s.
+        trace = Trace(pose(gripper=1.3)).to(6, pan=20).to(0.2, gripper=27).to(0.1, gripper=22.7)
+        trace.to(0.2, gripper=39).to(1.0).to(0.3, gripper=18).to(2, elbow=40)
+        self.assertEqual(kinds(trace.run(Detector(GRASP))), ["close", "regrasp", "close", "carry"])
+
+    def test_after_a_close_a_flicker_is_still_chatter(self) -> None:
+        # The same approach, but after the first close the jaws flicker across the line: chatter fires.
+        trace = Trace(pose(gripper=1.3)).to(6, pan=20).to(0.2, gripper=30).to(0.1, gripper=20)
+        for _ in range(2):
+            trace.to(0.3, gripper=30).to(0.3, gripper=20)
         self.assertIn("rule:chatter", kinds(trace.run(Detector(GRASP))))
 
     def test_standing_still_is_frozen_but_waiting_for_the_policy_is_not(self) -> None:
@@ -462,6 +483,16 @@ class JudgesTest(unittest.TestCase):
         self.assertTrue(J.success(PROGRAM, v(0.02), v(0.05)))
         self.assertFalse(J.success(PROGRAM, v(0.02), v(0.3)))
         self.assertFalse(J.success(PROGRAM, v(0.02), J.Verdict("x", error="down")))
+
+    def test_success_holds_each_judge_to_its_own_cutoff(self) -> None:
+        # Jev answered 0.16 to 0.47 on blocks plainly in the jar, Gemini 0.00 to 0.01: each has its own cutoff.
+        v = lambda p: J.Verdict("x", p_wrong=p)  # noqa: E731
+        decision, chat = PROGRAM.judges.success_decision_below, PROGRAM.judges.success_chat_below
+        self.assertLess(chat, decision)
+        self.assertTrue(J.success(PROGRAM, v(decision - 0.05), v(chat - 0.05)))
+        self.assertFalse(J.success(PROGRAM, v(decision + 0.05), v(0.0)), "the decision model over its cutoff")
+        self.assertFalse(J.success(PROGRAM, v(0.0), v(chat + 0.05)), "the chat model over its own, though under the other's")
+        self.assertFalse(J.success(PROGRAM, J.Verdict("x", error="down"), v(0.0)))
 
     def test_checks_stop_at_the_cost_cap(self) -> None:
         program = dataclasses.replace(PROGRAM, judges=dataclasses.replace(PROGRAM.judges, max_cost_usd=0.0025))
@@ -795,8 +826,9 @@ def _still(p: dict, ticks: int) -> Trace:
 
 
 def miss() -> Trace:
-    """Reach, then close on nothing and stay closed long enough for the after_close check."""
-    return Trace().to(2, pan=20).to(0.5, gripper=10).to(1.5)
+    """Reach, then close on nothing and stay closed long enough for the after_close check. The reach is long
+    enough that the first playback (miss_rewind_s[0]) goes back only into it, to jaws still open."""
+    return Trace().to(max(2.0, FIRST_S - 1.0), pan=30).to(0.5, gripper=10).to(1.5)
 
 
 class LayerTest(unittest.TestCase):
@@ -813,6 +845,7 @@ class LayerTest(unittest.TestCase):
     def test_a_miss_plays_back_the_policy_s_motion_then_hands_the_arm_back(self) -> None:
         h = Harness("act", {"after_close": 0.95})
         h.feed(miss(), until=h.rewinding)
+        h.through_playback()
         h.settle()
         self.assertEqual(h.driver.calls, ["run", "pause", "run"])
         [rewind] = h.kinds("playback")
@@ -897,8 +930,13 @@ class LayerTest(unittest.TestCase):
         for late in range(round(PROGRAM.after_close_answer_s * FPS) - 3, round(PROGRAM.after_close_answer_s * FPS) + 4):
             pool = Pool(now=False)
             h = Harness("act", {"after_close": 0.95}, pool=pool, tick_s=tick_s)
-            h.feed(Trace().to(2, pan=20).to(0.5, gripper=10).to(4.0), until=lambda pool=pool: bool(pool.waiting))
-            h.feed(_still(h.pose, late), limit=late)
+            # The arm creeps on while it waits (6 deg/s), as a policy does after a miss: standing still for longer
+            # than the frozen rule's 4 s would hold the arm first, and drop the check.
+            waiting = PROGRAM.after_close_s + PROGRAM.after_close_answer_s + 1
+            h.feed(Trace().to(2, pan=20).to(0.5, gripper=10).to(waiting, pan=20 + 6 * waiting),
+                   until=lambda pool=pool: bool(pool.waiting))
+            pan = h.pose["shoulder_pan.pos"]
+            h.feed(h.here().to(late / FPS, pan=pan + 6 * late / FPS), limit=late)
             pool.run()
             h.feed(_still(h.pose, 1), limit=1)
             h.through_playback()
@@ -911,8 +949,10 @@ class LayerTest(unittest.TestCase):
     def test_the_second_miss_plays_back_further(self) -> None:
         h = Harness("act", {"after_close": 0.95})
         h.feed(miss(), until=h.rewinding)
+        h.through_playback()
         h.settle()
         h.feed(Trace().to(0.5, gripper=10).to(1.5), until=h.rewinding)  # closes on nothing again
+        h.through_playback()
         h.settle()
         self.assertEqual([d.get("rewind_s") for d in h.kinds("decision")], [FIRST_S, SECOND_S])
 
@@ -948,7 +988,8 @@ class LayerTest(unittest.TestCase):
 
     def test_a_sure_wrong_waiting_on_a_judge_that_hangs_is_dropped_in_time(self) -> None:
         h = Harness("act", {"after_close": 0.95}, models={"gemini-3.8-flash": Hung()})
-        h.feed(miss().to(2))
+        # The arm creeps on (8 deg/s) past the verdict's time, so the frozen rule doesn't hold it first.
+        h.feed(miss().to(PROGRAM.after_close_answer_s + 1, pan=30 + 8 * (PROGRAM.after_close_answer_s + 1)))
         self.assertEqual(h.driver.calls, ["run"], "never played back")
         [check] = [c for c in h.kinds("check") if c["moment"] == "after_close"]
         self.assertEqual(check["stale"], "too_old")
@@ -1531,8 +1572,13 @@ class InServeTest(unittest.TestCase):
         from so_101.data import Run
 
         # Open the jaws while sweeping the pan, then close them on nothing and stay there. The sweep is long
-        # enough that the second playback has more motion to undo than the first undid.
-        opened = [{**START_POSE, "shoulder_pan.pos": i / 8, GRIPPER: min(10.0 + 2 * i, 50.0)} for i in range(1, 161)]
+        # enough that the second playback has more motion to undo than the first undid, and short enough that
+        # the no_carry rule (14 s of the policy's time) doesn't hold the arm before the third miss. The pan
+        # swings 15 deg each way every 2 s, never slow for long, so the hover rule (jaws open and slow for 5 s)
+        # doesn't hold it either.
+        sweep = round((FIRST_S + 4) * FPS)
+        opened = [{**START_POSE, "shoulder_pan.pos": 15 * math.sin(math.pi * i / FPS), GRIPPER: min(10.0 + 2 * i, 50.0)}
+                  for i in range(1, sweep + 1)]
         closed = [{**opened[-1], GRIPPER: 50.0 - 4 * i} for i in range(1, 11)]
         actions = [[a[k] for k in START_POSE] for a in opened + closed]
         made = []

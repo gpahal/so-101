@@ -231,6 +231,7 @@ CONTROL_SETTINGS = {
     "port": ControlSetting(8101),
     "review_port": ControlSetting(8766),
     "preview_fps": ControlSetting(5, minimum=0, inclusive=True, why="0 turns the camera previews off"),
+    "gripper_floor": ControlSetting(2.0, minimum=0, inclusive=True, why="0 turns the floor off"),
 }
 
 
@@ -260,6 +261,9 @@ class Control:
     port: int
     review_port: int  # the reviewer page's (`so101 review`), which follows `bind` too
     preview_fps: float
+    # The lowest gripper goal `serve` and `run` send, in the gripper's 0-100 units: the jaws stop against each
+    # other at about 1.2 on this arm, and a goal below that stalls the gripper at about 96% load. 0 turns it off.
+    gripper_floor: float
 
 
 SUPERVISOR_MODES = ("off", "shadow", "act")

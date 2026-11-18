@@ -3,7 +3,7 @@
 - **Event check** (after a close, after a release): the decision model and the chat model get the same
   frames, as two calls the layer sends at the same time. After a close, a miss needs both sure it's
   wrong (`both_wrong`); after a release, the decision model's answer stands when it's sure, the chat
-  model's when only it is (`combine`), and success needs both (`success`). `decided` says when the
+  model's when only it is (`combine`), and success needs both, each under its own cutoff (`success`). `decided` says when the
   answers in so far settle a check, so a sure answer doesn't wait for the other.
 - **Watch check** (when a stuck rule holds the arm): the decision model, with each camera now and
   `lookback_s` before.
@@ -102,7 +102,7 @@ def decided(outcome, program: Program, decision: Verdict | None, chat: Verdict |
     """Whether `outcome(program, decision, chat)` is settled by the answers in so far: the same whatever a
     judge still out (None) answers, or fails to."""
     j = program.judges
-    marks = sorted({0.0, 1.0, j.sure_ok_below, j.sure_wrong_above, j.success_p_wrong})
+    marks = sorted({0.0, 1.0, j.sure_ok_below, j.sure_wrong_above, j.success_decision_below, j.success_chat_below})
     points = [*marks, *((a + b) / 2 for a, b in zip(marks, marks[1:], strict=False))]
     fills = [None, *(Verdict("?", p_wrong=p) for p in points)]
     seen = {outcome(program, d, c) for d in ([decision] if decision is not None else fills)
@@ -111,9 +111,11 @@ def decided(outcome, program: Program, decision: Verdict | None, chat: Verdict |
 
 
 def success(program: Program, decision: Verdict | None, chat: Verdict | None) -> bool:
-    """The after_release check calls the task done only when both judges answered, both under `success_p_wrong`."""
-    limit = program.judges.success_p_wrong
-    return all(v is not None and v.p_wrong is not None and v.p_wrong < limit for v in (decision, chat))
+    """The after_release check calls the task done only when both judges answered, each under its own cutoff:
+    `success_decision_below` for the decision model, `success_chat_below` for the chat model."""
+    j = program.judges
+    return all(v is not None and v.p_wrong is not None and v.p_wrong < limit
+               for v, limit in ((decision, j.success_decision_below), (chat, j.success_chat_below)))
 
 
 def jpeg(frame) -> bytes:
