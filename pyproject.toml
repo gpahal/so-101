@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The simulator: `uv sync --extra sim`. Pinned because LeRobot's SO-101 env is built on this version.
-sim = ["mujoco==3.3.7", "scipy"]
+# The simulator: `uv sync --extra sim`. Pinned, because a MuJoCo release can change the model the sim builds and so its scores.
+sim = ["mujoco==4.0.1", "scipy"]
 
 [project.scripts]
 so101 = "so_101.cli:main"
@@ -33,7 +33,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 failbench = [
-    "google-genai>=3.3",
-    "openai>=3.51",
+    "google-genai>=3.5",
+    "openai>=3.54",
     "typesafe-sdk>=0.7.5",
 ]
